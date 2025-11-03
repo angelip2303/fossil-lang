@@ -1,0 +1,19 @@
+open Data.Csv as Csv
+open Random as Random
+
+type Person = Csv<"people.csv">
+let people = Person.load "people.csv"
+
+type PersonWithAge = {
+    name: string,
+    age: number
+}
+
+let peopleWithAge =
+    people
+        |> map (fun person -> {
+            name = person.name,
+            age = Random.int 0 100
+        } :> PersonWithAge)
+
+Csv.write peopleWithAge "people_with_age.csv"

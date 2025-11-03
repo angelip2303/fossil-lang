@@ -1,0 +1,14 @@
+type Person = Csv<"people.csv">
+type PersonWithAge = ShEx<"people.shexc", "PersonWithAge">
+
+let people = Person.load "people.csv"
+
+let peopleWithAge =
+    people
+        |> map (fun person -> {
+                foaf.name = person.name
+                foaf.age = Random.int 0 100
+            } :> PersonWithAge)
+        |> Entity.withId(iri "http://example.com/people/{_.id}")
+
+Rdf.write peopleWithAge "people_with_age.rdf"

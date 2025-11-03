@@ -1,0 +1,23 @@
+[book]
+authors = ["Ángel Iglesias Préstamo"]
+language = "en"
+multilingual = false
+src = "src"
+title = "ikigai-core"
+site-url = "/docs/"
+
+[output.html.print]
+enable = false
+
+[output.html]
+no-section-label = true
+git-repository-url = ""
+git-repository-icon = "fa-github"
+additional-css = ["theme/pagetoc.css", "theme/highlight.css"]
+additional-js = [
+    "turtle.js",
+    "shexc.js",
+    "sparql.js",
+    "init_highlight_on_load.js", # This is required as the last one after the custom highlight files to restart highlight
+    "theme/pagetoc.js",
+]
