@@ -6,7 +6,7 @@ pub struct RandomInt;
 
 impl RuntimeFunction for RandomInt {
     fn name(&self) -> &str {
-        "Random.int"
+        "Random.next"
     }
 
     fn ty(&self) -> Type {

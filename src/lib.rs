@@ -102,10 +102,10 @@ pub fn compile(source: &str) -> error::Result<()> {
         .repeated()
         .collect::<Vec<_>>();
 
-    let stmts = parser
-        .parse(tokens.as_slice())
-        .into_result()
-        .map_err(|_| todo!())?;
+    let stmts = parser.parse(tokens.as_slice()).into_result().map_err(|e| {
+        println!("{:?}", e);
+        todo!()
+    })?;
 
     let ast = Arc::new(ast_ctx.ast.borrow().clone());
 
