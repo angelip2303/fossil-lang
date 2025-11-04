@@ -398,23 +398,38 @@ impl Context {
             StmtKind::Type { name, ty } => {
                 let kind = self.ast.get_type(*ty).kind.clone();
 
-                match kind {
+                let ty = match kind {
                     TypeKind::Provider(provider_path, args) => {
-                        let ty = self.process_type_provider(*name, &provider_path, &args)?;
-                        Ok((Subst::new(), ty))
+                        let segments: Vec<&str> = provider_path
+                            .iter()
+                            .map(|id| self.ast.get_name(*id))
+                            .collect();
+
+                        let provider = match self.globals.modules.resolve(&segments) {
+                            Some(crate::module::Lookup::Provider(p)) => p,
+                            _ => todo!("provider not found"),
+                        };
+
+                        let name = self.ast.get_name(*name);
+                        let module = provider.generate_module(name, &self.ast, &args)?;
+
+                        self.globals.modules.register(module);
+
+                        provider.provide_type(&self.ast, &args)?
                     }
-                    _ => {
-                        let ty = self.resolve_type(*ty)?;
-                        self.type_env.insert(
-                            *name,
-                            PolyType {
-                                vars: vec![],
-                                ty: ty.clone(),
-                            },
-                        );
-                        Ok((Subst::new(), ty))
-                    }
-                }
+
+                    _ => self.resolve_type(*ty)?,
+                };
+
+                self.type_env.insert(
+                    *name,
+                    PolyType {
+                        vars: vec![],
+                        ty: ty.clone(),
+                    },
+                );
+
+                Ok((Subst::new(), ty))
             }
 
             // a let expression is typed by:
@@ -649,11 +664,10 @@ impl Context {
 
                 let provider = match self.globals.modules.resolve(&segments) {
                     Some(crate::module::Lookup::Provider(p)) => p,
-                    Some(crate::module::Lookup::Module(m)) => m
-                        .providers
-                        .get(m.name.as_str())
-                        .ok_or_else(|| todo!("not a provider"))?
-                        .clone(),
+                    Some(crate::module::Lookup::Module(_)) => todo!("cannot use module as type"),
+                    Some(crate::module::Lookup::Function(_)) => {
+                        todo!("cannot use function as type")
+                    }
                     _ => todo!("provider not found"),
                 };
 
@@ -670,48 +684,5 @@ impl Context {
                 provider.provide_type(&self.ast, args)
             }
         }
-    }
-
-    fn process_type_provider(
-        &mut self,
-        type_name: NodeId,
-        provider_path: &[NodeId],
-        args: &[Arg],
-    ) -> Result<Type> {
-        let segments: Vec<&str> = provider_path
-            .iter()
-            .map(|id| self.ast.get_name(*id))
-            .collect();
-
-        let provider = match self.globals.modules.resolve(&segments) {
-            Some(crate::module::Lookup::Provider(p)) => p,
-            _ => todo!("provider not found"),
-        };
-
-        let type_name_str = self.ast.get_name(type_name).to_string();
-
-        // 1. Generar el tipo
-        let record_type = provider.provide_type(&self.ast, args)?;
-
-        // 2. Generar el módulo completo
-        let generated_module = provider.generate_module(&type_name_str, &self.ast, args)?;
-
-        // 3. Registrar el tipo alias en el entorno LOCAL
-        //    (para que `type Person = ...` pueda ser referenciado)
-        self.type_env.insert(
-            type_name,
-            PolyType {
-                vars: vec![],
-                ty: record_type.clone(),
-            },
-        );
-
-        // 4. Registrar el módulo en el registry GLOBAL
-        //    (esto automáticamente hace que Person.load sea resoluble)
-        self.globals.modules.register(generated_module);
-
-        // ¡NO necesitamos paso 5! El registry ya sabe resolver Person.load
-
-        Ok(record_type)
     }
 }
