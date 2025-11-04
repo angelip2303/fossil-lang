@@ -12,10 +12,6 @@ use crate::solver::Type;
 pub struct CsvProvider;
 
 impl TypeProvider for CsvProvider {
-    fn name(&self) -> &str {
-        "Csv"
-    }
-
     fn param_types(&self) -> Vec<Type> {
         vec![Type::String]
     }
@@ -31,6 +27,7 @@ impl TypeProvider for CsvProvider {
         let fields = header
             .split(',')
             .map(|col_name| {
+                // TODO: improve type inference here
                 let name = col_name.trim().to_string();
                 (name, Box::new(Type::String))
             })
@@ -54,7 +51,7 @@ impl TypeProvider for CsvProvider {
 }
 
 struct CsvLoadFunction {
-    namespace: String,
+    namespace: String, // TODO: is this needed?
     target_type: Type,
 }
 
@@ -80,6 +77,7 @@ impl RuntimeFunction for CsvLoadFunction {
             .finish()
             .map_err(|_| todo!("failed to read csv"))?;
 
+        // maybe this could be removed? Seems like a workaround
         lazyframe_to_records(lf, &self.target_type)
     }
 }

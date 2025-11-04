@@ -38,7 +38,6 @@ impl Module {
     }
 }
 
-/// Registry global de módulos
 #[derive(Clone, Default)]
 pub struct ModuleRegistry {
     modules: HashMap<String, Module>,
@@ -113,12 +112,11 @@ impl ModuleRegistry {
         use crate::providers::csv::CsvProvider;
 
         let mut csv = Module::new("Csv");
-        csv.add_provider("Csv", CsvProvider);
+        csv.add_provider("CsvProvider", CsvProvider);
         csv
     }
 }
 
-/// Resultado de lookup
 #[derive(Clone)]
 pub enum Lookup {
     Module(Module),

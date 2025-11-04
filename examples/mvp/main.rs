@@ -1,9 +1,6 @@
 fn main() -> Result<(), ikigai_core::error::CompileError> {
     let source = r#"
-        open Data.Csv as Csv
-        open Random as Random
-
-        type Person = Csv<"examples/csv/people.csv">
+        type Person = Data.Csv.CsvProvider<"examples/csv/people.csv">
         let people = Person.load "examples/csv/people.csv"
 
         type PersonWithAge = {
@@ -18,10 +15,10 @@ fn main() -> Result<(), ikigai_core::error::CompileError> {
                     age = Random.next 0 100
                 } :> PersonWithAge)
 
-        Csv.write peopleWithAge "examples/csv/people_with_age.csv"
+        Data.Csv.write peopleWithAge "examples/csv/people_with_age.csv"
     "#;
 
-    ikigai_core::compile(source)?;
+    ikigai_core::compile_and_run(source)?;
 
     Ok(())
 }
