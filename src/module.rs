@@ -25,6 +25,10 @@ impl Module {
         self.functions.insert(name, Arc::new(func));
     }
 
+    pub fn get_function(&self, name: &str) -> Option<&Arc<dyn RuntimeFunction>> {
+        self.functions.get(name)
+    }
+
     pub fn add_provider(&mut self, name: impl Into<String>, provider: impl TypeProvider + 'static) {
         self.providers.insert(name.into(), Arc::new(provider));
     }
@@ -107,11 +111,9 @@ impl ModuleRegistry {
 
     fn csv_module() -> Module {
         use crate::providers::csv::CsvProvider;
-        use crate::runtime::builtin::*;
 
         let mut csv = Module::new("Csv");
         csv.add_provider("Csv", CsvProvider);
-        csv.add_function(CsvWrite);
         csv
     }
 }

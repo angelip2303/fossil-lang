@@ -351,21 +351,13 @@ impl TypeEnv {
 
 #[derive(Clone)]
 pub struct Globals {
-    pub modules: ModuleRegistry,
-    pub generated_loads: HashMap<String, GeneratedLoad>,
-}
-
-#[derive(Clone)]
-pub struct GeneratedLoad {
-    pub type_name: String,
-    pub provider_name: String,
+    pub modules: ModuleRegistry, // Aquí van TODOS los módulos
 }
 
 impl Globals {
     pub fn new() -> Self {
         Self {
             modules: ModuleRegistry::new(),
-            generated_loads: HashMap::new(),
         }
     }
 }
@@ -404,24 +396,25 @@ impl Context {
             // * insert to the environment the type of the right-hand side of the type definition, having as a
             //   name the left-hand side of the type definition
             StmtKind::Type { name, ty } => {
-                let resolved_type = self.resolve_type(*ty)?;
+                let kind = self.ast.get_type(*ty).kind.clone();
 
-                self.type_env.insert(
-                    *name,
-                    PolyType {
-                        vars: vec![],
-                        ty: resolved_type.clone(),
-                    },
-                );
-
-                // if it is a type provider, we generate a load method for it
-                if let TypeKind::Provider(provider_path, _args) =
-                    &self.ast.clone().get_type(*ty).kind
-                {
-                    self.generate_load_method(*name, provider_path, &resolved_type)?;
+                match kind {
+                    TypeKind::Provider(provider_path, args) => {
+                        let ty = self.process_type_provider(*name, &provider_path, &args)?;
+                        Ok((Subst::new(), ty))
+                    }
+                    _ => {
+                        let ty = self.resolve_type(*ty)?;
+                        self.type_env.insert(
+                            *name,
+                            PolyType {
+                                vars: vec![],
+                                ty: ty.clone(),
+                            },
+                        );
+                        Ok((Subst::new(), ty))
+                    }
                 }
-
-                Ok((Subst::new(), resolved_type))
             }
 
             // a let expression is typed by:
@@ -461,16 +454,18 @@ impl Context {
                 let segments: Vec<&str> =
                     segments.iter().map(|id| self.ast.get_name(*id)).collect();
 
-                // TODO: what does it happens if there is more deeply neseted modules?
                 let ty = match self.globals.modules.resolve(&segments) {
                     Some(crate::module::Lookup::Function(f)) => f.ty(),
-                    Some(crate::module::Lookup::Module(m)) => m
-                        .functions
-                        .get(m.name.as_str())
-                        .ok_or_else(|| todo!("provider not found"))?
-                        .clone()
-                        .ty(),
-                    _ => Type::Unit,
+                    Some(crate::module::Lookup::Module(_)) => {
+                        todo!("Cannot use module as value")
+                    }
+                    Some(crate::module::Lookup::Provider(_)) => {
+                        todo!("Cannot use provider as value")
+                    }
+                    None => {
+                        let path_str = segments.join(".");
+                        todo!("Unresolved path: {}", path_str)
+                    }
                 };
 
                 return Ok((Subst::new(), ty));
@@ -672,49 +667,51 @@ impl Context {
                     arg_ty.mgu(exp_ty)?;
                 }
 
-                provider.provide(&self.ast, args)
+                provider.provide_type(&self.ast, args)
             }
         }
     }
 
-    // TODO: maybe we can just generate a plain function, no more than that
-    fn generate_load_method(
+    fn process_type_provider(
         &mut self,
         type_name: NodeId,
         provider_path: &[NodeId],
-        ty: &Type,
-    ) -> Result<()> {
-        let path_segments: Vec<&str> = provider_path
+        args: &[Arg],
+    ) -> Result<Type> {
+        let segments: Vec<&str> = provider_path
             .iter()
             .map(|id| self.ast.get_name(*id))
             .collect();
 
+        let provider = match self.globals.modules.resolve(&segments) {
+            Some(crate::module::Lookup::Provider(p)) => p,
+            _ => todo!("provider not found"),
+        };
+
         let type_name_str = self.ast.get_name(type_name).to_string();
-        let load_name = format!("{}.load", type_name_str);
-        let load_name_id = self.ast.add_name(&load_name); // TODO: this is not compiling
 
-        let load_type = Type::Func(
-            Box::new(Type::String),
-            Box::new(Type::List(Box::new(ty.clone()))),
-        );
+        // 1. Generar el tipo
+        let record_type = provider.provide_type(&self.ast, args)?;
 
+        // 2. Generar el módulo completo
+        let generated_module = provider.generate_module(&type_name_str, &self.ast, args)?;
+
+        // 3. Registrar el tipo alias en el entorno LOCAL
+        //    (para que `type Person = ...` pueda ser referenciado)
         self.type_env.insert(
-            load_name_id,
+            type_name,
             PolyType {
                 vars: vec![],
-                ty: load_type,
+                ty: record_type.clone(),
             },
         );
 
-        // TODO: instead of doing this why don't just generate a load function with the namespace of the type: Person.load
-        self.globals.generated_loads.insert(
-            load_name,
-            GeneratedLoad {
-                type_name: type_name_str,
-                provider_name: path_segments.join("."),
-            },
-        );
+        // 4. Registrar el módulo en el registry GLOBAL
+        //    (esto automáticamente hace que Person.load sea resoluble)
+        self.globals.modules.register(generated_module);
 
-        Ok(())
+        // ¡NO necesitamos paso 5! El registry ya sabe resolver Person.load
+
+        Ok(record_type)
     }
 }

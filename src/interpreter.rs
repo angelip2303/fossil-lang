@@ -49,29 +49,19 @@ impl Interpreter {
                 .ok_or_else(|| todo!("unbound variable")),
 
             ExprKind::Path(segments) => {
-                // TODO: this should not be necessary, we should favour everything as a function
-                // let path_str = segments
-                //     .iter()
-                //     .map(|id| self.context.ast.get_name(*id))
-                //     .collect::<Vec<_>>()
-                //     .join(".");
-
-                // if let Some(load_info) = self.context.globals.generated_loads.get(&path_str) {
-                //     // Retornar un closure que ejecutará el load
-                //     return Ok(Value::GeneratedLoad(load_info.clone()));
-                // }
-
-                // Buscar función normal
-                let segments_str: Vec<&str> = segments
+                let segments: Vec<&str> = segments
                     .iter()
                     .map(|id| self.context.ast.get_name(*id))
                     .collect();
 
-                match self.context.globals.modules.resolve(&segments_str) {
+                match self.context.globals.modules.resolve(&segments) {
                     Some(crate::module::Lookup::Function(func)) => {
                         Ok(Value::Function(func.clone()))
                     }
-                    _ => todo!("unresolved path"),
+                    _ => {
+                        let path = segments.join(".");
+                        todo!("Unresolved path: {}", path)
+                    }
                 }
             }
 
@@ -81,33 +71,6 @@ impl Interpreter {
 
                 match callee_val {
                     Value::Function(func) => func.call(vec![arg_val]),
-
-                    // TODO: generated load should not be necessary, and should be a function itself
-                    // Value::GeneratedLoad(load_info) => {
-                    //     let path = match arg_val {
-                    //         Value::String(s) => s,
-                    //         _ => todo!("expected string"),
-                    //     };
-
-                    //     // Obtener el provider
-                    //     let provider_segments: Vec<&str> =
-                    //         load_info.provider_name.split('.').collect();
-
-                    //     let provider =
-                    //         match self.context.globals.modules.resolve(&provider_segments) {
-                    //             Some(crate::module::Lookup::Provider(p)) => p,
-                    //             Some(crate::module::Lookup::Module(m)) => m
-                    //                 .providers
-                    //                 .get(m.name.as_str())
-                    //                 .ok_or_else(|| todo!("provider not found"))?
-                    //                 .clone(),
-                    //             _ => todo!("provider not found"),
-                    //         };
-
-                    //     // Ejecutar load
-                    //     let df = provider.load(&path)?;
-                    //     Ok(Value::DataFrame(df))
-                    // }
                     _ => todo!("not callable"),
                 }
             }

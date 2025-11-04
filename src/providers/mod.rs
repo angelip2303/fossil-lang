@@ -1,16 +1,15 @@
-use crate::{ast::*, error::CompileError, solver::Type};
-use polars::prelude::LazyFrame;
+use crate::{ast::*, error::Result, module::Module, solver::Type};
 
 pub mod csv;
 pub mod registry;
 
+/// The TypeProvider trait generates a whole module at compile-time
 pub trait TypeProvider: Send + Sync {
-    /// Tipos de parámetros esperados
+    fn name(&self) -> &str;
+
     fn param_types(&self) -> Vec<Type>;
 
-    /// Genera el tipo en compile-time
-    fn provide(&self, ast: &Ast, args: &[Arg]) -> Result<Type, CompileError>;
+    fn provide_type(&self, ast: &Ast, args: &[Arg]) -> Result<Type>;
 
-    /// Lee datos en runtime (para .load)
-    fn load(&self, path: &str) -> Result<LazyFrame, CompileError>;
+    fn generate_module(&self, type_name: &str, ast: &Ast, args: &[Arg]) -> Result<Module>;
 }
