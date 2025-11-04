@@ -387,8 +387,7 @@ impl Context {
     fn infer_stmt(&mut self, node_id: NodeId, tvg: &mut TypeVarGen) -> Result<(Subst, Type)> {
         match &self.ast.get_stmt(node_id).kind.clone() {
             StmtKind::Import { path, alias } => {
-                // populate the environment with the types of the module's exports
-                todo!("Implement module opening")
+                unimplemented!()
             }
 
             // when a type definition is encountered, the type inference is as follows:
@@ -458,7 +457,7 @@ impl Context {
         let kind = self.ast.get_expr(node_id).kind.clone();
 
         match &kind {
-            // a variable is typed as an instantiation of the corresponding type in the
+            // a local variable is typed as an instantiation of the corresponding type in the
             // environment
             ExprKind::Identifier(name) => match self.type_env.get(&name) {
                 Some(poly) => Ok((Subst::new(), poly.instantiate(tvg))),
@@ -578,6 +577,10 @@ impl Context {
                 Ok((s2.compose(&s1), expected.1.apply(&s2)))
             }
 
+            ExprKind::UnaryOp { op, operand } => {
+                unimplemented!()
+            }
+
             ExprKind::Pipe { left, right } => {
                 let (s1, t1) = self.infer_expr(*left, tvg)?;
                 self.type_env = self.type_env.apply(&s1);
@@ -618,7 +621,9 @@ impl Context {
                 Ok((s2.compose(&s1), annotated_ty.apply(&s2)))
             }
 
-            _ => unimplemented!(),
+            ExprKind::Error => {
+                unimplemented!()
+            }
         }
     }
 
