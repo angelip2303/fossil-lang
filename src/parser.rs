@@ -173,9 +173,9 @@ where
             postfix(
                 10,
                 just(Token::Dot).ignore_then(ident_parser(ctx)),
-                move |lhs, field, _| ctx.add_expr(ExprKind::MemberAccess { object: lhs, field }),
+                |lhs, field, _| ctx.add_expr(ExprKind::MemberAccess { object: lhs, field }),
             ),
-            infix(left(9), empty(), move |lhs, _, rhs, _| {
+            infix(left(9), empty(), |lhs, _, rhs, _| {
                 ctx.add_expr(ExprKind::Call {
                     callee: lhs,
                     arg: rhs,
@@ -183,8 +183,8 @@ where
             }),
             postfix(
                 3,
-                just(Token::Cast).ignore_then(r#type.clone()), // USA el placeholder
-                move |expr_id, target_type, _| {
+                just(Token::Cast).ignore_then(r#type.clone()),
+                |expr_id, target_type, _| {
                     ctx.add_expr(ExprKind::Cast {
                         expr: expr_id,
                         ty: target_type,
@@ -193,15 +193,15 @@ where
             ),
             postfix(
                 2,
-                just(Token::Colon).ignore_then(r#type.clone()), // USA el placeholder
-                move |expr_id, annotated_type, _| {
+                just(Token::Colon).ignore_then(r#type.clone()),
+                |expr_id, annotated_type, _| {
                     ctx.add_expr(ExprKind::TypeAnnotation {
                         expr: expr_id,
                         ty: annotated_type,
                     })
                 },
             ),
-            infix(right(1), just(Token::Pipe), move |lhs, _, rhs, _| {
+            infix(right(1), just(Token::Pipe), |lhs, _, rhs, _| {
                 ctx.add_expr(ExprKind::Pipe {
                     left: lhs,
                     right: rhs,
