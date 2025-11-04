@@ -1,11 +1,12 @@
 pub mod ast;
 pub mod const_eval;
-pub mod engine;
 pub mod error;
-pub mod functions;
+pub mod interpreter;
 pub mod lexer;
+pub mod module;
 pub mod parser;
 pub mod providers;
+pub mod runtime;
 pub mod solver;
 
 pub fn compile(source: &str) -> error::Result<()> {
@@ -27,14 +28,10 @@ pub fn compile(source: &str) -> error::Result<()> {
         .repeated()
         .collect::<Vec<_>>();
 
-    let stmts = parser.parse(tokens.as_slice()).into_result().map_err(|e| {
-        let msg = e
-            .iter()
-            .map(|err| format!("{:?}", err))
-            .collect::<Vec<_>>()
-            .join("\n");
-        error::Error::new(format!("Parse errors:\n{}", msg))
-    })?;
+    let stmts = parser
+        .parse(tokens.as_slice())
+        .into_result()
+        .map_err(|_| todo!())?;
 
     let ast = Arc::new(ast_ctx.ast.borrow().clone());
 

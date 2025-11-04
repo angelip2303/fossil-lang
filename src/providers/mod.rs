@@ -1,19 +1,16 @@
-use crate::functions::Value;
-use crate::{ast::*, error::Error, solver::Type};
+use crate::{ast::*, error::CompileError, solver::Type};
+use polars::prelude::LazyFrame;
 
 pub mod csv;
 pub mod registry;
 
-pub trait TypeProvider {
-    fn provide(&self, ast: &Ast, args: &[Arg]) -> Result<Type, Error>;
-}
+pub trait TypeProvider: Send + Sync {
+    /// Tipos de parámetros esperados
+    fn param_types(&self) -> Vec<Type>;
 
-pub trait Read {
-    type Output;
-    fn read(&self, args: &[Value]) -> Result<Self::Output, Error>;
-}
+    /// Genera el tipo en compile-time
+    fn provide(&self, ast: &Ast, args: &[Arg]) -> Result<Type, CompileError>;
 
-pub trait Write {
-    type Input;
-    fn write(&self, input: Self::Input, args: &[Value]) -> Result<(), Error>;
+    /// Lee datos en runtime (para .load)
+    fn load(&self, path: &str) -> Result<LazyFrame, CompileError>;
 }

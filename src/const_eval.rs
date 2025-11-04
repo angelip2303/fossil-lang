@@ -1,4 +1,4 @@
-use crate::{ast::*, error::Error};
+use crate::{ast::*, error::CompileError};
 
 pub struct ConstEvaluator<'a> {
     pub ast: &'a Ast,
@@ -9,7 +9,7 @@ impl<'a> ConstEvaluator<'a> {
         Self { ast }
     }
 
-    pub fn eval_to_string(&self, node_id: NodeId) -> Result<String, Error> {
+    pub fn eval_to_string(&self, node_id: NodeId) -> Result<String, CompileError> {
         match &self.ast.get_expr(node_id).kind {
             ExprKind::String(s) => Ok(s.clone()),
 
@@ -19,7 +19,7 @@ impl<'a> ConstEvaluator<'a> {
             //     Ok(format!("{}{}", l, r))
             // }
             //
-            _ => Err(Error::new("Expected compile-time string literal".into())),
+            _ => todo!("Error, expected string"),
         }
     }
 }

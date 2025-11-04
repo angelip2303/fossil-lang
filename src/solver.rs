@@ -7,8 +7,7 @@ use std::sync::Arc;
 
 use crate::ast::*;
 use crate::error::Result;
-use crate::functions::random::Int;
-use crate::providers::csv::CsvProvider;
+use crate::module::ModuleRegistry;
 
 trait Union {
     fn union(&mut self, other: &Self) -> Self;
@@ -30,7 +29,7 @@ where
 
 /// A type variable represents a type that is not constrained yet: t0, t1, t2, ....
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TypeVar(usize);
+pub struct TypeVar(pub usize);
 
 impl TypeVar {
     /// Attempt to bind a type variable to a type, returning an appropiate substitution
@@ -138,7 +137,7 @@ impl std::fmt::Display for Type {
 
 impl Type {
     /// Most general unifier, a substitution S such that S(self) is congruent to S(other)
-    fn mgu(&self, other: &Self) -> Result<Subst> {
+    pub fn mgu(&self, other: &Self) -> Result<Subst> {
         match (self, other) {
             // for functions, we find the most general unifier of the inputs, apply the resulting
             // substitution to the output, find the outputs' most general unifier, and finally
@@ -352,21 +351,21 @@ impl TypeEnv {
 
 #[derive(Clone)]
 pub struct Globals {
-    pub providers: crate::providers::registry::Registry,
-    pub builtins: crate::functions::registry::Registry,
+    pub modules: ModuleRegistry,
+    pub generated_loads: HashMap<String, GeneratedLoad>,
+}
+
+#[derive(Clone)]
+pub struct GeneratedLoad {
+    pub type_name: String,
+    pub provider_name: String,
 }
 
 impl Globals {
     pub fn new() -> Self {
-        let mut providers = crate::providers::registry::Registry::default();
-        providers.register("Csv", Arc::new(CsvProvider));
-
-        let mut builtins = crate::functions::registry::Registry::default();
-        builtins.register("Random.int", Arc::new(Int));
-
         Self {
-            providers,
-            builtins,
+            modules: ModuleRegistry::new(),
+            generated_loads: HashMap::new(),
         }
     }
 }
@@ -382,7 +381,7 @@ impl Context {
     pub fn new(globals: Globals, ast: Arc<Ast>) -> Self {
         Self {
             globals,
-            type_env: Default::default(),
+            type_env: TypeEnv::default(),
             ast,
         }
     }
@@ -405,15 +404,24 @@ impl Context {
             // * insert to the environment the type of the right-hand side of the type definition, having as a
             //   name the left-hand side of the type definition
             StmtKind::Type { name, ty } => {
-                let ty = self.resolve_type(*ty)?;
+                let resolved_type = self.resolve_type(*ty)?;
+
                 self.type_env.insert(
                     *name,
                     PolyType {
                         vars: vec![],
-                        ty: ty.clone(),
+                        ty: resolved_type.clone(),
                     },
                 );
-                Ok((Subst::new(), ty))
+
+                // if it is a type provider, we generate a load method for it
+                if let TypeKind::Provider(provider_path, _args) =
+                    &self.ast.clone().get_type(*ty).kind
+                {
+                    self.generate_load_method(*name, provider_path, &resolved_type)?;
+                }
+
+                Ok((Subst::new(), resolved_type))
             }
 
             // a let expression is typed by:
@@ -450,7 +458,22 @@ impl Context {
             },
 
             ExprKind::Path(segments) => {
-                todo!("Implement path type inference")
+                let segments: Vec<&str> =
+                    segments.iter().map(|id| self.ast.get_name(*id)).collect();
+
+                // TODO: what does it happens if there is more deeply neseted modules?
+                let ty = match self.globals.modules.resolve(&segments) {
+                    Some(crate::module::Lookup::Function(f)) => f.ty(),
+                    Some(crate::module::Lookup::Module(m)) => m
+                        .functions
+                        .get(m.name.as_str())
+                        .ok_or_else(|| todo!("provider not found"))?
+                        .clone()
+                        .ty(),
+                    _ => Type::Unit,
+                };
+
+                return Ok((Subst::new(), ty));
             }
 
             // a literal is typed as its primitive type
@@ -589,8 +612,11 @@ impl Context {
         }
     }
 
-    pub fn resolve_type(&self, type_id: NodeId) -> Result<Type> {
-        match &self.ast.get_type(type_id).kind {
+    pub fn resolve_type(&mut self, type_id: NodeId) -> Result<Type> {
+        let ast = self.ast.clone(); // TODO: this clone should be avoided
+        let ty = ast.get_type(type_id);
+
+        match &ty.kind {
             TypeKind::Unit => Ok(Type::Unit),
             TypeKind::Int => Ok(Type::Int),
             TypeKind::Bool => Ok(Type::Bool),
@@ -623,18 +649,72 @@ impl Context {
             },
 
             TypeKind::Provider(provider, args) => {
-                let provider = match provider.len() == 1 {
-                    true => self.ast.get_name(provider[0]).to_string(),
-                    _ => todo!("qualified type providers not yet supported"),
+                let segments: Vec<&str> =
+                    provider.iter().map(|id| self.ast.get_name(*id)).collect();
+
+                let provider = match self.globals.modules.resolve(&segments) {
+                    Some(crate::module::Lookup::Provider(p)) => p,
+                    Some(crate::module::Lookup::Module(m)) => m
+                        .providers
+                        .get(m.name.as_str())
+                        .ok_or_else(|| todo!("not a provider"))?
+                        .clone(),
+                    _ => todo!("provider not found"),
                 };
 
-                let plugin = match self.globals.providers.get(&provider) {
-                    Some(plugin) => plugin,
-                    None => todo!("Plugin not found"),
-                };
+                let expected = provider.param_types();
+                if args.len() != expected.len() {
+                    todo!("expected arguments do not match actual");
+                }
 
-                plugin.provide(&self.ast, args)
+                for (arg, exp_ty) in args.iter().zip(expected.iter()) {
+                    let (_, arg_ty) = self.infer_expr(arg.value, &mut TypeVarGen::new())?;
+                    arg_ty.mgu(exp_ty)?;
+                }
+
+                provider.provide(&self.ast, args)
             }
         }
+    }
+
+    // TODO: maybe we can just generate a plain function, no more than that
+    fn generate_load_method(
+        &mut self,
+        type_name: NodeId,
+        provider_path: &[NodeId],
+        ty: &Type,
+    ) -> Result<()> {
+        let path_segments: Vec<&str> = provider_path
+            .iter()
+            .map(|id| self.ast.get_name(*id))
+            .collect();
+
+        let type_name_str = self.ast.get_name(type_name).to_string();
+        let load_name = format!("{}.load", type_name_str);
+        let load_name_id = self.ast.add_name(&load_name); // TODO: this is not compiling
+
+        let load_type = Type::Func(
+            Box::new(Type::String),
+            Box::new(Type::List(Box::new(ty.clone()))),
+        );
+
+        self.type_env.insert(
+            load_name_id,
+            PolyType {
+                vars: vec![],
+                ty: load_type,
+            },
+        );
+
+        // TODO: instead of doing this why don't just generate a load function with the namespace of the type: Person.load
+        self.globals.generated_loads.insert(
+            load_name,
+            GeneratedLoad {
+                type_name: type_name_str,
+                provider_name: path_segments.join("."),
+            },
+        );
+
+        Ok(())
     }
 }
