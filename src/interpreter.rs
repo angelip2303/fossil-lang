@@ -4,6 +4,7 @@ use indexmap::IndexMap;
 
 use crate::runtime::value::Function;
 use crate::runtime::value::RecordRepr;
+use crate::runtime::value::UserFunction;
 use crate::{
     ast::*,
     error::{CompileError, Result},
@@ -64,14 +65,14 @@ impl Interpreter {
 
                 match self.context.globals.modules.resolve(&segments) {
                     Some(crate::module::Lookup::Function(func)) => {
-                        // Ok(Value::Function(Function::native(*func)))
-                        todo!()
+                        Ok(Value::Function(Function::Native(Arc::from(func))))
                     }
                     _ => Err(CompileError::UnboundVariable(segments.join("."))),
                 }
             }
 
             ExprKind::Function { param, body } => {
+                // TODO: think about this on free variables
                 let free_vars = self.find_free_vars(*body, param.name);
                 let mut captured = IndexMap::new();
 
@@ -81,7 +82,11 @@ impl Interpreter {
                     }
                 }
 
-                Ok(Value::Function(Function::user(param.name, *body, captured)))
+                Ok(Value::Function(Function::User(UserFunction {
+                    param: param.name,
+                    body: *body,
+                    env: captured,
+                })))
             }
 
             ExprKind::Call { callee, arg } => {
@@ -124,24 +129,19 @@ impl Interpreter {
 
     fn apply_function(&mut self, func: Value, arg: Value) -> Result<Value> {
         match func {
-            Value::Function(f) => {
-                if let Some(native) = f.as_native() {
+            Value::Function(f) => match f {
+                Function::Native(native) => {
                     return native.call(vec![arg]);
                 }
-
-                if let Some(uf) = f.as_user_defined() {
-                    let saved_env = std::mem::replace(&mut self.env, (*uf.env).clone());
+                Function::User(uf) => {
+                    let saved_env = std::mem::replace(&mut self.env, uf.env);
                     self.env.insert(uf.param, arg);
                     let result = self.eval_expr(uf.body)?;
                     self.env = saved_env;
 
                     return Ok(result);
                 }
-
-                Err(CompileError::ExpectedFunction(
-                    "invalid function".to_string(),
-                ))
-            }
+            },
             _ => Err(CompileError::ExpectedFunction(format!("{:?}", func))),
         }
     }

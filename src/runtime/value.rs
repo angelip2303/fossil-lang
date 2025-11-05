@@ -30,46 +30,17 @@ pub enum RecordRepr {
     Row { df: Arc<DataFrame>, idx: usize },
 }
 
-// TODO: why don't we use an enum here?
 #[derive(Clone)]
-pub struct Function {
-    native: Option<Arc<dyn RuntimeFunction>>,
-    user_defined: Option<UserFunction>,
+pub enum Function {
+    Native(Arc<dyn RuntimeFunction>),
+    User(UserFunction),
 }
 
 #[derive(Clone)]
 pub struct UserFunction {
     pub param: NodeId,
     pub body: NodeId,
-    pub env: Arc<IndexMap<NodeId, Value>>,
-}
-
-impl Function {
-    pub fn native(f: impl RuntimeFunction + 'static) -> Self {
-        Function {
-            native: Some(Arc::new(f)),
-            user_defined: None,
-        }
-    }
-
-    pub fn user(param: NodeId, body: NodeId, env: IndexMap<NodeId, Value>) -> Self {
-        Function {
-            native: None,
-            user_defined: Some(UserFunction {
-                param,
-                body,
-                env: Arc::new(env),
-            }),
-        }
-    }
-
-    pub fn as_native(&self) -> Option<&Arc<dyn RuntimeFunction>> {
-        self.native.as_ref()
-    }
-
-    pub fn as_user_defined(&self) -> Option<&UserFunction> {
-        self.user_defined.as_ref()
-    }
+    pub env: IndexMap<NodeId, Value>,
 }
 
 impl Value {

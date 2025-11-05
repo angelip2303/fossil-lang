@@ -5,6 +5,7 @@ use indexmap::IndexMap;
 
 use crate::ast::*;
 use crate::error::{CompileError, Result};
+use crate::module::Lookup;
 use crate::module::ModuleRegistry;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -333,17 +334,33 @@ impl Context {
 
         match stmt {
             StmtKind::Type { name, ty } => {
-                let ty = self.resolve_type(ty)?;
+                let resolved_type = self.resolve_type(ty)?;
+
+                // in case of a provider type, generate the module and register it
+                // TODO: maybe there is a better way to handle this
+                if let TypeKind::Provider(path, args) = self.ast.get_type(ty).kind.clone() {
+                    let segments: Vec<&str> =
+                        path.iter().map(|id| self.ast.get_name(*id)).collect();
+
+                    let provider = match self.globals.modules.resolve(&segments) {
+                        Some(Lookup::Provider(p)) => p,
+                        _ => unreachable!(),
+                    };
+
+                    let name = self.ast.get_name(name);
+                    let module = provider.generate_module(name, &self.ast, &args)?;
+                    self.globals.modules.register(module);
+                }
 
                 self.type_env.insert(
                     name,
                     PolyType {
                         vars: vec![],
-                        ty: ty.clone(),
+                        ty: resolved_type.clone(),
                     },
                 );
 
-                Ok((Subst::new(), ty))
+                Ok((Subst::new(), resolved_type))
             }
 
             StmtKind::Let { name, value } => {
@@ -383,7 +400,7 @@ impl Context {
                     segments.iter().map(|id| self.ast.get_name(*id)).collect();
 
                 let ty = match self.globals.modules.resolve(&segments) {
-                    Some(crate::module::Lookup::Function(f)) => f.ty(),
+                    Some(Lookup::Function(f)) => f.ty(),
                     _ => {
                         let path = segments.join(".");
                         return Err(CompileError::UnboundVariable(path));
@@ -551,13 +568,11 @@ impl Context {
                     .collect();
 
                 let provider = match self.globals.modules.resolve(&segments) {
-                    Some(crate::module::Lookup::Provider(p)) => p,
-                    _ => {
-                        let path = segments.join(".");
-                        return Err(CompileError::ProviderNotFound(path));
-                    }
+                    Some(Lookup::Provider(p)) => p,
+                    _ => return Err(CompileError::ProviderNotFound(segments.join("."))),
                 };
 
+                // TODO: is this the best way to check arguments? I think we could rely on signature and work as a Function
                 let expected = provider.param_types();
                 if args.len() != expected.len() {
                     return Err(CompileError::InvalidArgumentCount {
@@ -570,10 +585,6 @@ impl Context {
                     let (_, arg_ty) = self.infer_expr(arg.value, &mut TypeVarGen::new())?;
                     arg_ty.mgu(exp_ty)?;
                 }
-
-                let name = self.ast.get_name(provider_path[provider_path.len() - 1]);
-                let module = provider.generate_module(name, &self.ast, &args)?;
-                self.globals.modules.register(module);
 
                 provider.provide_type(&self.ast, &args)
             }
