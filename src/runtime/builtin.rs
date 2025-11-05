@@ -1,11 +1,15 @@
-use super::{RuntimeFunction, Value};
+use polars::prelude::*;
+
 use crate::error::Result;
-use crate::solver::{Type, TypeVar};
+use crate::solver::Type;
 
-pub struct RandomInt;
+use super::{RuntimeFunction, Value};
 
-impl RuntimeFunction for RandomInt {
+pub struct RandomNextFunction;
+
+impl RuntimeFunction for RandomNextFunction {
     fn name(&self) -> &str {
+        // TODO: the fact that we write the module name here is a potential bug, as if we change the module name, we need to change this string as well.
         "Random.next"
     }
 
@@ -24,5 +28,39 @@ impl RuntimeFunction for RandomInt {
             }
             _ => unreachable!("Type checker ensures correct types"),
         }
+    }
+}
+
+pub struct CsvWriteFunction;
+
+impl RuntimeFunction for CsvWriteFunction {
+    fn name(&self) -> &str {
+        "Csv.write"
+    }
+
+    fn ty(&self) -> Type {
+        use crate::solver::TypeVar;
+        let a = Type::Var(TypeVar(0)); // TODO: maybe we should enforce Record?
+
+        Type::Func(
+            Box::new(Type::List(Box::new(a))),
+            Box::new(Type::Func(Box::new(Type::String), Box::new(Type::Unit))),
+        )
+    }
+
+    fn call(&self, args: Vec<Value>) -> Result<Value> {
+        let data = &args[0];
+        let path = match &args[1] {
+            Value::String(s) => s.as_ref(),
+            _ => unreachable!(),
+        };
+
+        let lf = data.as_lazyframe()?;
+        let mut df = lf.collect()?;
+
+        let file = std::fs::File::create(path)?;
+        CsvWriter::new(file).finish(&mut df)?;
+
+        Ok(Value::Unit)
     }
 }

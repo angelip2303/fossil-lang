@@ -1,11 +1,11 @@
-use std::collections::HashMap;
-
+use indexmap::IndexMap;
 use polars::prelude::*;
 
 use crate::const_eval::ConstEvaluator;
 use crate::error::Result;
 use crate::module::Module;
 use crate::providers::{Arg, Ast, TypeProvider};
+use crate::runtime::value::ListRepr;
 use crate::runtime::{RuntimeFunction, Value};
 use crate::solver::Type;
 
@@ -19,17 +19,21 @@ impl TypeProvider for CsvProvider {
     fn provide_type(&self, ast: &Ast, args: &[Arg]) -> Result<Type> {
         let eval = ConstEvaluator::new(ast);
         let path = eval.eval_to_string(args[0].value)?;
+        let path = PlPath::from_str(&path);
 
-        let file = std::fs::read_to_string(&path).map_err(|_| todo!("failed to read csv"))?;
+        let mut lf = LazyCsvReader::new(path).finish()?;
+        let schema = lf.collect_schema()?;
 
-        let header = file.lines().next().ok_or_else(|| todo!("empty csv file"))?;
-
-        let fields = header
-            .split(',')
-            .map(|col_name| {
-                // TODO: improve type inference here
-                let name = col_name.trim().to_string();
-                (name, Box::new(Type::String))
+        let fields: IndexMap<String, Box<Type>> = schema
+            .iter()
+            .map(|(name, dtype)| {
+                let ty = match dtype {
+                    DataType::Boolean => Type::Bool,
+                    DataType::Int64 => Type::Int,
+                    DataType::String => Type::String,
+                    _ => Type::String, // fallback
+                };
+                (name.to_string(), Box::new(ty))
             })
             .collect();
 
@@ -39,10 +43,13 @@ impl TypeProvider for CsvProvider {
     fn generate_module(&self, type_name: &str, ast: &Ast, args: &[Arg]) -> Result<Module> {
         let record_type = self.provide_type(ast, args)?;
 
+        let eval = ConstEvaluator::new(ast);
+        let path = eval.eval_to_string(args[0].value)?;
+
         let mut module = Module::new(type_name);
 
         module.add_function(CsvLoadFunction {
-            namespace: type_name.to_string(),
+            path: path.clone(),
             target_type: record_type.clone(),
         });
 
@@ -51,7 +58,7 @@ impl TypeProvider for CsvProvider {
 }
 
 struct CsvLoadFunction {
-    namespace: String, // TODO: is this needed?
+    path: String,
     target_type: Type,
 }
 
@@ -69,127 +76,15 @@ impl RuntimeFunction for CsvLoadFunction {
 
     fn call(&self, args: Vec<Value>) -> Result<Value> {
         let path = match &args[0] {
-            Value::String(s) => s,
-            _ => unreachable!(),
+            Value::String(s) => s.as_ref(),
+            _ => &self.path,
         };
 
-        let lf = LazyCsvReader::new(PlPath::from_str(path))
-            .finish()
-            .map_err(|_| todo!("failed to read csv"))?;
+        let path = PlPath::from_str(path);
 
-        // maybe this could be removed? Seems like a workaround
-        lazyframe_to_records(lf, &self.target_type)
+        let mut lf = LazyCsvReader::new(path).finish()?;
+        let schema = lf.collect_schema()?;
+
+        Ok(Value::List(ListRepr::DataFrame { lf, schema }))
     }
-}
-
-fn lazyframe_to_records(lf: LazyFrame, target_type: &Type) -> Result<Value> {
-    let df = lf.collect().map_err(|_| todo!("failed to collect"))?;
-
-    let fields = match target_type {
-        Type::Record(fields) => fields,
-        _ => todo!("expected record type"),
-    };
-
-    let mut rows = Vec::new();
-    for idx in 0..df.height() {
-        let mut record = HashMap::new();
-
-        for (field_name, field_type) in fields {
-            let series = df
-                .column(field_name)
-                .map_err(|_| todo!("column not found"))?;
-
-            let value = match **field_type {
-                Type::String => {
-                    let s = series.str().map_err(|_| todo!("not a string column"))?;
-                    Value::String(s.get(idx).unwrap_or("").to_string())
-                }
-                Type::Int => {
-                    let i = series.i64().map_err(|_| todo!("not an int column"))?;
-                    Value::Int(i.get(idx).unwrap_or(0))
-                }
-                Type::Bool => {
-                    let b = series.bool().map_err(|_| todo!("not a bool column"))?;
-                    Value::Bool(b.get(idx).unwrap_or(false))
-                }
-                _ => todo!("unsupported field type"),
-            };
-
-            record.insert(field_name.clone(), value);
-        }
-
-        rows.push(Value::Record(record));
-    }
-
-    Ok(Value::List(rows))
-}
-
-pub fn records_to_dataframe(records: &[Value]) -> Result<DataFrame> {
-    if records.is_empty() {
-        return Ok(DataFrame::empty());
-    }
-
-    let first_record = match &records[0] {
-        Value::Record(r) => r,
-        _ => todo!("expected records"),
-    };
-
-    let mut series_map: HashMap<String, Vec<_>> = HashMap::new();
-
-    for key in first_record.keys() {
-        series_map.insert(key.clone(), Vec::new());
-    }
-
-    for record_val in records {
-        let record = match record_val {
-            Value::Record(r) => r,
-            _ => continue,
-        };
-
-        for (key, value) in record {
-            if let Some(vec) = series_map.get_mut(key) {
-                vec.push(value.clone());
-            }
-        }
-    }
-
-    let mut series_vec = Vec::new();
-    for (name, values) in series_map {
-        let series = match values.first() {
-            Some(Value::String(_)) => {
-                let strings: Vec<String> = values
-                    .iter()
-                    .map(|v| match v {
-                        Value::String(s) => s.clone(),
-                        _ => String::new(),
-                    })
-                    .collect();
-                Series::new(name.into(), strings)
-            }
-            Some(Value::Int(_)) => {
-                let ints: Vec<i64> = values
-                    .iter()
-                    .map(|v| match v {
-                        Value::Int(i) => *i,
-                        _ => 0,
-                    })
-                    .collect();
-                Series::new(name.into(), ints)
-            }
-            Some(Value::Bool(_)) => {
-                let bools: Vec<bool> = values
-                    .iter()
-                    .map(|v| match v {
-                        Value::Bool(b) => *b,
-                        _ => false,
-                    })
-                    .collect();
-                Series::new(name.into(), bools)
-            }
-            _ => continue,
-        };
-        series_vec.push(series);
-    }
-
-    Ok(DataFrame::from_iter(series_vec))
 }

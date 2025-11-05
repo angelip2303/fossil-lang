@@ -9,9 +9,7 @@ pub mod providers;
 pub mod runtime;
 pub mod solver;
 
-// src/lib.rs
-
-pub fn compile_and_run(source: &str) -> error::Result<()> {
+pub fn compile_and_run(source: &str) -> crate::error::Result<()> {
     use chumsky::prelude::*;
     use interpreter::Interpreter;
     use lexer::Token;
@@ -37,7 +35,8 @@ pub fn compile_and_run(source: &str) -> error::Result<()> {
     let stmts = parser
         .parse(tokens.as_slice())
         .into_result()
-        .map_err(|_| todo!("Parse error"))?;
+        .map_err(|_| todo!("Parse error"))
+        .unwrap();
 
     let ast = Arc::new(ast_ctx.ast.borrow().clone());
 
@@ -87,7 +86,7 @@ pub fn compile_and_run(source: &str) -> error::Result<()> {
 }
 
 // Mantener compile para solo type-checking
-pub fn compile(source: &str) -> error::Result<()> {
+pub fn compile(source: &str) -> crate::error::Result<()> {
     use chumsky::prelude::*;
     use lexer::Token;
     use logos::Logos;
@@ -102,10 +101,14 @@ pub fn compile(source: &str) -> error::Result<()> {
         .repeated()
         .collect::<Vec<_>>();
 
-    let stmts = parser.parse(tokens.as_slice()).into_result().map_err(|e| {
-        println!("{:?}", e);
-        todo!()
-    })?;
+    let stmts = parser
+        .parse(tokens.as_slice())
+        .into_result()
+        .map_err(|e| {
+            println!("{:?}", e);
+            todo!()
+        })
+        .unwrap();
 
     let ast = Arc::new(ast_ctx.ast.borrow().clone());
 

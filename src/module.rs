@@ -1,6 +1,7 @@
-use crate::{providers::TypeProvider, runtime::RuntimeFunction};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use crate::{providers::TypeProvider, runtime::RuntimeFunction};
 
 #[derive(Clone)]
 pub struct Module {
@@ -23,10 +24,6 @@ impl Module {
     pub fn add_function(&mut self, func: impl RuntimeFunction + 'static) {
         let name = func.name().split('.').last().unwrap().to_string();
         self.functions.insert(name, Arc::new(func));
-    }
-
-    pub fn get_function(&self, name: &str) -> Option<&Arc<dyn RuntimeFunction>> {
-        self.functions.get(name)
     }
 
     pub fn add_provider(&mut self, name: impl Into<String>, provider: impl TypeProvider + 'static) {
@@ -98,7 +95,7 @@ impl ModuleRegistry {
         use crate::runtime::builtin::*;
 
         let mut module = Module::new("Random");
-        module.add_function(RandomInt);
+        module.add_function(RandomNextFunction);
         module
     }
 
@@ -110,9 +107,11 @@ impl ModuleRegistry {
 
     fn csv_module() -> Module {
         use crate::providers::csv::CsvProvider;
+        use crate::runtime::builtin::CsvWriteFunction;
 
         let mut csv = Module::new("Csv");
         csv.add_provider("CsvProvider", CsvProvider);
+        csv.add_function(CsvWriteFunction);
         csv
     }
 }

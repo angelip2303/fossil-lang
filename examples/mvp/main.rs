@@ -18,7 +18,7 @@ fn main() -> Result<(), ikigai_core::error::CompileError> {
         Data.Csv.write peopleWithAge "examples/csv/people_with_age.csv"
     "#;
 
-    ikigai_core::compile_and_run(source)?;
+    ikigai_core::compile(source)?;
 
     Ok(())
 }

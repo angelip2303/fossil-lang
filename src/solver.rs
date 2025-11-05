@@ -1,64 +1,39 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::hash::Hash;
-use std::ops::Deref;
-use std::ops::DerefMut;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use indexmap::IndexMap;
+
 use crate::ast::*;
-use crate::error::Result;
+use crate::error::{CompileError, Result};
 use crate::module::ModuleRegistry;
 
-trait Union {
-    fn union(&mut self, other: &Self) -> Self;
-}
-
-impl<K, V> Union for HashMap<K, V>
-where
-    K: Clone + Eq + Hash,
-    V: Clone,
-{
-    fn union(&mut self, other: &Self) -> Self {
-        let mut result = self.clone();
-        for (key, value) in other {
-            result.entry(key.clone()).or_insert(value.clone());
-        }
-        result
-    }
-}
-
-/// A type variable represents a type that is not constrained yet: t0, t1, t2, ....
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeVar(pub usize);
 
 impl TypeVar {
-    /// Attempt to bind a type variable to a type, returning an appropiate substitution
     fn bind(&self, ty: &Type) -> Result<Subst> {
-        // check for binding a variable to itself
-        if let &Type::Var(ref var) = ty {
+        if let Type::Var(var) = ty {
             if var == self {
                 return Ok(Subst::new());
             }
         }
 
-        // the occurs check prevents illegal recursive types
         if ty.ftv().contains(self) {
-            todo!("Occurs check failed")
+            return Err(CompileError::OccursCheckFailed);
         }
 
         let mut s = Subst::new();
-        s.insert(self.clone(), ty.clone());
+        s.insert(*self, ty.clone());
         Ok(s)
     }
 }
 
 impl std::fmt::Display for TypeVar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "t({})", self.0)
+        write!(f, "'t{}", self.0)
     }
 }
 
-/// A source of unique type variables, used to generate fresh type variables
 pub struct TypeVarGen {
     supply: usize,
 }
@@ -75,103 +50,68 @@ impl TypeVarGen {
     }
 }
 
-/// A trait common to all things considered types
 trait Typed {
-    /// Find the set of free variables in a type
     fn ftv(&self) -> HashSet<TypeVar>;
-
-    /// Apply substitution to a type
     fn apply(&self, subst: &Subst) -> Self;
 }
 
-impl<'a, T> Typed for Vec<T>
-where
-    T: Typed,
-{
-    // the free variables of a vector of types is the union of the free type variables of each
-    // of the types in the vector
+impl<T: Typed> Typed for Vec<T> {
     fn ftv(&self) -> HashSet<TypeVar> {
-        self.iter()
-            .map(|t| t.ftv())
-            .fold(HashSet::new(), |set, x| set.union(&x).cloned().collect())
+        self.iter().flat_map(|t| t.ftv()).collect()
     }
 
-    // to apply a substitution to a vector of types, apply the substitution to each type in the vector
     fn apply(&self, subst: &Subst) -> Self {
         self.iter().map(|t| t.apply(subst)).collect()
     }
 }
 
-/// A monotype representing concrete types
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Type {
     Var(TypeVar),
     Unit,
-    Int,
-    String,
     Bool,
-    List(Box<Self>),
-    Func(Box<Self>, Box<Self>),
-    Record(HashMap<String, Box<Self>>),
-}
-
-impl std::fmt::Display for Type {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Type::Var(var) => write!(f, "t({})", var.0),
-            Type::Unit | Type::Int | Type::String | Type::Bool => write!(f, "{:?}", self),
-            Type::List(r#type) => write!(f, "[{}]", r#type),
-            Type::Func(arg, ret) => write!(f, "({} -> {})", arg, ret),
-            Type::Record(fields) => write!(
-                f,
-                "{{ {} }}",
-                fields
-                    .iter()
-                    .map(|(name, ty)| format!("{}: {}", name, ty))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        }
-    }
+    Int,
+    Float,
+    String,
+    List(Box<Type>),
+    Func(Box<Type>, Box<Type>),
+    Record(IndexMap<String, Box<Type>>),
 }
 
 impl Type {
-    /// Most general unifier, a substitution S such that S(self) is congruent to S(other)
-    pub fn mgu(&self, other: &Self) -> Result<Subst> {
+    pub fn mgu(&self, other: &Type) -> Result<Subst> {
         match (self, other) {
-            // for functions, we find the most general unifier of the inputs, apply the resulting
-            // substitution to the output, find the outputs' most general unifier, and finally
-            // compose the two resulting substitutions
             (Type::Func(arg1, ret1), Type::Func(arg2, ret2)) => {
-                let subst1 = arg1.mgu(&arg2)?;
-                let subst2 = ret1.apply(&subst1).mgu(&ret2.apply(&subst1))?;
-                Ok(subst1.compose(&subst2))
+                let s1 = arg1.mgu(arg2)?;
+                let s2 = ret1.apply(&s1).mgu(&ret2.apply(&s1))?;
+                Ok(s1.compose(&s2))
             }
 
             (Type::List(a), Type::List(b)) => a.mgu(b),
 
-            // if one of the types is a variable, we can bind the variable to the type. This also
-            // handles the case where both are variables
-            (Type::Var(var), t) => var.bind(t),
-            (t, Type::Var(var)) => var.bind(t),
+            (Type::Var(var), t) | (t, Type::Var(var)) => var.bind(t),
 
-            // if they both are primitive types, no substitution is needed
             (Type::Unit, Type::Unit)
+            | (Type::Bool, Type::Bool)
             | (Type::Int, Type::Int)
-            | (Type::String, Type::String)
-            | (Type::Bool, Type::Bool) => Ok(Subst::new()),
+            | (Type::Float, Type::Float)
+            | (Type::String, Type::String) => Ok(Subst::new()),
 
-            // if they both are records, they must have the same fields
-            (Type::Record(a), Type::Record(b)) => {
-                if a.len() != b.len()
-                    || a.keys().collect::<HashSet<_>>() != b.keys().collect::<HashSet<_>>()
-                {
-                    todo!("Struct fields mismatch")
+            (Type::Record(fields1), Type::Record(fields2)) => {
+                if fields1.len() != fields2.len() {
+                    return Err(CompileError::RecordSchemaMismatch);
+                }
+
+                let keys1: HashSet<_> = fields1.keys().collect();
+                let keys2: HashSet<_> = fields2.keys().collect();
+
+                if keys1 != keys2 {
+                    return Err(CompileError::RecordSchemaMismatch);
                 }
 
                 let mut subst = Subst::new();
-                for (name, t1) in a {
-                    let t2 = &b[name];
+                for (name, t1) in fields1 {
+                    let t2 = &fields2[name];
                     let s = t1.apply(&subst).mgu(&t2.apply(&subst))?;
                     subst = subst.compose(&s);
                 }
@@ -179,7 +119,10 @@ impl Type {
                 Ok(subst)
             }
 
-            _ => todo!("Type mismatch"),
+            _ => Err(CompileError::TypeMismatch {
+                expected: format!("{}", self),
+                found: format!("{}", other),
+            }),
         }
     }
 }
@@ -187,49 +130,63 @@ impl Type {
 impl Typed for Type {
     fn ftv(&self) -> HashSet<TypeVar> {
         match self {
-            // for a type variable, there is one free variable: the variable itself
-            Type::Var(var) => [var.clone()].into_iter().collect(),
-
-            // primitive types have no free variables
-            Type::Unit | Type::Int | Type::String | Type::Bool => HashSet::new(),
-
+            Type::Var(var) => {
+                let mut set = HashSet::new();
+                set.insert(*var);
+                set
+            }
+            Type::Unit | Type::Bool | Type::Int | Type::Float | Type::String => HashSet::new(),
             Type::List(inner) => inner.ftv(),
-
-            // for functions, we take the union of the free variables of the input and output types
-            Type::Func(arg, ret) => arg.ftv().union(&ret.ftv()).cloned().collect(),
-
-            // for records, we take the union of the free variables of the fields
+            Type::Func(arg, ret) => arg.ftv().union(&ret.ftv()).copied().collect(),
             Type::Record(fields) => fields.values().flat_map(|t| t.ftv()).collect(),
         }
     }
 
-    fn apply(&self, sub: &Subst) -> Type {
+    fn apply(&self, subst: &Subst) -> Type {
         match self {
-            // if this type references a variable that is in the substitution, return its replacement
-            // type. Otherwise, return the type itself.
-            Type::Var(var) => sub.get(var).cloned().unwrap_or(Type::Var(var.clone())),
-
-            // a primitive type is changed by the substitution
-            Type::Unit | Type::Int | Type::String | Type::Bool => self.clone(),
-
-            Type::List(inner) => Type::List(Box::new(inner.apply(sub))),
-
-            // to apply to a function,we simply apply to each of the input and output types
-            Type::Func(arg, ret) => Type::Func(Box::new(arg.apply(sub)), Box::new(ret.apply(sub))),
-
-            // for records, we apply to each of the fields
+            Type::Var(var) => subst.get(var).cloned().unwrap_or(Type::Var(*var)),
+            Type::Unit | Type::Bool | Type::Int | Type::Float | Type::String => self.clone(),
+            Type::List(inner) => Type::List(Box::new(inner.apply(subst))),
+            Type::Func(arg, ret) => {
+                Type::Func(Box::new(arg.apply(subst)), Box::new(ret.apply(subst)))
+            }
             Type::Record(fields) => Type::Record(
                 fields
-                    .into_iter()
-                    .map(|(k, v)| (k.clone(), Box::new(v.apply(sub))))
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Box::new(v.apply(subst))))
                     .collect(),
             ),
         }
     }
 }
 
-/// A polytype is a type in which there are a number of for-all quantifiers, i.e. some parts of the
-/// type may not be concret but instead correct for all possible types
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Var(var) => write!(f, "{}", var),
+            Type::Unit => write!(f, "()"),
+            Type::Bool => write!(f, "bool"),
+            Type::Int => write!(f, "int"),
+            Type::Float => write!(f, "float"),
+            Type::String => write!(f, "string"),
+            Type::List(inner) => write!(f, "[{}]", inner),
+            Type::Func(arg, ret) => write!(f, "({} -> {})", arg, ret),
+            Type::Record(fields) => {
+                write!(f, "{{ ")?;
+                let mut first = true;
+                for (name, ty) in fields {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", name, ty)?;
+                    first = false;
+                }
+                write!(f, " }}")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PolyType {
     pub vars: Vec<TypeVar>,
@@ -237,113 +194,101 @@ pub struct PolyType {
 }
 
 impl Typed for PolyType {
-    /// The free type variables in a polytype are the variables are those that are free in the internal type and not
-    /// bound in the variable mapping
     fn ftv(&self) -> HashSet<TypeVar> {
-        self.ty
-            .ftv()
-            .difference(&self.vars.iter().cloned().collect())
-            .cloned()
-            .collect()
+        let bound: HashSet<_> = self.vars.iter().copied().collect();
+        self.ty.ftv().difference(&bound).copied().collect()
     }
 
-    /// Substitutions are applied to free type variables only
     fn apply(&self, subst: &Subst) -> PolyType {
+        let mut filtered_subst = subst.clone();
+        for var in &self.vars {
+            filtered_subst.remove(var);
+        }
+
         PolyType {
             vars: self.vars.clone(),
-            ty: {
-                let mut sub = subst.clone();
-                for var in &self.vars {
-                    sub.remove(var);
-                }
-                self.ty.apply(&sub)
-            },
+            ty: self.ty.apply(&filtered_subst),
         }
     }
 }
 
 impl PolyType {
-    /// Instantiates a polytype into a type. Replaces all bound type variables with fresh type
-    /// variables and return the resulting type
     fn instantiate(&self, tvg: &mut TypeVarGen) -> Type {
-        let newvars = self.vars.iter().map(|_| Type::Var(tvg.next()));
-        self.ty
-            .apply(&Subst(self.vars.iter().cloned().zip(newvars).collect()))
+        let new_vars: HashMap<_, _> = self
+            .vars
+            .iter()
+            .map(|v| (*v, Type::Var(tvg.next())))
+            .collect();
+
+        let subst = Subst(new_vars);
+        self.ty.apply(&subst)
     }
 }
 
-/// A substitution is a mapping from type variables to types
 #[derive(Clone, Debug)]
 pub struct Subst(HashMap<TypeVar, Type>);
-
-impl Deref for Subst {
-    type Target = HashMap<TypeVar, Type>;
-    fn deref(&self) -> &HashMap<TypeVar, Type> {
-        &self.0
-    }
-}
-
-impl DerefMut for Subst {
-    fn deref_mut(&mut self) -> &mut HashMap<TypeVar, Type> {
-        &mut self.0
-    }
-}
 
 impl Subst {
     fn new() -> Self {
         Subst(HashMap::new())
     }
 
+    fn insert(&mut self, var: TypeVar, ty: Type) {
+        self.0.insert(var, ty);
+    }
+
+    fn get(&self, var: &TypeVar) -> Option<&Type> {
+        self.0.get(var)
+    }
+
+    fn remove(&mut self, var: &TypeVar) {
+        self.0.remove(var);
+    }
+
     fn compose(&self, other: &Subst) -> Subst {
-        Subst(
-            self.clone().union(
-                &other
-                    .iter()
-                    .map(|(var, ty)| (var.clone(), ty.apply(self)))
-                    .collect(),
-            ),
-        )
+        let mut result = Subst::new();
+
+        for (var, ty) in &other.0 {
+            result.insert(*var, ty.apply(self));
+        }
+
+        for (var, ty) in &self.0 {
+            if !result.0.contains_key(var) {
+                result.insert(*var, ty.clone());
+            }
+        }
+
+        result
     }
 }
 
-/// A type environment is a mapping from variables to polyypes
 #[derive(Clone, Default)]
 pub struct TypeEnv(HashMap<NodeId, PolyType>);
 
-impl Deref for TypeEnv {
-    type Target = HashMap<NodeId, PolyType>;
-    fn deref(&self) -> &HashMap<NodeId, PolyType> {
-        &self.0
-    }
-}
-
-impl DerefMut for TypeEnv {
-    fn deref_mut(&mut self) -> &mut HashMap<NodeId, PolyType> {
-        &mut self.0
-    }
-}
-
 impl Typed for TypeEnv {
-    /// The free variables of a type environment is the union of the free type variables of
-    /// each polytype in the environment
     fn ftv(&self) -> HashSet<TypeVar> {
-        self.values()
-            .map(|x| x.clone())
-            .collect::<Vec<PolyType>>()
-            .ftv()
+        self.0.values().flat_map(|pt| pt.ftv()).collect()
     }
 
-    /// To apply a substitution, we just apply it to each polytype in the type environment
-    fn apply(&self, s: &Subst) -> TypeEnv {
-        TypeEnv(self.iter().map(|(k, v)| (k.clone(), v.apply(s))).collect())
+    fn apply(&self, subst: &Subst) -> TypeEnv {
+        TypeEnv(self.0.iter().map(|(k, v)| (*k, v.apply(subst))).collect())
     }
 }
 
 impl TypeEnv {
-    /// Generalize creates a polytype
+    fn insert(&mut self, name: NodeId, poly: PolyType) {
+        self.0.insert(name, poly);
+    }
+
+    fn get(&self, name: &NodeId) -> Option<&PolyType> {
+        self.0.get(name)
+    }
+
     fn generalize(&self, ty: &Type) -> PolyType {
+        let vars: Vec<_> = ty.ftv().difference(&self.ftv()).copied().collect();
+
         PolyType {
-            vars: ty.ftv().difference(&self.ftv()).cloned().collect(),
+            vars,
             ty: ty.clone(),
         }
     }
@@ -351,7 +296,7 @@ impl TypeEnv {
 
 #[derive(Clone)]
 pub struct Globals {
-    pub modules: ModuleRegistry, // Aquí van TODOS los módulos
+    pub modules: ModuleRegistry,
 }
 
 impl Globals {
@@ -378,50 +323,20 @@ impl Context {
         }
     }
 
-    /// Perform type inference on an expression and return the resulting type, if any.
     pub fn type_inference(&mut self, node_id: NodeId, tvg: &mut TypeVarGen) -> Result<Type> {
         let (s, t) = self.infer_stmt(node_id, tvg)?;
         Ok(t.apply(&s))
     }
 
     fn infer_stmt(&mut self, node_id: NodeId, tvg: &mut TypeVarGen) -> Result<(Subst, Type)> {
-        match &self.ast.get_stmt(node_id).kind.clone() {
-            StmtKind::Import { path, alias } => {
-                unimplemented!()
-            }
+        let stmt = self.ast.get_stmt(node_id).kind.clone();
 
-            // when a type definition is encountered, the type inference is as follows:
-            // * infer the type of the right-hand side of the type definition
-            // * insert to the environment the type of the right-hand side of the type definition, having as a
-            //   name the left-hand side of the type definition
+        match stmt {
             StmtKind::Type { name, ty } => {
-                let kind = self.ast.get_type(*ty).kind.clone();
-
-                let ty = match kind {
-                    TypeKind::Provider(provider_path, args) => {
-                        let segments: Vec<&str> = provider_path
-                            .iter()
-                            .map(|id| self.ast.get_name(*id))
-                            .collect();
-
-                        let provider = match self.globals.modules.resolve(&segments) {
-                            Some(crate::module::Lookup::Provider(p)) => p,
-                            _ => todo!("provider not found"),
-                        };
-
-                        let name = self.ast.get_name(*name);
-                        let module = provider.generate_module(name, &self.ast, &args)?;
-
-                        self.globals.modules.register(module);
-
-                        provider.provide_type(&self.ast, &args)?
-                    }
-
-                    _ => self.resolve_type(*ty)?,
-                };
+                let ty = self.resolve_type(ty)?;
 
                 self.type_env.insert(
-                    *name,
+                    name,
                     PolyType {
                         vars: vec![],
                         ty: ty.clone(),
@@ -431,37 +346,36 @@ impl Context {
                 Ok((Subst::new(), ty))
             }
 
-            // a let expression is typed by:
-            // * removing any exiting type with the same name as the binding variable to prevent
-            //   name clashes (shadowing).
-            // * inferring the type of the binding
-            // * applying the resulting substitution to the environment and generalizing to the binding type
-            // * inserting the generalized type to the binding variable in the new environment
-            // * applying the substitution for the binding to the environment and inferring the type of the expression
             StmtKind::Let { name, value } => {
-                let (s1, t1) = self.infer_expr(*value, tvg)?;
+                let (s1, t1) = self.infer_expr(value, tvg)?;
                 let env1 = self.type_env.apply(&s1);
                 let poly = env1.generalize(&t1);
                 self.type_env = env1;
-                self.type_env.insert(*name, poly);
+                self.type_env.insert(name, poly);
                 Ok((s1, t1))
             }
 
-            StmtKind::Expr(expr) => self.infer_expr(*expr, tvg),
+            StmtKind::Expr(expr) => self.infer_expr(expr, tvg),
 
-            _ => unimplemented!(),
+            _ => Ok((Subst::new(), Type::Unit)),
         }
     }
 
     pub fn infer_expr(&mut self, node_id: NodeId, tvg: &mut TypeVarGen) -> Result<(Subst, Type)> {
         let kind = self.ast.get_expr(node_id).kind.clone();
 
-        match &kind {
-            // a local variable is typed as an instantiation of the corresponding type in the
-            // environment
+        match kind {
+            ExprKind::Unit => Ok((Subst::new(), Type::Unit)),
+            ExprKind::Integer(_) => Ok((Subst::new(), Type::Int)),
+            ExprKind::Boolean(_) => Ok((Subst::new(), Type::Bool)),
+            ExprKind::String(_) => Ok((Subst::new(), Type::String)),
+
             ExprKind::Identifier(name) => match self.type_env.get(&name) {
                 Some(poly) => Ok((Subst::new(), poly.instantiate(tvg))),
-                None => todo!("Unbound variable"),
+                None => {
+                    let name_str = self.ast.get_name(name);
+                    Err(CompileError::UnboundVariable(name_str.to_string()))
+                }
             },
 
             ExprKind::Path(segments) => {
@@ -470,79 +384,46 @@ impl Context {
 
                 let ty = match self.globals.modules.resolve(&segments) {
                     Some(crate::module::Lookup::Function(f)) => f.ty(),
-                    Some(crate::module::Lookup::Module(_)) => {
-                        todo!("Cannot use module as value")
-                    }
-                    Some(crate::module::Lookup::Provider(_)) => {
-                        todo!("Cannot use provider as value")
-                    }
-                    None => {
-                        let path_str = segments.join(".");
-                        todo!("Unresolved path: {}", path_str)
+                    _ => {
+                        let path = segments.join(".");
+                        return Err(CompileError::UnboundVariable(path));
                     }
                 };
 
-                return Ok((Subst::new(), ty));
+                Ok((Subst::new(), ty))
             }
 
-            // a literal is typed as its primitive type
-            ExprKind::Unit => Ok((Subst::new(), Type::Unit)),
-            ExprKind::Integer(_) => Ok((Subst::new(), Type::Int)),
-            ExprKind::Boolean(_) => Ok((Subst::new(), Type::Bool)),
-            ExprKind::String(_) => Ok((Subst::new(), Type::String)),
-
-            // lists are sequence of elems having the same type
             ExprKind::List(elems) => {
                 if elems.is_empty() {
-                    let t = Type::Var(tvg.next());
-                    Ok((Subst::new(), Type::List(Box::new(t))))
-                } else {
-                    let (mut s, first_ty) = self.infer_expr(elems[0], tvg)?;
-
-                    for &elem in &elems[1..] {
-                        self.type_env = self.type_env.apply(&s);
-                        let (s2, ty_i) = self.infer_expr(elem, tvg)?;
-                        let s3 = first_ty.apply(&s2).mgu(&ty_i)?;
-                        s = s3.compose(&s2.compose(&s));
-                    }
-
-                    Ok((s.clone(), Type::List(Box::new(first_ty.apply(&s)))))
+                    let elem_ty = Type::Var(tvg.next());
+                    return Ok((Subst::new(), Type::List(Box::new(elem_ty))));
                 }
+
+                let (mut s, first_ty) = self.infer_expr(elems[0], tvg)?;
+
+                for &elem in &elems[1..] {
+                    self.type_env = self.type_env.apply(&s);
+                    let (s2, ty_i) = self.infer_expr(elem, tvg)?;
+                    let s3 = first_ty.apply(&s2).mgu(&ty_i)?;
+                    s = s3.compose(&s2.compose(&s));
+                }
+
+                Ok((s.clone(), Type::List(Box::new(first_ty.apply(&s)))))
             }
 
-            // a record is a complex data structure, having two main components:
-            // * a base type, which must be a Spread from another record
-            // * a set of fields, each with a type
             ExprKind::Record(fields) => {
                 let mut subst = Subst::new();
-                let mut map = HashMap::new();
+                let mut map = IndexMap::new();
 
-                for (name, field) in fields {
+                for (name_id, field_id) in fields {
                     self.type_env = self.type_env.apply(&subst);
-                    let (s_field, t_field) = self.infer_expr(*field, tvg)?;
+                    let (s_field, t_field) = self.infer_expr(field_id, tvg)?;
                     subst = subst.compose(&s_field);
-                    map.insert(self.ast.get_name(*name).to_string(), Box::new(t_field));
+                    let name = self.ast.get_name(name_id).to_string();
+                    map.insert(name, Box::new(t_field));
                 }
 
                 Ok((subst, Type::Record(map)))
-            }
-
-            // an application is typed by:
-            // * inferring the type of the callee
-            // * applying the resulting substitution to the argument and inferring its type
-            // * finding the most general unifier of the callee and  a function from the
-            //   argument type to a new type variable. This combines the previously known type of the
-            //   function and the type as it is now being used
-            // * applying the unifier to the new type variable
-            ExprKind::Call { callee, arg } => {
-                let (s1, t1) = self.infer_expr(*callee, tvg)?;
-                self.type_env = self.type_env.apply(&s1);
-                let (s2, t2) = self.infer_expr(*arg, tvg)?;
-                let tv = Type::Var(tvg.next());
-                let s3 = t1
-                    .apply(&s2)
-                    .mgu(&Type::Func(Box::new(t2), Box::new(tv.clone())))?;
-                Ok((s3.compose(&s2.compose(&s1)), tv.apply(&s3)))
             }
 
             ExprKind::Function { param, body } => {
@@ -561,7 +442,7 @@ impl Context {
                 );
 
                 let old_env = std::mem::replace(&mut self.type_env, new_env);
-                let (s1, t1) = self.infer_expr(*body, tvg)?;
+                let (s1, t1) = self.infer_expr(body, tvg)?;
                 self.type_env = old_env;
 
                 Ok((
@@ -570,21 +451,21 @@ impl Context {
                 ))
             }
 
-            ExprKind::BinaryOp { left, op, right } => {
-                let (s1, t1) = self.infer_expr(*left, tvg)?;
-                let expected = self.infer_expr(*right, tvg)?;
-                let s2 = t1.mgu(&expected.1)?;
-                Ok((s2.compose(&s1), expected.1.apply(&s2)))
-            }
-
-            ExprKind::UnaryOp { op, operand } => {
-                unimplemented!()
+            ExprKind::Call { callee, arg } => {
+                let (s1, t1) = self.infer_expr(callee, tvg)?;
+                self.type_env = self.type_env.apply(&s1);
+                let (s2, t2) = self.infer_expr(arg, tvg)?;
+                let tv = Type::Var(tvg.next());
+                let s3 = t1
+                    .apply(&s2)
+                    .mgu(&Type::Func(Box::new(t2), Box::new(tv.clone())))?;
+                Ok((s3.compose(&s2.compose(&s1)), tv.apply(&s3)))
             }
 
             ExprKind::Pipe { left, right } => {
-                let (s1, t1) = self.infer_expr(*left, tvg)?;
+                let (s1, t1) = self.infer_expr(left, tvg)?;
                 self.type_env = self.type_env.apply(&s1);
-                let (s2, t2) = self.infer_expr(*right, tvg)?;
+                let (s2, t2) = self.infer_expr(right, tvg)?;
                 let tv = Type::Var(tvg.next());
                 let s3 = t2
                     .apply(&s2)
@@ -592,67 +473,64 @@ impl Context {
                 Ok((s3.compose(&s2.compose(&s1)), tv.apply(&s3)))
             }
 
-            // when the dot operator is used, the left-hand side must be a variable, while the right-hand side must be
-            // another variable, a field in the struct or record
             ExprKind::MemberAccess { object, field } => {
-                let (s1, t1) = self.infer_expr(*object, tvg)?;
+                let (s1, t1) = self.infer_expr(object, tvg)?;
                 let fields = match t1 {
                     Type::Record(fields) => fields,
-                    _ => todo!("member access on non-record"),
+                    _ => {
+                        return Err(CompileError::ExpectedRecord(format!("{}", t1)));
+                    }
                 };
 
-                let field_name = self.ast.get_name(*field);
+                let field_name = self.ast.get_name(field);
                 match fields.get(field_name) {
                     Some(field_type) => Ok((s1, *field_type.clone())),
-                    None => todo!("field not found"),
+                    None => Err(CompileError::FieldNotFound(field_name.to_string())),
                 }
             }
 
             ExprKind::Cast { expr, ty } => {
-                let (s1, _) = self.infer_expr(*expr, tvg)?;
-                let t2 = self.resolve_type(*ty)?;
+                let (s1, _) = self.infer_expr(expr, tvg)?;
+                let t2 = self.resolve_type(ty)?;
                 Ok((s1, t2))
             }
 
             ExprKind::TypeAnnotation { expr, ty } => {
-                let (s1, t1) = self.infer_expr(*expr, tvg)?;
-                let annotated_ty = self.resolve_type(*ty)?;
+                let (s1, t1) = self.infer_expr(expr, tvg)?;
+                let annotated_ty = self.resolve_type(ty)?;
                 let s2 = t1.mgu(&annotated_ty)?;
                 Ok((s2.compose(&s1), annotated_ty.apply(&s2)))
             }
 
-            ExprKind::Error => {
-                unimplemented!()
-            }
+            _ => Ok((Subst::new(), Type::Unit)),
         }
     }
 
     pub fn resolve_type(&mut self, type_id: NodeId) -> Result<Type> {
-        let ast = self.ast.clone(); // TODO: this clone should be avoided
-        let ty = ast.get_type(type_id);
+        let ty = self.ast.get_type(type_id).kind.clone();
 
-        match &ty.kind {
+        match ty {
             TypeKind::Unit => Ok(Type::Unit),
             TypeKind::Int => Ok(Type::Int),
             TypeKind::Bool => Ok(Type::Bool),
             TypeKind::String => Ok(Type::String),
 
             TypeKind::List(inner_id) => {
-                let inner = self.resolve_type(*inner_id)?;
+                let inner = self.resolve_type(inner_id)?;
                 Ok(Type::List(Box::new(inner)))
             }
 
             TypeKind::Function { from, to } => {
-                let from = self.resolve_type(*from)?;
-                let to = self.resolve_type(*to)?;
-                Ok(Type::Func(Box::new(from), Box::new(to)))
+                let from_ty = self.resolve_type(from)?;
+                let to_ty = self.resolve_type(to)?;
+                Ok(Type::Func(Box::new(from_ty), Box::new(to_ty)))
             }
 
             TypeKind::Record(field_pairs) => {
-                let mut fields = HashMap::new();
+                let mut fields = IndexMap::new();
                 for (name_id, type_id) in field_pairs {
-                    let name = self.ast.get_name(*name_id).to_string();
-                    let ty = self.resolve_type(*type_id)?;
+                    let name = self.ast.get_name(name_id).to_string();
+                    let ty = self.resolve_type(type_id)?;
                     fields.insert(name, Box::new(ty));
                 }
                 Ok(Type::Record(fields))
@@ -660,25 +538,32 @@ impl Context {
 
             TypeKind::Var(path) => match self.type_env.get(&path[0]) {
                 Some(poly) => Ok(poly.ty.clone()),
-                None => todo!("Error"),
+                None => {
+                    let name = self.ast.get_name(path[0]);
+                    Err(CompileError::UnboundVariable(name.to_string()))
+                }
             },
 
-            TypeKind::Provider(provider, args) => {
-                let segments: Vec<&str> =
-                    provider.iter().map(|id| self.ast.get_name(*id)).collect();
+            TypeKind::Provider(provider_path, args) => {
+                let segments: Vec<&str> = provider_path
+                    .iter()
+                    .map(|id| self.ast.get_name(*id))
+                    .collect();
 
                 let provider = match self.globals.modules.resolve(&segments) {
                     Some(crate::module::Lookup::Provider(p)) => p,
-                    Some(crate::module::Lookup::Module(_)) => todo!("cannot use module as type"),
-                    Some(crate::module::Lookup::Function(_)) => {
-                        todo!("cannot use function as type")
+                    _ => {
+                        let path = segments.join(".");
+                        return Err(CompileError::ProviderNotFound(path));
                     }
-                    _ => todo!("provider not found"),
                 };
 
                 let expected = provider.param_types();
                 if args.len() != expected.len() {
-                    todo!("expected arguments do not match actual");
+                    return Err(CompileError::InvalidArgumentCount {
+                        expected: expected.len(),
+                        actual: args.len(),
+                    });
                 }
 
                 for (arg, exp_ty) in args.iter().zip(expected.iter()) {
@@ -686,7 +571,11 @@ impl Context {
                     arg_ty.mgu(exp_ty)?;
                 }
 
-                provider.provide_type(&self.ast, args)
+                let name = self.ast.get_name(provider_path[provider_path.len() - 1]);
+                let module = provider.generate_module(name, &self.ast, &args)?;
+                self.globals.modules.register(module);
+
+                provider.provide_type(&self.ast, &args)
             }
         }
     }
