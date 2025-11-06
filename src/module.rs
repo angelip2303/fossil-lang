@@ -21,9 +21,8 @@ impl Module {
         }
     }
 
-    pub fn add_function(&mut self, func: impl RuntimeFunction + 'static) {
-        let name = func.name().split('.').last().unwrap().to_string();
-        self.functions.insert(name, Arc::new(func));
+    pub fn add_function(&mut self, name: impl Into<String>, func: impl RuntimeFunction + 'static) {
+        self.functions.insert(name.into(), Arc::new(func));
     }
 
     pub fn add_provider(&mut self, name: impl Into<String>, provider: impl TypeProvider + 'static) {
@@ -95,7 +94,7 @@ impl ModuleRegistry {
         use crate::runtime::builtin::*;
 
         let mut module = Module::new("Random");
-        module.add_function(RandomNextFunction);
+        module.add_function("next", RandomNextFunction);
         module
     }
 
@@ -111,7 +110,7 @@ impl ModuleRegistry {
 
         let mut csv = Module::new("Csv");
         csv.add_provider("CsvProvider", CsvProvider);
-        csv.add_function(CsvWriteFunction);
+        csv.add_function("write", CsvWriteFunction);
         csv
     }
 }

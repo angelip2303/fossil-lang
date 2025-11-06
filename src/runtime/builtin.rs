@@ -8,11 +8,6 @@ use super::{RuntimeFunction, Value};
 pub struct RandomNextFunction;
 
 impl RuntimeFunction for RandomNextFunction {
-    fn name(&self) -> &str {
-        // TODO: the fact that we write the module name here is a potential bug, as if we change the module name, we need to change this string as well.
-        "Random.next"
-    }
-
     fn ty(&self) -> Type {
         Type::Func(
             Box::new(Type::Int),
@@ -26,7 +21,7 @@ impl RuntimeFunction for RandomNextFunction {
                 use rand::Rng;
                 Ok(Value::Int(rand::rng().random_range(*min..=*max)))
             }
-            _ => unreachable!("Type checker ensures correct types"),
+            _ => unreachable!("Type checker ensures correct types"), // TODO: I don't like this
         }
     }
 }
@@ -34,10 +29,6 @@ impl RuntimeFunction for RandomNextFunction {
 pub struct CsvWriteFunction;
 
 impl RuntimeFunction for CsvWriteFunction {
-    fn name(&self) -> &str {
-        "Csv.write"
-    }
-
     fn ty(&self) -> Type {
         use crate::solver::TypeVar;
         let a = Type::Var(TypeVar(0)); // TODO: maybe we should enforce Record?

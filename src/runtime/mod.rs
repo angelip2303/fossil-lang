@@ -7,7 +7,6 @@ use crate::error::Result;
 use crate::solver::Type;
 
 pub trait RuntimeFunction: Send + Sync {
-    fn name(&self) -> &str;
     fn ty(&self) -> Type;
     fn call(&self, args: Vec<Value>) -> Result<Value>;
 }

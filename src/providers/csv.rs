@@ -40,33 +40,27 @@ impl TypeProvider for CsvProvider {
         Ok(Type::Record(fields))
     }
 
-    fn generate_module(&self, type_name: &str, ast: &Ast, args: &[Arg]) -> Result<Module> {
-        let record_type = self.provide_type(ast, args)?;
+    fn generate_module(&self, name: &str, ast: &Ast, args: &[Arg]) -> Result<Module> {
+        let record_type = self.provide_type(ast, args)?; // TODO: maybe pass this as param
 
-        let eval = ConstEvaluator::new(ast);
-        let path = eval.eval_to_string(args[0].value)?;
+        let mut module = Module::new(name);
 
-        let mut module = Module::new(type_name);
-
-        module.add_function(CsvLoadFunction {
-            path: path.clone(),
-            target_type: record_type.clone(),
-        });
+        module.add_function(
+            "load",
+            CsvLoadFunction {
+                target_type: record_type.clone(),
+            },
+        );
 
         Ok(module)
     }
 }
 
 struct CsvLoadFunction {
-    path: String,
     target_type: Type,
 }
 
 impl RuntimeFunction for CsvLoadFunction {
-    fn name(&self) -> &str {
-        "load"
-    }
-
     fn ty(&self) -> Type {
         Type::Func(
             Box::new(Type::String),
@@ -77,7 +71,7 @@ impl RuntimeFunction for CsvLoadFunction {
     fn call(&self, args: Vec<Value>) -> Result<Value> {
         let path = match &args[0] {
             Value::String(s) => s.as_ref(),
-            _ => &self.path,
+            _ => unreachable!("Type checker ensures correct types"),
         };
 
         let path = PlPath::from_str(path);
