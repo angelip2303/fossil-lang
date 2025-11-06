@@ -40,38 +40,29 @@ impl TypeProvider for CsvProvider {
         Ok(Type::Record(fields))
     }
 
-    fn generate_module(&self, name: &str, ast: &Ast, args: &[Arg]) -> Result<Module> {
-        let record_type = self.provide_type(ast, args)?; // TODO: maybe pass this as param
-
+    fn generate_module(&self, name: &str, ty: Type) -> Result<Module> {
         let mut module = Module::new(name);
 
-        module.add_function(
-            "load",
-            CsvLoadFunction {
-                target_type: record_type.clone(),
-            },
-        );
+        module.add_function("load", CsvLoadFunction(ty));
 
         Ok(module)
     }
 }
 
-struct CsvLoadFunction {
-    target_type: Type,
-}
+struct CsvLoadFunction(Type);
 
 impl RuntimeFunction for CsvLoadFunction {
     fn ty(&self) -> Type {
         Type::Func(
             Box::new(Type::String),
-            Box::new(Type::List(Box::new(self.target_type.clone()))),
+            Box::new(Type::List(Box::new(self.0.clone()))),
         )
     }
 
     fn call(&self, args: Vec<Value>) -> Result<Value> {
         let path = match &args[0] {
             Value::String(s) => s.as_ref(),
-            _ => unreachable!("Type checker ensures correct types"),
+            _ => unreachable!("Type checker ensures correct types"), // TODO: I don't like this
         };
 
         let path = PlPath::from_str(path);

@@ -43,7 +43,7 @@ impl RuntimeFunction for CsvWriteFunction {
         let data = &args[0];
         let path = match &args[1] {
             Value::String(s) => s.as_ref(),
-            _ => unreachable!(),
+            _ => unreachable!(), // TODO: I don't like this
         };
 
         let lf = data.as_lazyframe()?;

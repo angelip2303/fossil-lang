@@ -334,11 +334,11 @@ impl Context {
 
         match stmt {
             StmtKind::Type { name, ty } => {
-                let resolved_type = self.resolve_type(ty)?;
+                let infered_type = self.resolve_type(ty)?;
 
                 // in case of a provider type, generate the module and register it
                 // TODO: maybe there is a better way to handle this
-                if let TypeKind::Provider(path, args) = self.ast.get_type(ty).kind.clone() {
+                if let TypeKind::Provider(path, _) = self.ast.get_type(ty).kind.clone() {
                     let segments: Vec<&str> =
                         path.iter().map(|id| self.ast.get_name(*id)).collect();
 
@@ -348,7 +348,7 @@ impl Context {
                     };
 
                     let name = self.ast.get_name(name);
-                    let module = provider.generate_module(name, &self.ast, &args)?;
+                    let module = provider.generate_module(name, infered_type.clone())?;
                     self.globals.modules.register(module);
                 }
 
@@ -356,11 +356,11 @@ impl Context {
                     name,
                     PolyType {
                         vars: vec![],
-                        ty: resolved_type.clone(),
+                        ty: infered_type.clone(),
                     },
                 );
 
-                Ok((Subst::new(), resolved_type))
+                Ok((Subst::new(), infered_type))
             }
 
             StmtKind::Let { name, value } => {

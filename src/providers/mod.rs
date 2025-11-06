@@ -8,5 +8,5 @@ pub trait TypeProvider: Send + Sync {
 
     fn provide_type(&self, ast: &Ast, args: &[Arg]) -> Result<Type>;
 
-    fn generate_module(&self, name: &str, ast: &Ast, args: &[Arg]) -> Result<Module>;
+    fn generate_module(&self, name: &str, ty: Type) -> Result<Module>;
 }
