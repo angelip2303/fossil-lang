@@ -1,18 +1,18 @@
 use polars::prelude::*;
 
 use crate::error::Result;
-use crate::solver::Type;
+use crate::solver::{Type, TypeScheme, TypeVar};
 
 use super::{RuntimeFunction, Value};
 
 pub struct RandomNextFunction;
 
 impl RuntimeFunction for RandomNextFunction {
-    fn ty(&self) -> Type {
-        Type::Func(
+    fn type_scheme(&self) -> TypeScheme {
+        TypeScheme::mono(Type::Func(
             Box::new(Type::Int),
             Box::new(Type::Func(Box::new(Type::Int), Box::new(Type::Int))),
-        )
+        ))
     }
 
     fn call(&self, args: Vec<Value>) -> Result<Value> {
@@ -29,14 +29,16 @@ impl RuntimeFunction for RandomNextFunction {
 pub struct CsvWriteFunction;
 
 impl RuntimeFunction for CsvWriteFunction {
-    fn ty(&self) -> Type {
-        use crate::solver::TypeVar;
-        let a = Type::Var(TypeVar(0)); // TODO: maybe we should enforce Record?
+    fn type_scheme(&self) -> TypeScheme {
+        let a = TypeVar::Named("a");
 
-        Type::Func(
-            Box::new(Type::List(Box::new(a))),
-            Box::new(Type::Func(Box::new(Type::String), Box::new(Type::Unit))),
-        )
+        TypeScheme {
+            forall: vec![a],
+            ty: Type::Func(
+                Box::new(Type::List(Box::new(Type::Var(a)))),
+                Box::new(Type::Func(Box::new(Type::String), Box::new(Type::Unit))),
+            ),
+        }
     }
 
     fn call(&self, args: Vec<Value>) -> Result<Value> {
@@ -46,7 +48,7 @@ impl RuntimeFunction for CsvWriteFunction {
             _ => unreachable!(), // TODO: I don't like this
         };
 
-        let lf = data.as_lazyframe()?;
+        let lf = data.as_lazyframe()?; // TODO: should this also be necessary?
         let mut df = lf.collect()?;
 
         let file = std::fs::File::create(path)?;

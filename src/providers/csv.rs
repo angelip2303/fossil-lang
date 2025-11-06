@@ -7,7 +7,7 @@ use crate::module::Module;
 use crate::providers::{Arg, Ast, TypeProvider};
 use crate::runtime::value::ListRepr;
 use crate::runtime::{RuntimeFunction, Value};
-use crate::solver::Type;
+use crate::solver::{Type, TypeScheme};
 
 pub struct CsvProvider;
 
@@ -52,11 +52,11 @@ impl TypeProvider for CsvProvider {
 struct CsvLoadFunction(Type);
 
 impl RuntimeFunction for CsvLoadFunction {
-    fn ty(&self) -> Type {
-        Type::Func(
+    fn type_scheme(&self) -> TypeScheme {
+        TypeScheme::mono(Type::Func(
             Box::new(Type::String),
             Box::new(Type::List(Box::new(self.0.clone()))),
-        )
+        ))
     }
 
     fn call(&self, args: Vec<Value>) -> Result<Value> {
