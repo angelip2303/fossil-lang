@@ -1,7 +1,6 @@
 use crate::{ast::*, error::Result, module::Module, solver::Type};
 
 pub mod csv;
-pub mod registry;
 
 /// The TypeProvider trait generates a whole module at compile-time
 pub trait TypeProvider: Send + Sync {
