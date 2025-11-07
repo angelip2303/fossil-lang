@@ -100,12 +100,12 @@ pub enum ExprKind {
         field: NodeId,
     },
     Function {
-        param: Param,
+        param: Vec<Param>,
         body: NodeId,
     },
     Call {
         callee: NodeId,
-        arg: NodeId,
+        arg: Vec<NodeId>,
     },
     Cast {
         expr: NodeId,

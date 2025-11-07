@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::{providers::TypeProvider, runtime::RuntimeFunction};
+use crate::function::RuntimeFunction;
+use crate::provider::TypeProvider;
 
 #[derive(Clone)]
 pub struct Module {
@@ -40,15 +41,6 @@ pub struct ModuleRegistry {
 }
 
 impl ModuleRegistry {
-    pub fn new() -> Self {
-        let mut registry = Self::default();
-
-        registry.register(Self::random_module());
-        registry.register(Self::data_module());
-
-        registry
-    }
-
     pub fn register(&mut self, module: Module) {
         self.modules.insert(module.name.clone(), module);
     }
@@ -88,30 +80,6 @@ impl ModuleRegistry {
                 self.resolve_in_module(submod, rest)
             }
         }
-    }
-
-    fn random_module() -> Module {
-        use crate::runtime::builtin::*;
-
-        let mut module = Module::new("Random");
-        module.add_function("next", RandomNextFunction);
-        module
-    }
-
-    fn data_module() -> Module {
-        let mut data = Module::new("Data");
-        data.add_submodule(Self::csv_module());
-        data
-    }
-
-    fn csv_module() -> Module {
-        use crate::providers::csv::CsvProvider;
-        use crate::runtime::builtin::CsvWriteFunction;
-
-        let mut csv = Module::new("Csv");
-        csv.add_provider("CsvProvider", CsvProvider);
-        csv.add_function("write", CsvWriteFunction);
-        csv
     }
 }
 

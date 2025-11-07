@@ -37,3 +37,6 @@ tmp
 
 # old files
 *.old
+
+# docs-related files
+book

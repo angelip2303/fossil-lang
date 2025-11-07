@@ -2,15 +2,14 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 
-use crate::runtime::value::Function;
-use crate::runtime::value::RecordRepr;
-use crate::runtime::value::UserFunction;
-use crate::{
-    ast::*,
-    error::{CompileError, Result},
-    runtime::Value,
-    solver::Context,
-};
+use crate::ast::*;
+use crate::error::CompileError;
+use crate::error::Result;
+use crate::solver::Context;
+use crate::value::Function;
+use crate::value::RecordRepr;
+use crate::value::UserFunction;
+use crate::value::Value;
 
 pub struct Interpreter {
     context: Context,

@@ -5,7 +5,7 @@ use polars::prelude::*;
 
 use crate::ast::NodeId;
 use crate::error::{CompileError, Result};
-use crate::runtime::RuntimeFunction;
+use crate::function::RuntimeFunction;
 
 #[derive(Clone)]
 pub enum Value {

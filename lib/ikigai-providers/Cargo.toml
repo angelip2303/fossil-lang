@@ -1,0 +1,21 @@
+[package]
+name = "ikigai-providers"
+version.workspace = true
+description.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# external dependencies
+polars.workspace = true
+indexmap.workspace = true
+
+# internal dependencies
+ikigai-lang.workspace = true

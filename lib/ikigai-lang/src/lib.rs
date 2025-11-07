@@ -1,13 +1,14 @@
 pub mod ast;
 pub mod const_eval;
 pub mod error;
+pub mod function;
 pub mod interpreter;
 pub mod lexer;
 pub mod module;
 pub mod parser;
-pub mod providers;
-pub mod runtime;
+pub mod provider;
 pub mod solver;
+pub mod value;
 
 pub fn compile_and_run(source: &str) -> crate::error::Result<()> {
     use chumsky::prelude::*;
@@ -74,7 +75,7 @@ pub fn compile_and_run(source: &str) -> crate::error::Result<()> {
 
         // Solo imprimir si no es Unit (para evitar spam de outputs)
         match result {
-            crate::runtime::Value::Unit => {}
+            crate::value::Value::Unit => {}
             _ => {
                 #[cfg(debug_assertions)]
                 println!("Result: {:?}", result);

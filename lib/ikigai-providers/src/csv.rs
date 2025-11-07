@@ -1,13 +1,15 @@
 use indexmap::IndexMap;
 use polars::prelude::*;
 
-use crate::const_eval::ConstEvaluator;
-use crate::error::Result;
-use crate::module::Module;
-use crate::providers::{Arg, Ast, TypeProvider};
-use crate::runtime::value::ListRepr;
-use crate::runtime::{RuntimeFunction, Value};
-use crate::solver::{Type, TypeScheme};
+use ikigai_lang::const_eval::ConstEvaluator;
+use ikigai_lang::error::Result;
+use ikigai_lang::function::RuntimeFunction;
+use ikigai_lang::module::Module;
+use ikigai_lang::provider::TypeProvider;
+use ikigai_lang::solver::Type;
+use ikigai_lang::solver::TypeScheme;
+use ikigai_lang::value::ListRepr;
+use ikigai_lang::value::Value;
 
 pub struct CsvProvider;
 

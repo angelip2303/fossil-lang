@@ -1,9 +1,11 @@
 use polars::prelude::*;
 
-use crate::error::Result;
-use crate::solver::{Type, TypeScheme, TypeVar};
-
-use super::{RuntimeFunction, Value};
+use ikigai_lang::error::Result;
+use ikigai_lang::function::RuntimeFunction;
+use ikigai_lang::solver::Type;
+use ikigai_lang::solver::TypeScheme;
+use ikigai_lang::solver::TypeVar;
+use ikigai_lang::value::Value;
 
 pub struct RandomNextFunction;
 

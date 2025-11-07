@@ -150,11 +150,7 @@ where
             .ignore_then(param_parser(ctx).repeated().at_least(1).collect::<Vec<_>>())
             .then_ignore(just(Token::Arrow))
             .then(expr_inner.clone())
-            .map(|(params, body)| {
-                params.into_iter().rev().fold(body, |acc, param| {
-                    ctx.add_expr(ExprKind::Function { param, body: acc })
-                })
-            });
+            .map(|(params, body)| ctx.add_expr(ExprKind::Function { params, body }));
 
         let parens = expr_inner
             .clone()

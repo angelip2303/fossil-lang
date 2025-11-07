@@ -8,17 +8,10 @@ use crate::error::{CompileError, Result};
 use crate::module::Lookup;
 use crate::module::ModuleRegistry;
 
-// ============================================================================
-// TYPE VARIABLES
-// ============================================================================
-
-/// Variables de tipo con distinción semántica
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TypeVar {
-    /// Variable fresca generada por inferencia ('t0, 't1, 't2, ...)
-    Generated(usize),
-    /// Variable genérica nombrada para polimorfismo ('a, 'b, 'c, ...)
-    Named(&'static str),
+    Generated(usize),    // TODO: what is this needed for? is it internal?
+    Named(&'static str), // TODO: what is this needed for?
 }
 
 impl TypeVar {
@@ -30,19 +23,6 @@ impl TypeVar {
         Self::Named(name)
     }
 }
-
-impl std::fmt::Display for TypeVar {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TypeVar::Generated(id) => write!(f, "'t{}", id),
-            TypeVar::Named(name) => write!(f, "'{}", name),
-        }
-    }
-}
-
-// ============================================================================
-// TYPE VAR GENERATOR
-// ============================================================================
 
 pub struct TypeVarGen {
     supply: usize,
@@ -60,25 +40,28 @@ impl TypeVarGen {
     }
 }
 
-// ============================================================================
-// TYPES
-// ============================================================================
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TypeId(pub usize);
+
+pub struct Type {
+    pub id: TypeId,
+    pub kind: TypeKind,
+}
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Type {
+pub enum TypeKind {
     Var(TypeVar),
     Unit,
     Bool,
     Int,
     Float,
     String,
-    List(Box<Type>),
-    Func(Box<Type>, Box<Type>),
-    Record(IndexMap<String, Box<Type>>),
+    List(TypeId),
+    Func(Vec<TypeId>, TypeId),
+    Record(IndexMap<String, TypeId>),
 }
 
 impl Type {
-    /// Retorna variables de tipo libres (Free Type Variables)
     pub fn free_vars(&self) -> HashSet<TypeVar> {
         match self {
             Type::Var(v) => {
@@ -97,7 +80,6 @@ impl Type {
         }
     }
 
-    /// Aplica una sustitución de tipos
     pub fn substitute(&self, subst: &HashMap<TypeVar, Type>) -> Type {
         match self {
             Type::Var(v) => subst.get(v).cloned().unwrap_or_else(|| Type::Var(*v)),
@@ -116,7 +98,6 @@ impl Type {
         }
     }
 
-    /// Unificación con threading de sustitución
     pub fn unify(&self, other: &Type, subst: &mut HashMap<TypeVar, Type>) -> Result<()> {
         let t1 = self.substitute(subst);
         let t2 = other.substitute(subst);
@@ -167,39 +148,9 @@ impl Type {
 
             // Regla FAIL
             _ => Err(CompileError::TypeMismatch {
-                expected: format!("{}", self),
-                found: format!("{}", other),
+                expected: self,
+                found: other,
             }),
-        }
-    }
-}
-
-impl std::fmt::Display for Type {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Type::Var(v) => write!(f, "{}", v),
-            Type::Unit => write!(f, "()"),
-            Type::Bool => write!(f, "bool"),
-            Type::Int => write!(f, "int"),
-            Type::Float => write!(f, "float"),
-            Type::String => write!(f, "string"),
-            Type::List(inner) => write!(f, "[{}]", inner),
-            Type::Func(arg, ret) => match **arg {
-                Type::Func(_, _) => write!(f, "({}) -> {}", arg, ret),
-                _ => write!(f, "{} -> {}", arg, ret),
-            },
-            Type::Record(fields) => {
-                write!(f, "{{ ")?;
-                let mut first = true;
-                for (name, ty) in fields {
-                    if !first {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}: {}", name, ty)?;
-                    first = false;
-                }
-                write!(f, " }}")
-            }
         }
     }
 }
@@ -256,27 +207,6 @@ impl TypeScheme {
     }
 }
 
-impl std::fmt::Display for TypeScheme {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.forall.is_empty() {
-            write!(f, "{}", self.ty)
-        } else {
-            write!(f, "∀")?;
-            for (i, var) in self.forall.iter().enumerate() {
-                if i > 0 {
-                    write!(f, " ")?;
-                }
-                write!(f, "{}", var)?;
-            }
-            write!(f, ". {}", self.ty)
-        }
-    }
-}
-
-// ============================================================================
-// TYPE ENVIRONMENT
-// ============================================================================
-
 #[derive(Clone, Default)]
 pub struct TypeEnv(HashMap<NodeId, TypeScheme>);
 
@@ -297,10 +227,6 @@ impl TypeEnv {
             .collect()
     }
 }
-
-// ============================================================================
-// GLOBALS & CONTEXT
-// ============================================================================
 
 #[derive(Clone)]
 pub struct Globals {
@@ -495,30 +421,29 @@ impl Context {
                 let (s1, t1) = self.infer_expr(callee, tvg)?;
                 let (mut s2, t2) = self.infer_expr(arg, tvg)?;
 
-                // Componer s1 en s2
                 for (k, v) in s1 {
                     s2.insert(k, v.substitute(&s2));
                 }
 
                 let tv = Type::Var(TypeVar::fresh(tvg.next()));
-                t1.substitute(&s2)
-                    .unify(&Type::Func(Box::new(t2), Box::new(tv.clone())), &mut s2)?;
+                let expected = Type::Func(Box::new(t2), Box::new(tv.clone()));
+                t1.substitute(&s2).unify(&expected, &mut s2)?;
 
                 Ok((s2.clone(), tv.substitute(&s2)))
             }
 
+            // TODO: maybe we can desugar this into a call?
             ExprKind::Pipe { left, right } => {
-                let (s1, t1) = self.infer_expr(left, tvg)?;
-                let (mut s2, t2) = self.infer_expr(right, tvg)?;
+                let (s1, t1) = self.infer_expr(right, tvg)?;
+                let (mut s2, t2) = self.infer_expr(left, tvg)?;
 
-                // Componer s1 en s2
                 for (k, v) in s1 {
                     s2.insert(k, v.substitute(&s2));
                 }
 
                 let tv = Type::Var(TypeVar::fresh(tvg.next()));
-                t2.substitute(&s2)
-                    .unify(&Type::Func(Box::new(t1), Box::new(tv.clone())), &mut s2)?;
+                let expected = Type::Func(Box::new(t2), Box::new(tv.clone()));
+                t1.substitute(&s2).unify(&expected, &mut s2)?;
 
                 Ok((s2.clone(), tv.substitute(&s2)))
             }
@@ -605,6 +530,7 @@ impl Context {
                     _ => return Err(CompileError::ProviderNotFound(segments.join("."))),
                 };
 
+                // TODO: I don't know if this is the best we can do
                 let expected = provider.param_types();
                 if args.len() != expected.len() {
                     return Err(CompileError::InvalidArgumentCount {
