@@ -2,8 +2,8 @@
 members = [
     "cli",
     "lib/ikigai-lang",
-    "lib/ikigai-providers",
-    "lib/ikigai-stdlib"
+    # "lib/ikigai-providers",
+    # "lib/ikigai-stdlib"
 ]
 resolver = "2"
 
@@ -28,8 +28,8 @@ indexmap = "2.12.0"
 
 # internal dependencies
 ikigai-lang = { path = "./lib/ikigai-lang" }
-ikigai-providers = { path = "./lib/ikigai-providers" }
-ikigai-stdlib = { path = "./lib/ikigai-stdlib" }
+# ikigai-providers = { path = "./lib/ikigai-providers" }
+# ikigai-stdlib = { path = "./lib/ikigai-stdlib" }
 
 [profile.release]
 lto = true
