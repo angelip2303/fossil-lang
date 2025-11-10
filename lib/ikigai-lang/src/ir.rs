@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::ast::Ast;
 use crate::ast::Decl as AstDecl;
-use crate::ast::Literal as AstLiteral;
+use crate::ast::Literal;
 use crate::ast::{Expr as AstExpr, ExprId as AstExprId};
 use crate::ast::{Type as AstType, TypeId as AstTypeId};
 use crate::context::*;
@@ -12,6 +12,7 @@ use crate::module::Binding;
 use crate::module::ModuleRegistry;
 use crate::module::RegistryError;
 use crate::traits::provider::ProviderError;
+use crate::typechecker::TypeVar;
 
 #[derive(Error, Debug)]
 pub enum LowererError {
@@ -52,26 +53,20 @@ pub enum Decl {
 pub enum Expr {
     LocalItem(DeclId),
     ModuleItem(BindingId), // TODO: think about it
-    Int(i64),
-    String(Symbol),
-    Bool(bool),
+    Literal(Literal),
     List(Vec<ExprId>),
     Record(Vec<(Symbol, ExprId)>),
     Function { params: Vec<Symbol>, body: ExprId },
     Application { callee: ExprId, args: Vec<ExprId> },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TypeVar(pub u32);
-
 #[derive(Debug, Clone)]
-
 pub enum Type {
     Int,
     String,
     Bool,
-    Named(Symbol),
-    Var(TypeVar), // internal to the typechecker
+    Named(Symbol), // TODO: this should refer to the type's impl (i.e. declaration)
+    Var(TypeVar),  // internal to the typechecker
     Function(Vec<TypeId>, TypeId),
     List(TypeId),
     Record(Vec<(Symbol, TypeId)>),
@@ -166,11 +161,7 @@ impl Resolver {
                 Binding::Provider(_) => unreachable!(),
             },
 
-            AstExpr::Literal(lit) => match lit {
-                AstLiteral::Boolean(b) => Expr::Bool(*b),
-                AstLiteral::Integer(n) => Expr::Int(*n),
-                AstLiteral::String(s) => Expr::String(*s),
-            },
+            AstExpr::Literal(lit) => Expr::Literal(*lit),
 
             AstExpr::List(list) => {
                 let items = list
