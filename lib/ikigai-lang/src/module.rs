@@ -1,32 +1,56 @@
 use std::collections::HashMap;
 
+use thiserror::Error;
+
+use crate::context::{Interner, Symbol};
+use crate::traits::function::FunctionImpl;
 use crate::traits::provider::TypeProviderImpl;
 
-#[derive(Default)]
-pub struct Module<'a> {
-    pub name: &'a str,
-    pub bindings: HashMap<&'a str, Binding>,
+#[derive(Error, Debug)]
+pub enum RegistryError {
+    #[error("Undefined variable: {0}")]
+    UndefinedVariable(String),
+
+    #[error("Undefined module: {0}")]
+    UndefinedModule(String),
+}
+
+pub struct Module {
+    pub name: String,
+    pub bindings: HashMap<String, Binding>,
 }
 
 pub enum Binding {
     // Value(Value<'a>),
     // Type(Type<'a>),
-    // Function(Function<'a>),
+    Function(Box<dyn FunctionImpl>),
     Provider(Box<dyn TypeProviderImpl>),
 }
 
-#[derive(Default)]
-pub struct ModuleRegistry<'a> {
-    modules: HashMap<&'a str, Module<'a>>,
+pub struct ModuleRegistry {
+    modules: HashMap<String, Module>,
 }
 
-impl<'a> ModuleRegistry<'a> {
-    pub fn resolve(&'a self, path: &[&'a str]) -> Option<&Binding> {
-        let module = path[..path.len() - 1].join(".");
-        let binding = path.last()?;
+impl ModuleRegistry {
+    pub fn resolve(&self, path: &[Symbol], interner: &Interner) -> Result<&Binding, RegistryError> {
+        let module_parts: Vec<_> = path
+            .iter()
+            .take(path.len() - 1)
+            .map(|s| interner.resolve(*s))
+            .collect();
 
-        self.modules
-            .get(module.as_str())
-            .and_then(|module| module.bindings.get(binding))
+        let module_name = module_parts.join(".");
+
+        let module = self
+            .modules
+            .get(&module_name)
+            .ok_or_else(|| RegistryError::UndefinedModule(module_name.clone()))?;
+
+        let item = interner.resolve(*path.last().unwrap());
+
+        module
+            .bindings
+            .get(item)
+            .ok_or_else(|| RegistryError::UndefinedVariable(format!("{}.{}", module_name, item)))
     }
 }

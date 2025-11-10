@@ -14,9 +14,7 @@ rust-version.workspace = true
 
 [dependencies]
 # external dependencies
+polars.workspace = true
+thiserror.workspace = true
 logos = "0.15.1"
 chumsky = { version= "0.11.1", features = ["pratt"]}
-polars = {version = "0.51.0", features = ["lazy"]}
-thiserror = "2.0.17"
-
-# internal dependencies

@@ -24,7 +24,6 @@ rust-version = "1.88.0"
 # external dependencies
 polars = {version = "0.51.0", features = ["lazy"]}
 thiserror = "2.0.17"
-indexmap = "2.12.0"
 
 # internal dependencies
 ikigai-lang = { path = "./lib/ikigai-lang" }

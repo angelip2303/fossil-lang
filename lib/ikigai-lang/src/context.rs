@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NodeId<T> {
     idx: u32,
     _marker: PhantomData<fn() -> T>,
@@ -19,6 +19,8 @@ impl<T> NodeId<T> {
         self.idx as usize
     }
 }
+
+impl<T: Clone> Copy for NodeId<T> {}
 
 pub struct Arena<T> {
     items: Vec<T>,
