@@ -1,23 +1,63 @@
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
-pub trait Pool<T> {
-    fn add(&mut self, t: T) -> NodeId;
-    fn get(&self, idx: NodeId) -> &T;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeId<T> {
+    idx: u32,
+    _marker: PhantomData<fn() -> T>,
 }
 
-pub struct NodeId(u32);
-
-pub struct GenericPool<T>(Vec<T>);
-
-impl<T> Pool<T> for GenericPool<T> {
-    fn add(&mut self, t: T) -> NodeId {
-        let idx = self.0.len();
-        self.0.push(t);
-        NodeId(idx as u32)
+impl<T> NodeId<T> {
+    fn new(idx: usize) -> Self {
+        Self {
+            idx: idx as u32,
+            _marker: PhantomData,
+        }
     }
 
-    fn get(&self, idx: NodeId) -> &T {
-        &self.0[idx.0 as usize]
+    pub fn idx(&self) -> usize {
+        self.idx as usize
+    }
+}
+
+pub struct Arena<T> {
+    items: Vec<T>,
+}
+
+impl<T> Arena<T> {
+    pub fn alloc(&mut self, item: T) -> NodeId<T> {
+        let id = NodeId::new(self.items.len());
+        self.items.push(item);
+        id
+    }
+
+    pub fn get(&self, id: NodeId<T>) -> &T {
+        &self.items[id.idx()]
+    }
+
+    pub fn get_mut(&mut self, id: NodeId<T>) -> &mut T {
+        &mut self.items[id.idx()]
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (NodeId<T>, &T)> {
+        self.items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| (NodeId::new(idx), item))
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
+impl<T> Default for Arena<T> {
+    fn default() -> Self {
+        Self { items: Vec::new() }
     }
 }
 
@@ -30,13 +70,6 @@ pub struct Interner {
 }
 
 impl Interner {
-    pub fn new() -> Self {
-        Interner {
-            map: HashMap::new(),
-            strings: Vec::new(),
-        }
-    }
-
     pub fn intern(&mut self, s: &str) -> Symbol {
         if let Some(&sym) = self.map.get(s) {
             return sym;
@@ -50,5 +83,22 @@ impl Interner {
 
     pub fn resolve(&self, sym: Symbol) -> &str {
         &self.strings[sym.0 as usize]
+    }
+
+    pub fn len(&self) -> usize {
+        self.strings.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.strings.is_empty()
+    }
+}
+
+impl Default for Interner {
+    fn default() -> Self {
+        Interner {
+            map: HashMap::new(),
+            strings: Vec::new(),
+        }
     }
 }
