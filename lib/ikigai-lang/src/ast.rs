@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chumsky::prelude::*;
 use logos::Logos;
 use paste::paste;

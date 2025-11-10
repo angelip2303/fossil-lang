@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use paste::paste;
 use thiserror::Error;
 
@@ -6,7 +8,6 @@ use crate::ast::Decl as AstDecl;
 use crate::ast::Expr as AstExpr;
 use crate::ast::Literal as AstLiteral;
 use crate::ast::Type as AstType;
-use crate::interner::{Interner, Symbol};
 use crate::module::Binding;
 use crate::module::ModuleRegistry;
 
@@ -65,7 +66,7 @@ pub enum Decl<'a> {
 }
 
 pub enum Expr<'a> {
-    Var(Symbol),
+    Identifier(Symbol),
     Qualified(Vec<Symbol>),
     Int(i64),
     String(Symbol),
@@ -96,6 +97,38 @@ pub enum Type<'a> {
     Record(Vec<(Symbol, TypeRef<'a>)>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Symbol(u32);
+
+pub struct Interner {
+    map: HashMap<String, Symbol>,
+    strings: Vec<String>,
+}
+
+impl Interner {
+    pub fn new() -> Self {
+        Interner {
+            map: HashMap::new(),
+            strings: Vec::new(),
+        }
+    }
+
+    pub fn intern(&mut self, s: &str) -> Symbol {
+        if let Some(&sym) = self.map.get(s) {
+            return sym;
+        }
+
+        let sym = Symbol(self.strings.len() as u32);
+        self.strings.push(s.to_string());
+        self.map.insert(s.to_string(), sym);
+        sym
+    }
+
+    pub fn resolve(&self, sym: Symbol) -> &str {
+        &self.strings[sym.0 as usize]
+    }
+}
+
 pub struct Lowerer<'a> {
     pub ctx: IrCtx<'a>,
     pub registry: ModuleRegistry<'a>,
@@ -109,7 +142,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub fn lower(&mut self, ast: AstCtx<'a>) -> Result<(), LowererError> {
+    pub fn lower(&'a mut self, ast: AstCtx<'a>) -> Result<(), LowererError> {
         for decl in ast.decls.into_vec() {
             match decl {
                 AstDecl::Let(name, expr) => {
@@ -132,11 +165,11 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
-    fn lower_expr(&mut self, expr: AstExpr<'a>) -> Result<ExprRef<'a>, LowererError> {
+    fn lower_expr(&'a mut self, expr: AstExpr<'a>) -> Result<ExprRef<'a>, LowererError> {
         let expr = match expr {
             AstExpr::Identifier(name) => {
                 let sym = self.ctx.interner.intern(name);
-                Expr::Var(sym)
+                Expr::Identifier(sym)
             }
 
             AstExpr::Qualified(path) => {
