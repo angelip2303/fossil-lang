@@ -1,9 +1,6 @@
-use std::collections::HashMap;
-
-use paste::paste;
 use thiserror::Error;
 
-use crate::ast::AstCtx;
+use crate::ast::Ast;
 use crate::ast::Decl as AstDecl;
 use crate::ast::Expr as AstExpr;
 use crate::ast::Literal as AstLiteral;
@@ -13,35 +10,6 @@ use crate::module::ModuleRegistry;
 
 #[derive(Error, Debug)]
 pub enum LowererError {}
-
-trait ArenaAllocated<'a> {
-    fn alloc(self, context: &'a IrCtx<'a>) -> &'a Self
-    where
-        Self: 'a;
-}
-
-macro_rules! declare_arena {
-    ($t: ident <$a: lifetime>) => {
-        paste! {
-            pub type [<$t Arena>]<$a> = ::typed_arena::Arena<$t<$a>>;
-            pub type [<$t Ref>]<$a> = &$a $t<$a>;
-
-            impl<'a> ArenaAllocated<'a> for $t<'a> {
-                fn alloc(self, context: &'a IrCtx<'a>) -> &'a $t<'a> where Self: 'a {
-                    context. [<$t:lower s>].alloc(self)
-                }
-            }
-        }
-    };
-
-    ($($t: ident $(< $a: lifetime >)?),+) => {
-        $(
-            declare_arena!($t $(<$a>)?);
-        )+
-    };
-}
-
-declare_arena!(Decl<'a>, Expr<'a>, Type<'a>);
 
 pub struct IrCtx<'a> {
     pub decls: DeclArena<'a>,
@@ -97,38 +65,6 @@ pub enum Type<'a> {
     Record(Vec<(Symbol, TypeRef<'a>)>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Symbol(u32);
-
-pub struct Interner {
-    map: HashMap<String, Symbol>,
-    strings: Vec<String>,
-}
-
-impl Interner {
-    pub fn new() -> Self {
-        Interner {
-            map: HashMap::new(),
-            strings: Vec::new(),
-        }
-    }
-
-    pub fn intern(&mut self, s: &str) -> Symbol {
-        if let Some(&sym) = self.map.get(s) {
-            return sym;
-        }
-
-        let sym = Symbol(self.strings.len() as u32);
-        self.strings.push(s.to_string());
-        self.map.insert(s.to_string(), sym);
-        sym
-    }
-
-    pub fn resolve(&self, sym: Symbol) -> &str {
-        &self.strings[sym.0 as usize]
-    }
-}
-
 pub struct Lowerer<'a> {
     pub ctx: IrCtx<'a>,
     pub registry: ModuleRegistry<'a>,
@@ -142,7 +78,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub fn lower(&'a mut self, ast: AstCtx<'a>) -> Result<(), LowererError> {
+    pub fn lower(&'a mut self, ast: Ast<'a>) -> Result<(), LowererError> {
         for decl in ast.decls.into_vec() {
             match decl {
                 AstDecl::Let(name, expr) => {

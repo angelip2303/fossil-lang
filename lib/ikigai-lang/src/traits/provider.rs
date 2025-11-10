@@ -15,5 +15,5 @@ pub enum ProviderError {
 
 /// The TypeProvider trait generates a whole module at compile-time
 pub trait TypeProviderImpl: Send + Sync {
-    fn generate<'a>(&self, args: &[Literal<'a>]) -> Result<Type>;
+    fn generate(&self, args: &[Literal]) -> Result<Type>;
 }
