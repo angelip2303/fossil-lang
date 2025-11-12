@@ -67,23 +67,11 @@ impl<T> Arena<T> {
         &self.items[id.idx()]
     }
 
-    pub fn get_mut(&mut self, id: NodeId<T>) -> &mut T {
-        &mut self.items[id.idx()]
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = (NodeId<T>, &T)> {
         self.items
             .iter()
             .enumerate()
             .map(|(idx, item)| (NodeId::new(idx), item))
-    }
-
-    pub fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
     }
 }
 
@@ -122,14 +110,6 @@ impl Interner {
 
     pub fn resolve(&self, sym: Symbol) -> &str {
         &self.strings[sym.0 as usize]
-    }
-
-    pub fn len(&self) -> usize {
-        self.strings.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.strings.is_empty()
     }
 }
 

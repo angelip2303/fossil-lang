@@ -22,19 +22,13 @@ pub enum Binding {
     Provider(Box<dyn TypeProviderImpl>),
 }
 
+#[derive(Default)]
 pub struct ModuleRegistry {
     modules: HashMap<String, Module>,
     bindings: Arena<Binding>, // Añadir arena para bindings
 }
 
 impl ModuleRegistry {
-    pub fn new() -> Self {
-        Self {
-            modules: HashMap::new(),
-            bindings: Arena::default(),
-        }
-    }
-
     pub fn resolve(
         &self,
         path: &[Symbol],

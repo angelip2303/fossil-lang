@@ -27,10 +27,10 @@ pub fn compile(src: &str) -> Result<(), String> {
 
     let ast = context.take();
 
-    let resolver = resolved::Resolver::new(module::ModuleRegistry::new());
+    let resolver = resolved::Resolver::new(module::ModuleRegistry::default());
     let ir = resolver.resolve(ast).map_err(|_| todo!()).unwrap();
 
-    let typechecker = typechecker::TypeChecker::new(ir, module::ModuleRegistry::new());
+    let typechecker = typechecker::TypeChecker::new(ir, module::ModuleRegistry::default());
     let types = typechecker.check().map_err(|_| todo!()).unwrap();
 
     println!("{types:?}");

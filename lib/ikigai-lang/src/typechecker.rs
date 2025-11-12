@@ -210,10 +210,10 @@ impl TypeChecker {
     pub fn check(mut self) -> Result<HashMap<ExprId, Type>> {
         let mut ans: HashMap<ExprId, Type> = Default::default();
 
-        let decls: Vec<_> = self.ctx.decls.iter().map(|(id, _)| id).collect();
+        let decls: Vec<_> = self.ctx.decls.iter().map(|(id, _)| id).collect(); // TODO: improve architecture here
 
         for id in decls {
-            let decl = self.ctx.decls.get(id).clone();
+            let decl = self.ctx.decls.get(id).clone(); // TODO: remove unnecessary clone
             match decl {
                 Decl::Let(name, expr) => {
                     let (subst, ty) = self.infer(expr)?;

@@ -240,7 +240,6 @@ impl Resolver {
                 let provider = match self.registry.get(id) {
                     Binding::Provider(provider) => provider,
                     _ => {
-                        // TODO: this may be improved with function as_provider in registry
                         let provider = ast.symbols.resolve(*provider).to_string();
                         return Err(LowererError::NotAProvider(provider));
                     }
