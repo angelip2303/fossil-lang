@@ -1,41 +1,18 @@
 use std::collections::HashMap;
 
-use thiserror::Error;
-
-use crate::ast::Ast;
-use crate::ast::Decl as AstDecl;
 use crate::ast::Literal;
-use crate::ast::{Expr as AstExpr, ExprId as AstExprId};
-use crate::ast::{Type as AstType, TypeId as AstTypeId};
 use crate::context::*;
-use crate::module::*;
-use crate::traits::provider::ProviderError;
-use crate::typechecker::TypeArena;
-use crate::typechecker::{Type, TypeId};
-
-#[derive(Error, Debug)]
-pub enum LowererError {
-    #[error("Provider not found: {0}")]
-    NotAProvider(String),
-
-    #[error("Cannot find symbol: {0}")]
-    UndefinedSymbol(String),
-
-    #[error(transparent)]
-    InvalidModulePath(#[from] RegistryError),
-
-    #[error(transparent)]
-    TypeGeneration(#[from] ProviderError),
-}
+use crate::module::BindingId;
 
 pub type DeclId = NodeId<Decl>;
 pub type ExprId = NodeId<Expr>;
+pub type TypeId = NodeId<Type>;
 
-#[derive(Debug)]
-pub struct IrCtx {
+#[derive(Default, Debug)]
+pub struct ResolvedAst {
     pub decls: Arena<Decl>,
     pub exprs: Arena<Expr>,
-    pub types: TypeArena,
+    pub types: Arena<Type>,
     pub symbols: Interner,
 }
 
@@ -57,9 +34,24 @@ pub enum Expr {
     Application { callee: ExprId, args: Vec<ExprId> },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Type {
+    Int,
+    String,
+    Bool,
+    Function(Vec<TypeId>, TypeId),
+    List(TypeId),
+    Record(Vec<(Symbol, TypeId)>),
+    Provider {
+        provider: BindingId,
+        args: Vec<Literal>,
+    },
+}
+
+/// Scope for name resolution
 #[derive(Default)]
 pub struct Scope {
-    pub vars: HashMap<Symbol, DeclId>, // TODO: would it make sense to match it against ExprId?
+    pub vars: HashMap<Symbol, DeclId>,
     pub types: HashMap<Symbol, TypeId>,
 }
 
@@ -80,174 +72,5 @@ impl Scope {
 
     pub fn lookup_type(&self, name: Symbol) -> Option<TypeId> {
         self.types.get(&name).copied()
-    }
-}
-
-pub struct Resolver {
-    pub decls: Arena<Decl>,
-    pub exprs: Arena<Expr>,
-    pub types: Arena<Type>,
-    pub registry: ModuleRegistry,
-    scope: Scope,
-}
-
-impl Resolver {
-    pub fn new(registry: ModuleRegistry) -> Self {
-        Self {
-            decls: Default::default(),
-            exprs: Default::default(),
-            types: Arena::default(),
-            registry,
-            scope: Default::default(),
-        }
-    }
-
-    pub fn resolve(mut self, ast: Ast) -> Result<IrCtx, LowererError> {
-        for (_, decl) in ast.decls.iter() {
-            match decl {
-                AstDecl::Let(name, expr) => {
-                    let expr = self.resolve_expr(&expr, &ast)?;
-                    let decl = self.decls.alloc(Decl::Let(*name, expr));
-                    self.scope.define_var(*name, decl);
-                }
-
-                AstDecl::Type(name, ty) => {
-                    let ty = self.resolve_type(&ty, &ast)?;
-                    self.decls.alloc(Decl::Type(*name, ty.clone()));
-                    self.scope.define_type(*name, ty);
-                }
-
-                AstDecl::Expr(expr) => {
-                    let expr = self.resolve_expr(&expr, &ast)?;
-                    self.decls.alloc(Decl::Expr(expr));
-                }
-            }
-        }
-
-        let ctx = IrCtx {
-            decls: self.decls,
-            exprs: self.exprs,
-            types: self.types,
-            symbols: ast.symbols,
-        };
-
-        Ok(ctx)
-    }
-
-    fn resolve_expr(&mut self, expr: &AstExprId, ast: &Ast) -> Result<ExprId, LowererError> {
-        let expr = ast.exprs.get(expr.clone()); // TODO: remove unnecessary clone
-
-        let resolved = match expr {
-            AstExpr::Identifier(name) => match self.scope.lookup_var(*name) {
-                Some(id) => Expr::LocalItem(id),
-                None => {
-                    let name = ast.symbols.resolve(*name).to_string();
-                    return Err(LowererError::UndefinedSymbol(name));
-                }
-            },
-
-            AstExpr::Qualified(path) => {
-                Expr::ModuleItem(self.registry.resolve(path, &ast.symbols)?)
-            }
-
-            AstExpr::Literal(lit) => Expr::Literal(lit.clone()),
-
-            AstExpr::List(list) => {
-                let items = list
-                    .into_iter()
-                    .map(|item| self.resolve_expr(item, ast))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Expr::List(items)
-            }
-
-            AstExpr::Record(fields) => {
-                let fields = fields
-                    .into_iter()
-                    .map(|(name, value)| {
-                        let value = self.resolve_expr(value, ast)?;
-                        Ok((*name, value))
-                    })
-                    .collect::<Result<Vec<_>, LowererError>>()?;
-                Expr::Record(fields)
-            }
-
-            AstExpr::Function { params, body } => {
-                let body = self.resolve_expr(body, ast)?;
-                Expr::Function {
-                    params: params.clone(),
-                    body,
-                }
-            }
-
-            AstExpr::Application { callee, args } => {
-                let callee = self.resolve_expr(callee, ast)?;
-                let args = args
-                    .into_iter()
-                    .map(|arg| self.resolve_expr(arg, ast))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Expr::Application { callee, args }
-            }
-        };
-
-        Ok(self.exprs.alloc(resolved))
-    }
-
-    fn resolve_type(&mut self, ty: &AstTypeId, ast: &Ast) -> Result<TypeId, LowererError> {
-        let ty = ast.types.get(ty.clone());
-
-        let resolved = match ty {
-            AstType::Named(name) => match ast.symbols.resolve(*name) {
-                "int" | "Int" => Type::Int,
-                "bool" | "Bool" => Type::Bool,
-                "string" | "String" => Type::String,
-                _ => match self.scope.lookup_type(*name) {
-                    Some(ty) => return Ok(ty), // it was already resolved
-                    None => {
-                        let name = ast.symbols.resolve(*name).to_string();
-                        return Err(LowererError::UndefinedSymbol(name));
-                    }
-                },
-            },
-
-            AstType::Function(params, ty) => {
-                let params = params
-                    .into_iter()
-                    .map(|param| self.resolve_type(param, ast))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let ty = self.resolve_type(ty, ast)?;
-                Type::Function(params, ty)
-            }
-
-            AstType::List(inner) => {
-                let inner = self.resolve_type(inner, ast)?;
-                Type::List(inner)
-            }
-
-            AstType::Record(fields) => {
-                let fields = fields
-                    .into_iter()
-                    .map(|(name, ty)| {
-                        let ty = self.resolve_type(ty, ast)?;
-                        Ok((*name, ty))
-                    })
-                    .collect::<Result<Vec<_>, LowererError>>()?;
-                Type::Record(fields)
-            }
-
-            AstType::Provider(provider, args) => {
-                let path = vec![*provider];
-                let id = self.registry.resolve(&path, &ast.symbols)?;
-                let provider = match self.registry.get(id) {
-                    Binding::Provider(provider) => provider,
-                    _ => {
-                        let provider = ast.symbols.resolve(*provider).to_string();
-                        return Err(LowererError::NotAProvider(provider));
-                    }
-                };
-                provider.generate(args)?
-            }
-        };
-
-        Ok(self.types.alloc(resolved))
     }
 }

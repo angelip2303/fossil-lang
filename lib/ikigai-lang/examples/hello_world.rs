@@ -1,12 +1,16 @@
+use ikigai_lang::module::ModuleRegistry;
+
 pub fn main() {
     let src = r#"
         let a = 5
         let b = 10
         let c = {
-            a = 3,
+            a = a,
             b = 4,
         }
     "#;
 
-    ikigai_lang::compile(src).unwrap();
+    ikigai_lang::compiler::Compiler::new(ModuleRegistry::default())
+        .compile(src)
+        .unwrap();
 }

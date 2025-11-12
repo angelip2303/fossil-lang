@@ -1,72 +1,28 @@
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::result;
 
-use thiserror::Error;
-
 use crate::ast::Literal;
 use crate::context::Symbol;
-use crate::context::{Arena, NodeId};
+use crate::error::TypeError;
+use crate::generated::{ConcreteAst, Decl, Expr, ExprId};
 use crate::module::{Binding, ModuleRegistry};
-use crate::resolved::{Decl, Expr, ExprId, IrCtx};
+use crate::{checked::*, generated};
 
 type Result<T> = result::Result<T, TypeError>;
 
-#[derive(Debug, Error)]
-pub enum TypeError {
-    #[error("Illegal recursive type: {0} appears in itself")]
-    RecursiveType(TypeVar),
-
-    #[error("Type mismatch: cannot unify types at {:?} and {:?}", .expected, .found)]
-    TypeMismatch { expected: TypeId, found: TypeId },
-
-    #[error("Arity mismatch: expected {expected} arguments, got {found}")]
-    ArityMismatch { expected: usize, found: usize },
-
-    #[error("Should have been already resolved")]
-    AlreadyResolved,
-}
-
-// Type variable for polymorphism
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TypeVar(pub usize);
-
-impl fmt::Display for TypeVar {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "'t{}", self.0)
-    }
-}
-
+#[derive(Default)]
 pub struct TypeVarGen {
     supply: usize,
 }
 
 impl TypeVarGen {
-    pub fn new() -> Self {
-        Self { supply: 0 }
-    }
-
     pub fn next(&mut self) -> TypeVar {
         let v = TypeVar(self.supply);
         self.supply += 1;
         v
     }
-}
-
-pub type TypeId = NodeId<Type>;
-pub type TypeArena = Arena<Type>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Type {
-    Int,
-    String,
-    Bool,
-    Var(TypeVar),
-    Function(Vec<TypeId>, TypeId),
-    List(TypeId),
-    Record(Vec<(Symbol, TypeId)>),
 }
 
 impl TypeArena {
@@ -193,38 +149,41 @@ impl TypeEnv {
 pub struct TypeChecker {
     env: TypeEnv,
     tvg: TypeVarGen,
-    ctx: IrCtx,
-    registry: ModuleRegistry,
+    ast: ConcreteAst,
+    registry: ModuleRegistry, // TODO: I think this should have been resolved
+    types: TypeArena,
 }
 
 impl TypeChecker {
-    pub fn new(ctx: IrCtx, registry: ModuleRegistry) -> Self {
+    pub fn new(ast: ConcreteAst, registry: ModuleRegistry) -> Self {
         TypeChecker {
             env: Default::default(),
-            tvg: TypeVarGen::new(),
-            ctx,
+            tvg: Default::default(),
+            ast,
             registry,
+            types: Default::default(),
         }
     }
 
-    pub fn check(mut self) -> Result<HashMap<ExprId, Type>> {
-        let mut ans: HashMap<ExprId, Type> = Default::default();
+    pub fn check(mut self) -> Result<CheckedAst> {
+        let mut expr_types: HashMap<ExprId, Type> = Default::default();
 
-        let decls: Vec<_> = self.ctx.decls.iter().map(|(id, _)| id).collect(); // TODO: improve architecture here
+        let decls: Vec<_> = self.ast.decls.iter().map(|(id, _)| id).collect(); // TODO: improve architecture here
 
         for id in decls {
-            let decl = self.ctx.decls.get(id).clone(); // TODO: remove unnecessary clone
+            let decl = self.ast.decls.get(id).clone(); // TODO: remove unnecessary clone
             match decl {
                 Decl::Let(name, expr) => {
                     let (subst, ty) = self.infer(expr)?;
                     self.env = self.apply_subst_to_env(&subst);
                     let ty = self.apply_subst_to_type(ty, &subst);
-                    let poly = self.env.generalize(ty, &self.ctx.types);
+                    let poly = self.env.generalize(ty, &self.types);
                     self.env.insert(name, poly);
-                    ans.insert(expr, self.ctx.types.get(ty).clone());
+                    expr_types.insert(expr, self.types.get(ty).clone());
                 }
 
                 Decl::Type(name, ty) => {
+                    let ty = self.import(ty);
                     self.env.insert(name, Polytype::mono(ty));
                 }
 
@@ -232,26 +191,32 @@ impl TypeChecker {
                     let (subst, ty) = self.infer(expr)?;
                     self.env = self.apply_subst_to_env(&subst);
                     let ty = self.apply_subst_to_type(ty, &subst);
-                    ans.insert(expr, self.ctx.types.get(ty).clone());
+                    expr_types.insert(expr, self.types.get(ty).clone());
                 }
             }
         }
 
-        Ok(ans)
+        Ok(CheckedAst {
+            ast: self.ast,
+            expr_types,
+        })
     }
 
     fn infer(&mut self, expr: ExprId) -> Result<(Subst, TypeId)> {
-        let expr = self.ctx.exprs.get(expr).clone();
+        let expr = self.ast.exprs.get(expr).clone();
 
         let ans = match expr {
             // a local variable is typed as an instantiation of the corresponding type in the environment
-            Expr::LocalItem(id) => match self.ctx.decls.get(id) {
+            Expr::LocalItem(id) => match self.ast.decls.get(id) {
                 Decl::Let(name, _) => {
-                    let poly = self.env.get(name).unwrap().clone();
+                    let poly = self.env.get(name).unwrap().clone(); // TODO: remove this unnecessary clone
                     let ty = self.instantiate(&poly);
                     (Default::default(), ty)
                 }
-                Decl::Type(_, ty) => (Default::default(), *ty),
+                Decl::Type(_, ty) => {
+                    let ty = self.import(*ty);
+                    (Default::default(), ty)
+                }
                 Decl::Expr(expr) => self.infer(*expr)?,
             },
 
@@ -262,7 +227,7 @@ impl TypeChecker {
                     let ty = self.instantiate(&signature);
                     (Default::default(), ty)
                 }
-                Binding::Provider(_) => return Err(TypeError::AlreadyResolved),
+                Binding::Provider(_) => unreachable!(),
             },
 
             // a literal is typed as its primitive type
@@ -272,14 +237,14 @@ impl TypeChecker {
                     Literal::Integer(_) => Type::Int,
                     Literal::String(_) => Type::String,
                 };
-                (Default::default(), self.ctx.types.alloc(ty))
+                (Default::default(), self.types.alloc(ty))
             }
 
             Expr::List(items) => match items.as_slice() {
                 [] => {
                     let var = self.tvg.next();
-                    let inner = self.ctx.types.alloc(Type::Var(var));
-                    let list = self.ctx.types.alloc(Type::List(inner));
+                    let inner = self.types.alloc(Type::Var(var));
+                    let list = self.types.alloc(Type::List(inner));
                     (Default::default(), list)
                 }
                 [first, rest @ ..] => {
@@ -295,7 +260,7 @@ impl TypeChecker {
                     }
 
                     let t3 = self.apply_subst_to_type(t1, &subst);
-                    let list = self.ctx.types.alloc(Type::List(t3));
+                    let list = self.types.alloc(Type::List(t3));
 
                     (subst, list)
                 }
@@ -312,7 +277,7 @@ impl TypeChecker {
                     ans.push((name, ty));
                 }
 
-                let record = self.ctx.types.alloc(Type::Record(ans));
+                let record = self.types.alloc(Type::Record(ans));
                 (subst, record)
             }
 
@@ -322,7 +287,7 @@ impl TypeChecker {
 
                 for param in params {
                     let var = self.tvg.next();
-                    let ty = self.ctx.types.alloc(Type::Var(var));
+                    let ty = self.types.alloc(Type::Var(var));
                     new_env.insert(param, Polytype::mono(ty));
                     types.push(ty);
                 }
@@ -338,7 +303,7 @@ impl TypeChecker {
 
                 let ret = self.apply_subst_to_type(body_ty, &subst);
 
-                (subst, self.ctx.types.alloc(Type::Function(params, ret)))
+                (subst, self.types.alloc(Type::Function(params, ret)))
             }
 
             Expr::Application { callee, args } => {
@@ -353,8 +318,8 @@ impl TypeChecker {
                     ans.push(ty);
                 }
 
-                let ret = self.ctx.types.alloc(Type::Var(self.tvg.next()));
-                let expected = self.ctx.types.alloc(Type::Function(ans, ret));
+                let ret = self.types.alloc(Type::Var(self.tvg.next()));
+                let expected = self.types.alloc(Type::Function(ans, ret));
 
                 let s3 = self.mgu(actual, expected)?;
 
@@ -366,8 +331,8 @@ impl TypeChecker {
     }
 
     fn mgu(&mut self, ty_id: TypeId, other_id: TypeId) -> Result<Subst> {
-        let ty = self.ctx.types.get(ty_id).clone();
-        let other = self.ctx.types.get(other_id).clone();
+        let ty = self.types.get(ty_id).clone();
+        let other = self.types.get(other_id).clone();
 
         let subst = match (ty, other) {
             // if they both are primitive types, no substitution needs to be performed
@@ -442,7 +407,7 @@ impl TypeChecker {
 
     /// Attempt to bind a type variable to a type, returning an appropriate substitution
     fn bind(&self, var: TypeVar, id: TypeId) -> Result<Subst> {
-        let ty = self.ctx.types.get(id).clone();
+        let ty = self.types.get(id).clone();
 
         if let Type::Var(v) = ty
             && v == var
@@ -450,21 +415,21 @@ impl TypeChecker {
             return Ok(Default::default());
         }
 
-        match self.ctx.types.ftv(id).contains(&var) {
+        match self.types.ftv(id).contains(&var) {
             true => Err(TypeError::RecursiveType(var)),
             false => Ok(Subst::singleton(var, id)),
         }
     }
 
     fn apply_subst_to_type(&mut self, ty: TypeId, subst: &Subst) -> TypeId {
-        match self.ctx.types.get(ty).clone() {
+        match self.types.get(ty).clone() {
             // primitive types are not affected by substitution
             Type::Int | Type::String | Type::Bool => ty,
 
             // for lists, we apply the substitution to the inner type
             Type::List(inner) => {
                 let inner = self.apply_subst_to_type(inner, subst);
-                self.ctx.types.alloc(Type::List(inner))
+                self.types.alloc(Type::List(inner))
             }
 
             // for records, we apply the substitution to the fields
@@ -473,7 +438,7 @@ impl TypeChecker {
                     .iter()
                     .map(|(name, ty)| (*name, self.apply_subst_to_type(*ty, subst)))
                     .collect();
-                self.ctx.types.alloc(Type::Record(fields))
+                self.types.alloc(Type::Record(fields))
             }
 
             // if the variable is bound by the substitution, we replace it with the substituted type
@@ -486,7 +451,7 @@ impl TypeChecker {
                     new.push(self.apply_subst_to_type(param, subst));
                 }
                 let ty = self.apply_subst_to_type(ty, subst);
-                self.ctx.types.alloc(Type::Function(new, ty))
+                self.types.alloc(Type::Function(new, ty))
             }
         }
     }
@@ -519,7 +484,7 @@ impl TypeChecker {
         let newvars = poly
             .vars
             .iter()
-            .map(|_| self.ctx.types.alloc(Type::Var(self.tvg.next())));
+            .map(|_| self.types.alloc(Type::Var(self.tvg.next())));
 
         let subst = Subst::new(poly.vars.iter().cloned().zip(newvars));
 
@@ -538,5 +503,25 @@ impl TypeChecker {
         }
 
         Subst(composed)
+    }
+
+    fn import(&mut self, ty: generated::TypeId) -> TypeId {
+        let ty = match self.ast.types.get(ty).clone() {
+            generated::Type::Bool => Type::Bool,
+            generated::Type::Int => Type::Int,
+            generated::Type::String => Type::String,
+            generated::Type::List(inner) => Type::List(self.import(inner)),
+            generated::Type::Record(fields) => Type::Record(
+                fields
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), self.import(*ty)))
+                    .collect(),
+            ),
+            generated::Type::Function(params, ret) => Type::Function(
+                params.iter().map(|ty| self.import(*ty)).collect(),
+                self.import(ret),
+            ),
+        };
+        self.types.alloc(ty)
     }
 }

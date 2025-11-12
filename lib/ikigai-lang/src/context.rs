@@ -9,7 +9,7 @@ pub struct NodeId<T> {
 }
 
 impl<T> NodeId<T> {
-    fn new(idx: usize) -> Self {
+    pub fn new(idx: usize) -> Self {
         Self {
             idx: idx as u32,
             _marker: PhantomData,
@@ -18,6 +18,10 @@ impl<T> NodeId<T> {
 
     pub fn idx(&self) -> usize {
         self.idx as usize
+    }
+
+    pub fn into<U>(self) -> NodeId<U> {
+        NodeId::new(self.idx as usize)
     }
 }
 
@@ -56,6 +60,14 @@ pub struct Arena<T> {
     items: Vec<T>,
 }
 
+impl<T: Clone> Clone for Arena<T> {
+    fn clone(&self) -> Self {
+        Self {
+            items: self.items.clone(),
+        }
+    }
+}
+
 impl<T> Arena<T> {
     pub fn alloc(&mut self, item: T) -> NodeId<T> {
         let id = NodeId::new(self.items.len());
@@ -70,6 +82,13 @@ impl<T> Arena<T> {
     pub fn iter(&self) -> impl Iterator<Item = (NodeId<T>, &T)> {
         self.items
             .iter()
+            .enumerate()
+            .map(|(idx, item)| (NodeId::new(idx), item))
+    }
+
+    pub fn into_iter(self) -> impl Iterator<Item = (NodeId<T>, T)> {
+        self.items
+            .into_iter()
             .enumerate()
             .map(|(idx, item)| (NodeId::new(idx), item))
     }

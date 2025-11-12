@@ -1,39 +1,13 @@
 pub mod ast;
+pub mod checked;
+pub mod compiler;
 pub mod context;
+pub mod error;
+pub mod generated;
+pub mod generator;
 pub mod module;
+pub mod parser;
 pub mod resolved;
+pub mod resolver;
 pub mod traits;
 pub mod typechecker;
-
-pub fn compile(src: &str) -> Result<(), String> {
-    use crate::ast::Token;
-    use chumsky::prelude::*;
-    use logos::Logos;
-
-    let tokens: Vec<_> = Token::lexer(src).filter_map(|t| t.ok()).collect();
-
-    let context = ast::AstCtx::default();
-
-    ast::decls(&context)
-        .repeated()
-        .collect::<Vec<_>>()
-        .parse(tokens.as_slice())
-        .into_result()
-        .map_err(|err| {
-            eprintln!("{err:?}");
-            todo!()
-        })
-        .unwrap();
-
-    let ast = context.take();
-
-    let resolver = resolved::Resolver::new(module::ModuleRegistry::default());
-    let ir = resolver.resolve(ast).map_err(|_| todo!()).unwrap();
-
-    let typechecker = typechecker::TypeChecker::new(ir, module::ModuleRegistry::default());
-    let types = typechecker.check().map_err(|_| todo!()).unwrap();
-
-    println!("{types:?}");
-
-    Ok(())
-}

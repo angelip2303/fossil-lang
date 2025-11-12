@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use thiserror::Error;
 
@@ -17,12 +18,13 @@ pub enum RegistryError {
 
 pub type BindingId = NodeId<Binding>;
 
+#[derive(Clone)]
 pub enum Binding {
-    Function(Box<dyn FunctionImpl>),
-    Provider(Box<dyn TypeProviderImpl>),
+    Function(Arc<dyn FunctionImpl>),
+    Provider(Arc<dyn TypeProviderImpl>),
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ModuleRegistry {
     modules: HashMap<String, Module>,
     bindings: Arena<Binding>,
@@ -56,11 +58,16 @@ impl ModuleRegistry {
             .ok_or_else(|| RegistryError::UndefinedVariable(format!("{}.{}", module_name, item)))
     }
 
+    pub fn alloc(&mut self, binding: Binding) -> BindingId {
+        self.bindings.alloc(binding)
+    }
+
     pub fn get(&self, id: BindingId) -> &Binding {
         self.bindings.get(id)
     }
 }
 
+#[derive(Default, Clone)]
 pub struct Module {
     pub name: String,
     pub bindings: HashMap<String, BindingId>,

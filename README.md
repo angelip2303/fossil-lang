@@ -11,3 +11,10 @@ let b = {
 ```
 
 The `b.a` field shadows the outer `a` variable.
+
+### Function application can only be performed over qualified identifiers
+
+```
+List.map a // ✅
+map a // ❎
+```
