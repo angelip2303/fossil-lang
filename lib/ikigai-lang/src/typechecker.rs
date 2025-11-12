@@ -4,7 +4,6 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 use std::result;
 
-use chumsky::extra::Err;
 use thiserror::Error;
 
 use crate::ast::Literal;
@@ -199,30 +198,46 @@ pub struct TypeChecker {
 }
 
 impl TypeChecker {
-    pub fn check(mut self) -> Result<()> {
-        for (_, decl) in self.ctx.decls.iter() {
+    pub fn new(ctx: IrCtx, registry: ModuleRegistry) -> Self {
+        TypeChecker {
+            env: Default::default(),
+            tvg: TypeVarGen::new(),
+            ctx,
+            registry,
+        }
+    }
+
+    pub fn check(mut self) -> Result<HashMap<ExprId, Type>> {
+        let mut ans: HashMap<ExprId, Type> = Default::default();
+
+        let decls: Vec<_> = self.ctx.decls.iter().map(|(id, _)| id).collect();
+
+        for id in decls {
+            let decl = self.ctx.decls.get(id).clone();
             match decl {
                 Decl::Let(name, expr) => {
-                    let (subst, ty) = self.infer(*expr)?;
-                    self.env = self.apply_subst_to_env(&self.env, &subst);
+                    let (subst, ty) = self.infer(expr)?;
+                    self.env = self.apply_subst_to_env(&subst);
                     let ty = self.apply_subst_to_type(ty, &subst);
                     let poly = self.env.generalize(ty, &self.ctx.types);
-                    self.env.insert(*name, poly);
+                    self.env.insert(name, poly);
+                    ans.insert(expr, self.ctx.types.get(ty).clone());
                 }
 
                 Decl::Type(name, ty) => {
-                    self.env.insert(*name, Polytype::mono(*ty));
+                    self.env.insert(name, Polytype::mono(ty));
                 }
 
                 Decl::Expr(expr) => {
-                    let (subst, ty) = self.infer(*expr)?;
-                    self.env = self.apply_subst_to_env(&self.env, &subst);
-                    self.apply_subst_to_type(ty, &subst);
+                    let (subst, ty) = self.infer(expr)?;
+                    self.env = self.apply_subst_to_env(&subst);
+                    let ty = self.apply_subst_to_type(ty, &subst);
+                    ans.insert(expr, self.ctx.types.get(ty).clone());
                 }
             }
         }
 
-        Ok(())
+        Ok(ans)
     }
 
     fn infer(&mut self, expr: ExprId) -> Result<(Subst, TypeId)> {
@@ -231,8 +246,10 @@ impl TypeChecker {
         let ans = match expr {
             // a local variable is typed as an instantiation of the corresponding type in the environment
             Expr::LocalItem(id) => match self.ctx.decls.get(id) {
-                Decl::Let(name, expr) => {
-                    todo!("lookup?")
+                Decl::Let(name, _) => {
+                    let poly = self.env.get(name).unwrap().clone();
+                    let ty = self.instantiate(&poly);
+                    (Default::default(), ty)
                 }
                 Decl::Type(_, ty) => (Default::default(), *ty),
                 Decl::Expr(expr) => self.infer(*expr)?,
@@ -242,8 +259,8 @@ impl TypeChecker {
             Expr::ModuleItem(id) => match self.registry.get(id) {
                 Binding::Function(func) => {
                     let signature = func.signature();
-                    // TODO: apply polytype as a type
-                    todo!()
+                    let ty = self.instantiate(&signature);
+                    (Default::default(), ty)
                 }
                 Binding::Provider(_) => return Err(TypeError::AlreadyResolved),
             },
@@ -474,10 +491,16 @@ impl TypeChecker {
         }
     }
 
-    fn apply_subst_to_env(&mut self, env: &TypeEnv, subst: &Subst) -> TypeEnv {
+    fn apply_subst_to_env(&mut self, subst: &Subst) -> TypeEnv {
         let mut ans = TypeEnv::default();
 
-        for (name, poly) in env.iter() {
+        let entries: Vec<_> = self
+            .env
+            .iter()
+            .map(|(name, poly)| (*name, poly.clone()))
+            .collect();
+
+        for (name, poly) in entries {
             let ty = self.apply_subst_to_type(poly.ty, subst);
             ans.insert(name.clone(), Polytype::new(poly.vars.clone(), ty));
         }

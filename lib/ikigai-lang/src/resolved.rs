@@ -124,12 +124,14 @@ impl Resolver {
             }
         }
 
-        Ok(IrCtx {
+        let ctx = IrCtx {
             decls: self.decls,
             exprs: self.exprs,
             types: self.types,
             symbols: ast.symbols,
-        })
+        };
+
+        Ok(ctx)
     }
 
     fn resolve_expr(&mut self, expr: &AstExprId, ast: &Ast) -> Result<ExprId, LowererError> {

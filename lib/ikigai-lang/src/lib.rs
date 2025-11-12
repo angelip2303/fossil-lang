@@ -10,13 +10,13 @@ pub fn compile(src: &str) -> Result<(), String> {
     use chumsky::prelude::*;
     use logos::Logos;
 
-    let registry = module::ModuleRegistry::new();
-
     let tokens: Vec<_> = Token::lexer(src).filter_map(|t| t.ok()).collect();
 
     let context = ast::AstCtx::default();
 
-    ast::module(&context)
+    ast::decls(&context)
+        .repeated()
+        .collect::<Vec<_>>()
         .parse(tokens.as_slice())
         .into_result()
         .map_err(|err| {
@@ -27,11 +27,11 @@ pub fn compile(src: &str) -> Result<(), String> {
 
     let ast = context.take();
 
-    let resolver = resolved::Resolver::new(registry);
-    let ir = resolver.resolve(ast).map_err(|err| todo!()).unwrap();
+    let resolver = resolved::Resolver::new(module::ModuleRegistry::new());
+    let ir = resolver.resolve(ast).map_err(|_| todo!()).unwrap();
 
-    let typechecker = typechecker::TypeChecker::new(ir);
-    let types = typechecker.check().map_err(|err| todo!()).unwrap();
+    let typechecker = typechecker::TypeChecker::new(ir, module::ModuleRegistry::new());
+    let types = typechecker.check().map_err(|_| todo!()).unwrap();
 
     println!("{types:?}");
 

@@ -107,7 +107,7 @@ pub enum Type {
     Record(Vec<(Symbol, TypeId)>),
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Ast {
     pub decls: Arena<Decl>,
     pub exprs: Arena<Expr>,
@@ -126,13 +126,6 @@ impl Deref for AstCtx {
     }
 }
 
-pub fn module<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, (), ParserError<'a>> + Clone
-where
-    I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
-{
-    decls(ctx).repeated()
-}
-
 fn symbol<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
@@ -140,7 +133,7 @@ where
     select! { Token::Identifier(ident) => ctx.borrow_mut().symbols.intern(ident) }
 }
 
-fn decls<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, DeclId, ParserError<'a>> + Clone
+pub fn decls<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, DeclId, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
