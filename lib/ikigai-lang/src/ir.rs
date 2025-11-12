@@ -8,16 +8,14 @@ use crate::ast::Literal;
 use crate::ast::{Expr as AstExpr, ExprId as AstExprId};
 use crate::ast::{Type as AstType, TypeId as AstTypeId};
 use crate::context::*;
-use crate::module::Binding;
-use crate::module::ModuleRegistry;
-use crate::module::RegistryError;
+use crate::module::*;
 use crate::traits::provider::ProviderError;
-use crate::typechecker::TypeVar;
+use crate::typechecker::Type;
 
 #[derive(Error, Debug)]
 pub enum LowererError {
     #[error("Provider not found: {0}")]
-    ProviderNotFound(String),
+    NotAProvider(String),
 
     #[error("Cannot find symbol: {0}")]
     UndefinedSymbol(String),
@@ -33,6 +31,7 @@ pub type DeclId = NodeId<Decl>;
 pub type ExprId = NodeId<Expr>;
 pub type TypeId = NodeId<Type>;
 
+#[derive(Debug)]
 pub struct IrCtx {
     pub decls: Arena<Decl>,
     pub exprs: Arena<Expr>,
@@ -40,16 +39,14 @@ pub struct IrCtx {
     pub symbols: Interner,
 }
 
-#[derive(Debug, Clone)]
-
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Decl {
     Let(Symbol, ExprId),
     Type(Symbol, TypeId),
     Expr(ExprId),
 }
 
-#[derive(Debug, Clone)]
-
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     LocalItem(DeclId),
     ModuleItem(BindingId), // TODO: think about it
@@ -60,31 +57,13 @@ pub enum Expr {
     Application { callee: ExprId, args: Vec<ExprId> },
 }
 
-#[derive(Debug, Clone)]
-pub enum Type {
-    Int,
-    String,
-    Bool,
-    Named(Symbol), // TODO: this should refer to the type's impl (i.e. declaration)
-    Var(TypeVar),  // internal to the typechecker
-    Function(Vec<TypeId>, TypeId),
-    List(TypeId),
-    Record(Vec<(Symbol, TypeId)>),
-}
-
+#[derive(Default)]
 pub struct Scope {
     pub vars: HashMap<Symbol, DeclId>, // TODO: would it make sense to match it against ExprId?
     pub types: HashMap<Symbol, TypeId>,
 }
 
 impl Scope {
-    pub fn new() -> Self {
-        Scope {
-            vars: HashMap::new(),
-            types: HashMap::new(),
-        }
-    }
-
     /// This implements variable shadowing
     pub fn define_var(&mut self, name: Symbol, decl_id: DeclId) {
         self.vars.insert(name, decl_id);
@@ -113,6 +92,16 @@ pub struct Resolver {
 }
 
 impl Resolver {
+    pub fn new(registry: ModuleRegistry) -> Self {
+        Self {
+            decls: Default::default(),
+            exprs: Default::default(),
+            types: Arena::default(),
+            registry,
+            scope: Default::default(),
+        }
+    }
+
     pub fn resolve(mut self, ast: Ast) -> Result<IrCtx, LowererError> {
         for (_, decl) in ast.decls.iter() {
             match decl {
@@ -156,12 +145,11 @@ impl Resolver {
                 }
             },
 
-            AstExpr::Qualified(path) => match self.registry.resolve(path, &ast.symbols)? {
-                Binding::Function(func) => Expr::ModuleItem(func),
-                Binding::Provider(_) => unreachable!(),
-            },
+            AstExpr::Qualified(path) => {
+                Expr::ModuleItem(self.registry.resolve(path, &ast.symbols)?)
+            }
 
-            AstExpr::Literal(lit) => Expr::Literal(*lit),
+            AstExpr::Literal(lit) => Expr::Literal(lit.clone()),
 
             AstExpr::List(list) => {
                 let items = list
@@ -178,14 +166,14 @@ impl Resolver {
                         let value = self.resolve_expr(value, ast)?;
                         Ok((*name, value))
                     })
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Result<Vec<_>, LowererError>>()?;
                 Expr::Record(fields)
             }
 
             AstExpr::Function { params, body } => {
                 let body = self.resolve_expr(body, ast)?;
                 Expr::Function {
-                    params: *params,
+                    params: params.clone(),
                     body,
                 }
             }
@@ -244,12 +232,13 @@ impl Resolver {
 
             AstType::Provider(provider, args) => {
                 let path = vec![*provider];
-                let binding = self.registry.resolve(&path, &ast.symbols)?;
-                let provider = match binding {
+                let id = self.registry.resolve(&path, &ast.symbols)?;
+                let provider = match self.registry.get(id) {
                     Binding::Provider(provider) => provider,
                     _ => {
+                        // TODO: this may be improved with function as_provider in registry
                         let provider = ast.symbols.resolve(*provider).to_string();
-                        return Err(LowererError::ProviderNotFound(provider));
+                        return Err(LowererError::NotAProvider(provider));
                     }
                 };
                 provider.generate(args)?

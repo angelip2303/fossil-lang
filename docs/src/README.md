@@ -1,6 +1,6 @@
 # fossil - A small language for living data
 
-`fossil` is a static, type inferred and embeddabble programming language written in Rust that captures _bugs_ at compile time.
+`fossil` is a static, type inferred and interpreted programming language written in Rust that captures _bugs_ at compile time.
 
 ## Dissecting the basic pipeline
 

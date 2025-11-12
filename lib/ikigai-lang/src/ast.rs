@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::ops::Deref;
 use std::rc::Rc;
 
 use chumsky::prelude::*;
@@ -7,7 +8,6 @@ use logos::Logos;
 use crate::context::*;
 
 type ParserError<'a> = extra::Err<Rich<'a, Token<'a>, SimpleSpan>>;
-type ParserContext<'a> = &'a Rc<RefCell<AstBuilder>>;
 
 #[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(skip r"[ \t\n\f]+", skip r"//.*")]
@@ -67,14 +67,14 @@ pub type DeclId = NodeId<Decl>;
 pub type ExprId = NodeId<Expr>;
 pub type TypeId = NodeId<Type>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Decl {
     Let(Symbol, ExprId),
     Type(Symbol, TypeId),
     Expr(ExprId),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     Identifier(Symbol),
     Qualified(Vec<Symbol>),
@@ -91,14 +91,14 @@ pub enum Expr {
                                                        // TODO: binary op
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Literal {
     Integer(i64),
     String(Symbol),
     Boolean(bool),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Provider(Symbol, Vec<Literal>),
     Named(Symbol),
@@ -116,44 +116,31 @@ pub struct Ast {
 }
 
 #[derive(Default)]
-pub struct AstBuilder {
-    pub decls: Arena<Decl>,
-    pub exprs: Arena<Expr>,
-    pub types: Arena<Type>,
-    pub symbols: Interner,
-}
+pub struct AstCtx(pub Rc<RefCell<Ast>>);
 
-impl AstBuilder {
-    pub fn alloc_decl(&mut self, decl: Decl) -> DeclId {
-        self.decls.alloc(decl)
-    }
+impl Deref for AstCtx {
+    type Target = Rc<RefCell<Ast>>;
 
-    pub fn alloc_expr(&mut self, expr: Expr) -> ExprId {
-        self.exprs.alloc(expr)
-    }
-
-    pub fn alloc_type(&mut self, ty: Type) -> TypeId {
-        self.types.alloc(ty)
-    }
-
-    pub fn build(self) -> Ast {
-        Ast {
-            decls: self.decls,
-            exprs: self.exprs,
-            types: self.types,
-            symbols: self.symbols,
-        }
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
-pub fn symbol<'a, I>(ctx: ParserContext<'a>) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
+pub fn module<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, (), ParserError<'a>> + Clone
+where
+    I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
+{
+    decls(ctx).repeated()
+}
+
+fn symbol<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
     select! { Token::Identifier(ident) => ctx.borrow_mut().symbols.intern(ident) }
 }
 
-pub fn decls<'a, I>(ctx: ParserContext<'a>) -> impl Parser<'a, I, DeclId, ParserError<'a>> + Clone
+fn decls<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, DeclId, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
@@ -161,34 +148,34 @@ where
         .ignore_then(symbol(ctx))
         .then_ignore(just(Token::Eq))
         .then(exprs(ctx))
-        .map(|(name, expr)| ctx.borrow_mut().alloc_decl(Decl::Let(name, expr)));
+        .map(|(name, expr)| ctx.borrow_mut().decls.alloc(Decl::Let(name, expr)));
 
     let type_decl = just(Token::Type)
         .ignore_then(symbol(ctx))
         .then_ignore(just(Token::Eq))
         .then(types(ctx))
-        .map(|(name, ty)| ctx.borrow_mut().alloc_decl(Decl::Type(name, ty)));
+        .map(|(name, ty)| ctx.borrow_mut().decls.alloc(Decl::Type(name, ty)));
 
-    let expr_decl = exprs(ctx).map(|expr| ctx.borrow_mut().alloc_decl(Decl::Expr(expr)));
+    let expr_decl = exprs(ctx).map(|expr| ctx.borrow_mut().decls.alloc(Decl::Expr(expr)));
 
     choice((let_decl, type_decl, expr_decl))
 }
 
-pub fn exprs<'a, I>(ctx: ParserContext<'a>) -> impl Parser<'a, I, ExprId, ParserError<'a>> + Clone
+fn exprs<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, ExprId, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
     recursive(|expr| {
         let identifier =
-            symbol(ctx).map(|name| ctx.borrow_mut().alloc_expr(Expr::Identifier(name)));
+            symbol(ctx).map(|name| ctx.borrow_mut().exprs.alloc(Expr::Identifier(name)));
 
         let qualified = symbol(ctx)
             .separated_by(just(Token::Dot))
             .at_least(1)
             .collect()
-            .map(|names| ctx.borrow_mut().alloc_expr(Expr::Qualified(names)));
+            .map(|names| ctx.borrow_mut().exprs.alloc(Expr::Qualified(names)));
 
-        let literal = literal(ctx).map(|lit| ctx.borrow_mut().alloc_expr(Expr::Literal(lit)));
+        let literal = literal(ctx).map(|lit| ctx.borrow_mut().exprs.alloc(Expr::Literal(lit)));
 
         let list = expr
             .clone()
@@ -196,7 +183,7 @@ where
             .allow_trailing()
             .collect()
             .delimited_by(just(Token::LBracket), just(Token::RBracket))
-            .map(|items| ctx.borrow_mut().alloc_expr(Expr::List(items)));
+            .map(|items| ctx.borrow_mut().exprs.alloc(Expr::List(items)));
 
         let record = symbol(ctx)
             .then_ignore(just(Token::Eq))
@@ -205,7 +192,7 @@ where
             .allow_trailing()
             .collect()
             .delimited_by(just(Token::LBrace), just(Token::RBrace))
-            .map(|fields| ctx.borrow_mut().alloc_expr(Expr::Record(fields)));
+            .map(|fields| ctx.borrow_mut().exprs.alloc(Expr::Record(fields)));
 
         let function = symbol(ctx)
             .separated_by(just(Token::Comma))
@@ -214,9 +201,13 @@ where
             .delimited_by(just(Token::LParen), just(Token::RParen))
             .then_ignore(just(Token::Arrow))
             .then(expr.clone())
-            .map(|(params, body)| ctx.borrow_mut().alloc_expr(Expr::Function { params, body }));
+            .map(|(params, body)| {
+                ctx.borrow_mut()
+                    .exprs
+                    .alloc(Expr::Function { params, body })
+            });
 
-        let application = expr
+        let application = qualified // TODO: revisit this
             .clone()
             .then(
                 expr.clone()
@@ -227,7 +218,8 @@ where
             )
             .map(|(callee, args)| {
                 ctx.borrow_mut()
-                    .alloc_expr(Expr::Application { callee, args })
+                    .exprs
+                    .alloc(Expr::Application { callee, args })
             });
 
         let atom = choice((
@@ -263,9 +255,7 @@ where
     })
 }
 
-pub fn literal<'a, I>(
-    ctx: ParserContext<'a>,
-) -> impl Parser<'a, I, Literal, ParserError<'a>> + Clone
+fn literal<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Literal, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
@@ -277,7 +267,7 @@ where
     }
 }
 
-pub fn types<'a, I>(ctx: ParserContext<'a>) -> impl Parser<'a, I, TypeId, ParserError<'a>> + Clone
+fn types<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, TypeId, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
@@ -288,10 +278,10 @@ where
                 .at_least(1)
                 .collect(),
         )
-        .map(|(name, args)| ctx.borrow_mut().alloc_type(Type::Provider(name, args)));
+        .map(|(name, args)| ctx.borrow_mut().types.alloc(Type::Provider(name, args)));
 
     let ty = recursive(|ty| {
-        let named = symbol(ctx).map(|name| ctx.borrow_mut().alloc_type(Type::Named(name)));
+        let named = symbol(ctx).map(|name| ctx.borrow_mut().types.alloc(Type::Named(name)));
 
         let function = ty
             .clone()
@@ -299,12 +289,12 @@ where
             .collect()
             .delimited_by(just(Token::LParen), just(Token::RParen))
             .then(ty.clone())
-            .map(|(args, ty)| ctx.borrow_mut().alloc_type(Type::Function(args, ty)));
+            .map(|(args, ty)| ctx.borrow_mut().types.alloc(Type::Function(args, ty)));
 
         let list = ty
             .clone()
             .delimited_by(just(Token::LBracket), just(Token::RBracket))
-            .map(|ty| ctx.borrow_mut().alloc_type(Type::List(ty)));
+            .map(|ty| ctx.borrow_mut().types.alloc(Type::List(ty)));
 
         let record = symbol(ctx)
             .then_ignore(just(Token::Colon))
@@ -313,7 +303,7 @@ where
             .allow_trailing()
             .collect()
             .delimited_by(just(Token::LBrace), just(Token::RBrace))
-            .map(|fields| ctx.borrow_mut().alloc_type(Type::Record(fields)));
+            .map(|fields| ctx.borrow_mut().types.alloc(Type::Record(fields)));
 
         choice((named, function, list, record))
     });

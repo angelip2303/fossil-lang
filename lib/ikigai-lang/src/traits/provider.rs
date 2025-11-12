@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::ast::Literal;
-use crate::ir::Type;
+use crate::typechecker::Type;
 
 type Result<T> = std::result::Result<T, ProviderError>;
 

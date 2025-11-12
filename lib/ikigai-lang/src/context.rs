@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use std::fmt::Debug;
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NodeId<T> {
     idx: u32,
-    _marker: PhantomData<fn() -> T>,
+    _marker: PhantomData<T>,
 }
 
 impl<T> NodeId<T> {
@@ -20,7 +21,36 @@ impl<T> NodeId<T> {
     }
 }
 
-impl<T: Clone> Copy for NodeId<T> {}
+impl<T> PartialEq for NodeId<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.idx == other.idx
+    }
+}
+
+impl<T> Eq for NodeId<T> {}
+
+impl<T> Clone for NodeId<T> {
+    fn clone(&self) -> Self {
+        Self {
+            idx: self.idx,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> Copy for NodeId<T> where NodeId<T>: Clone {}
+
+impl<T> Hash for NodeId<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.idx.hash(state);
+    }
+}
+
+impl<T> Debug for NodeId<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NodeId({})", self.idx)
+    }
+}
 
 pub struct Arena<T> {
     items: Vec<T>,
@@ -63,9 +93,16 @@ impl<T> Default for Arena<T> {
     }
 }
 
+impl<T: Debug> Debug for Arena<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Arena").field("items", &self.items).finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Symbol(u32);
 
+#[derive(Debug)]
 pub struct Interner {
     map: HashMap<String, Symbol>,
     strings: Vec<String>,
