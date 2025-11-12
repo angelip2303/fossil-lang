@@ -4,13 +4,14 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 use std::result;
 
+use chumsky::extra::Err;
 use thiserror::Error;
 
 use crate::ast::Literal;
 use crate::context::Symbol;
 use crate::context::{Arena, NodeId};
 use crate::module::{Binding, ModuleRegistry};
-use crate::resolved::{Decl, DeclId, Expr, ExprId, IrCtx};
+use crate::resolved::{Decl, Expr, ExprId, IrCtx};
 
 type Result<T> = result::Result<T, TypeError>;
 
@@ -63,7 +64,6 @@ pub enum Type {
     Int,
     String,
     Bool,
-    Named(DeclId),
     Var(TypeVar),
     Function(Vec<TypeId>, TypeId),
     List(TypeId),
@@ -94,8 +94,6 @@ impl TypeArena {
                 ftv.extend(self.ftv(*ret));
                 ftv
             }
-
-            Type::Named(_) => todo!(),
         }
     }
 }
@@ -112,6 +110,10 @@ pub struct Polytype {
 }
 
 impl Polytype {
+    pub fn mono(ty: TypeId) -> Self {
+        Polytype { vars: vec![], ty }
+    }
+
     pub fn new(vars: Vec<TypeVar>, ty: TypeId) -> Self {
         Polytype { vars, ty }
     }
@@ -197,80 +199,30 @@ pub struct TypeChecker {
 }
 
 impl TypeChecker {
-    pub fn check(mut self) -> Result<TypedIr> {
-        // Fase 1: Construir entorno inicial con tipos declarados
-        // Primero recolectar los IDs para evitar problemas de borrowing
-        let type_decls: Vec<_> = self
-            .ctx
-            .decls
-            .iter()
-            .filter_map(|(_, decl)| {
-                if let Decl::Type(name, ty_id) = decl {
-                    Some((*name, *ty_id))
-                } else {
-                    None
+    pub fn check(mut self) -> Result<()> {
+        for (_, decl) in self.ctx.decls.iter() {
+            match decl {
+                Decl::Let(name, expr) => {
+                    let (subst, ty) = self.infer(*expr)?;
+                    self.env = self.apply_subst_to_env(&self.env, &subst);
+                    let ty = self.apply_subst_to_type(ty, &subst);
+                    let poly = self.env.generalize(ty, &self.ctx.types);
+                    self.env.insert(*name, poly);
                 }
-            })
-            .collect();
 
-        for (name, ty_id) in type_decls {
-            let poly = Polytype {
-                vars: vec![],
-                ty: ty_id,
-            };
-            self.env.insert(name, poly);
+                Decl::Type(name, ty) => {
+                    self.env.insert(*name, Polytype::mono(*ty));
+                }
+
+                Decl::Expr(expr) => {
+                    let (subst, ty) = self.infer(*expr)?;
+                    self.env = self.apply_subst_to_env(&self.env, &subst);
+                    self.apply_subst_to_type(ty, &subst);
+                }
+            }
         }
 
-        // Fase 2: Recolectar las declaraciones que necesitamos inferir
-        let let_decls: Vec<_> = self
-            .ctx
-            .decls
-            .iter()
-            .filter_map(|(_, decl)| {
-                if let Decl::Let(name, expr_id) = decl {
-                    Some((*name, *expr_id))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let expr_decls: Vec<_> = self
-            .ctx
-            .decls
-            .iter()
-            .filter_map(|(_, decl)| {
-                if let Decl::Expr(expr_id) = decl {
-                    Some(*expr_id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Fase 3: Inferir tipos sin borrowing conflicts
-        let mut expr_types = HashMap::new();
-
-        for (name, expr_id) in let_decls {
-            let (subst, ty_id) = self.infer_expr(expr_id)?;
-            let ty_applied = self.ctx.apply_subst(ty_id, &subst);
-
-            // Generalizar y añadir al entorno
-            let poly = self.env.generalize(ty_applied, &self.ctx.types);
-            self.env.insert(name, poly);
-
-            expr_types.insert(expr_id, ty_applied);
-        }
-
-        for expr_id in expr_decls {
-            let (_, ty_id) = self.infer_expr(expr_id)?;
-            expr_types.insert(expr_id, ty_id);
-        }
-
-        Ok(TypedIr {
-            ctx: self.ctx,
-            expr_types,
-        })
+        Ok(())
     }
 
     fn infer(&mut self, expr: ExprId) -> Result<(Subst, TypeId)> {
@@ -306,11 +258,71 @@ impl TypeChecker {
                 (Default::default(), self.ctx.types.alloc(ty))
             }
 
-            Expr::List(items) => todo!(),
+            Expr::List(items) => match items.as_slice() {
+                [] => {
+                    let var = self.tvg.next();
+                    let inner = self.ctx.types.alloc(Type::Var(var));
+                    let list = self.ctx.types.alloc(Type::List(inner));
+                    (Default::default(), list)
+                }
+                [first, rest @ ..] => {
+                    let (mut subst, t1) = self.infer(*first)?;
 
-            Expr::Record(fields) => todo!(),
+                    for item in rest {
+                        let (s2, t2) = self.infer(*item)?;
+                        subst = self.compose(&subst, &s2);
+                        let first = self.apply_subst_to_type(t1, &subst);
+                        let item = self.apply_subst_to_type(t2, &subst);
+                        let unified = self.mgu(first, item)?;
+                        subst = self.compose(&subst, &unified);
+                    }
 
-            Expr::Function { params, body } => todo!(),
+                    let t3 = self.apply_subst_to_type(t1, &subst);
+                    let list = self.ctx.types.alloc(Type::List(t3));
+
+                    (subst, list)
+                }
+            },
+
+            Expr::Record(fields) => {
+                let mut subst = Default::default();
+                let mut ans = Vec::new();
+
+                for (name, expr) in fields {
+                    let (s1, t1) = self.infer(expr)?;
+                    subst = self.compose(&subst, &s1);
+                    let ty = self.apply_subst_to_type(t1, &subst);
+                    ans.push((name, ty));
+                }
+
+                let record = self.ctx.types.alloc(Type::Record(ans));
+                (subst, record)
+            }
+
+            Expr::Function { params, body } => {
+                let mut new_env = self.env.clone();
+                let mut types = Vec::new();
+
+                for param in params {
+                    let var = self.tvg.next();
+                    let ty = self.ctx.types.alloc(Type::Var(var));
+                    new_env.insert(param, Polytype::mono(ty));
+                    types.push(ty);
+                }
+
+                let old_env = std::mem::replace(&mut self.env, new_env);
+                let (subst, body_ty) = self.infer(body)?;
+                self.env = old_env;
+
+                let params = types
+                    .iter()
+                    .map(|ty| self.apply_subst_to_type(*ty, &subst))
+                    .collect();
+
+                let ret = self.apply_subst_to_type(body_ty, &subst);
+
+                (subst, self.ctx.types.alloc(Type::Function(params, ret)))
+            }
 
             Expr::Application { callee, args } => {
                 let (s1, t1) = self.infer(callee)?;
@@ -346,13 +358,35 @@ impl TypeChecker {
                 Default::default()
             }
 
-            (Type::Named(a), Type::Named(b)) if a == b => Default::default(),
-
             // if they both are list types, return the mgu of the inner types
             (Type::List(inner1), Type::List(inner2)) => self.mgu(inner1, inner2)?,
 
             // if they both are record types,
-            (Type::Record(fields1), Type::Record(fields2)) => todo!(),
+            (Type::Record(fields1), Type::Record(fields2)) => {
+                // TODO: consider which type of algorithm we support for unifying records
+                if fields1.len() != fields2.len() {
+                    return Err(TypeError::TypeMismatch {
+                        expected: ty_id,
+                        found: other_id,
+                    });
+                }
+
+                let mut s1 = Subst::default();
+                for ((name1, t1), (name2, t2)) in fields1.iter().zip(fields2.iter()) {
+                    if name1 != name2 {
+                        return Err(TypeError::TypeMismatch {
+                            expected: ty_id,
+                            found: other_id,
+                        });
+                    }
+
+                    let ty1 = self.apply_subst_to_type(*t1, &s1);
+                    let ty2 = self.apply_subst_to_type(*t2, &s1);
+                    let s2 = self.mgu(ty1, ty2)?;
+                    s1 = self.compose(&s1, &s2);
+                }
+                s1
+            }
 
             // if one of them is a type variable, we can bind the variable to the other type
             (Type::Var(var), _) => self.bind(var, other_id)?,
@@ -437,8 +471,6 @@ impl TypeChecker {
                 let ty = self.apply_subst_to_type(ty, subst);
                 self.ctx.types.alloc(Type::Function(new, ty))
             }
-
-            Type::Named(_) => todo!(),
         }
     }
 
@@ -447,7 +479,7 @@ impl TypeChecker {
 
         for (name, poly) in env.iter() {
             let ty = self.apply_subst_to_type(poly.ty, subst);
-            ans.insert(*name, Polytype::new(poly.vars.clone(), ty));
+            ans.insert(name.clone(), Polytype::new(poly.vars.clone(), ty));
         }
 
         ans

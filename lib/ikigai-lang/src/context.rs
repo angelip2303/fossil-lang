@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
+use std::vec::IntoIter;
 
 pub struct NodeId<T> {
     idx: u32,

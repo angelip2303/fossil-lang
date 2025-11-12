@@ -10,6 +10,7 @@ use crate::ast::{Type as AstType, TypeId as AstTypeId};
 use crate::context::*;
 use crate::module::*;
 use crate::traits::provider::ProviderError;
+use crate::typechecker::TypeArena;
 use crate::typechecker::{Type, TypeId};
 
 #[derive(Error, Debug)]
@@ -34,7 +35,7 @@ pub type ExprId = NodeId<Expr>;
 pub struct IrCtx {
     pub decls: Arena<Decl>,
     pub exprs: Arena<Expr>,
-    pub types: Arena<Type>,
+    pub types: TypeArena,
     pub symbols: Interner,
 }
 
@@ -105,19 +106,19 @@ impl Resolver {
         for (_, decl) in ast.decls.iter() {
             match decl {
                 AstDecl::Let(name, expr) => {
-                    let expr = self.resolve_expr(expr, &ast)?;
+                    let expr = self.resolve_expr(&expr, &ast)?;
                     let decl = self.decls.alloc(Decl::Let(*name, expr));
                     self.scope.define_var(*name, decl);
                 }
 
                 AstDecl::Type(name, ty) => {
-                    let ty = self.resolve_type(ty, &ast)?;
+                    let ty = self.resolve_type(&ty, &ast)?;
                     self.decls.alloc(Decl::Type(*name, ty.clone()));
                     self.scope.define_type(*name, ty);
                 }
 
                 AstDecl::Expr(expr) => {
-                    let expr = self.resolve_expr(expr, &ast)?;
+                    let expr = self.resolve_expr(&expr, &ast)?;
                     self.decls.alloc(Decl::Expr(expr));
                 }
             }
@@ -135,7 +136,6 @@ impl Resolver {
         let expr = ast.exprs.get(expr.clone()); // TODO: remove unnecessary clone
 
         let resolved = match expr {
-            // TODO: this could also be a function or a type?
             AstExpr::Identifier(name) => match self.scope.lookup_var(*name) {
                 Some(id) => Expr::LocalItem(id),
                 None => {
@@ -200,7 +200,10 @@ impl Resolver {
                 "string" | "String" => Type::String,
                 _ => match self.scope.lookup_type(*name) {
                     Some(ty) => return Ok(ty), // it was already resolved
-                    None => Type::Named(*name),
+                    None => {
+                        let name = ast.symbols.resolve(*name).to_string();
+                        return Err(LowererError::UndefinedSymbol(name));
+                    }
                 },
             },
 
