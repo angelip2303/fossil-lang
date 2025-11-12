@@ -4,7 +4,7 @@
 
 ### Case conversion
 
-Converting the casing of a string is a common operation and `kanso` supports it out of the box with the `upper` and `lower` functions.
+Converting the casing of a string is a common operation and `fossil` supports it out of the box with the `upper` and `lower` functions.
 
 ```
 open Data.Csv
@@ -20,7 +20,7 @@ read "path/to/file.csv"
 
 ### Stripping characters from the ends
 
-`kanso` provides a mechanism to strip characters from the beginning and end of a string.
+`fossil` provides a mechanism to strip characters from the beginning and end of a string.
 This is the `trim` function.
 
 ```

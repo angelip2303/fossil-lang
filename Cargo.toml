@@ -1,9 +1,9 @@
 [workspace]
 members = [
     "cli",
-    "lib/ikigai-lang",
-    # "lib/ikigai-providers",
-    # "lib/ikigai-stdlib"
+    "lib/fossil-lang",
+    # "lib/fossil-providers",
+    # "lib/fossil-stdlib"
 ]
 resolver = "2"
 
@@ -26,9 +26,9 @@ polars = {version = "0.51.0", features = ["lazy"]}
 thiserror = "2.0.17"
 
 # internal dependencies
-ikigai-lang = { path = "./lib/ikigai-lang" }
-# ikigai-providers = { path = "./lib/ikigai-providers" }
-# ikigai-stdlib = { path = "./lib/ikigai-stdlib" }
+fossil-lang = { path = "./lib/fossil-lang" }
+# fossil-providers = { path = "./lib/fossil-providers" }
+# fossil-stdlib = { path = "./lib/fossil-stdlib" }
 
 [profile.release]
 lto = true

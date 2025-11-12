@@ -1,5 +1,5 @@
 [package]
-name = "ikigai-stdlib"
+name = "fossil-stdlib"
 version.workspace = true
 description.workspace = true
 homepage.workspace = true
@@ -18,4 +18,4 @@ polars.workspace = true
 indexmap.workspace = true
 
 # internal dependencies
-ikigai-lang.workspace = true
+fossil-lang.workspace = true

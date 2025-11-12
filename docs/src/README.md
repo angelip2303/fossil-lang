@@ -34,8 +34,8 @@ open Data.Csv as Csv
 open Random as Random
 ```
 
-`kanso` uses the keyword `open` to load the content of another module.
-In this example we use it to get access to the `Data.Csv` and `Random` modules, which are bundled in the `kanso` standard library.
+`fossil` uses the keyword `open` to load the content of another module.
+In this example we use it to get access to the `Data.Csv` and `Random` modules, which are bundled in the `fossil` standard library.
 The `Data` sub-modules provide a set of functions for working with different data formats.
 In this case, we use the `Data.Csv` module to read and write a CSV file.
 The `Random` module provides a set of functions for generating random values.
@@ -47,7 +47,7 @@ As it can be seen, the `as` keyword is used to give a module an alias, _e.g_ loa
 let
 ```
 
-`kanso` uses the `let` keyword to bind values for later use.
+`fossil` uses the `let` keyword to bind values for later use.
 
 ```
 type Person = Csv<"people.csv">
