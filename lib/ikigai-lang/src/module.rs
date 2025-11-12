@@ -25,7 +25,7 @@ pub enum Binding {
 #[derive(Default)]
 pub struct ModuleRegistry {
     modules: HashMap<String, Module>,
-    bindings: Arena<Binding>, // Añadir arena para bindings
+    bindings: Arena<Binding>,
 }
 
 impl ModuleRegistry {
