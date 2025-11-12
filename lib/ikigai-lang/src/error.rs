@@ -1,8 +1,16 @@
 use thiserror::Error;
 
 use crate::checked::{TypeId, TypeVar};
-use crate::module::RegistryError;
 use crate::traits::provider::ProviderError;
+
+#[derive(Error, Debug)]
+pub enum RegistryError {
+    #[error("Undefined variable: {0}")]
+    UndefinedVariable(String),
+
+    #[error("Undefined module: {0}")]
+    UndefinedModule(String),
+}
 
 /// Errors from the lowering phase
 #[derive(Error, Debug)]
@@ -17,7 +25,7 @@ pub enum LowerError {
     NotAProvider(String),
 
     #[error(transparent)]
-    InvalidModulePath(#[from] RegistryError),
+    Registry(#[from] RegistryError),
 }
 
 /// Errors from the type generation phase

@@ -1,20 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use thiserror::Error;
-
 use crate::context::*;
+use crate::error::RegistryError;
 use crate::traits::function::FunctionImpl;
 use crate::traits::provider::TypeProviderImpl;
-
-#[derive(Error, Debug)]
-pub enum RegistryError {
-    #[error("Undefined variable: {0}")]
-    UndefinedVariable(String),
-
-    #[error("Undefined module: {0}")]
-    UndefinedModule(String),
-}
 
 pub type BindingId = NodeId<Binding>;
 
