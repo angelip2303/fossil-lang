@@ -48,7 +48,7 @@ pub enum Decl {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     LocalItem(DeclId),
-    ModuleItem(BindingId), // TODO: think about it
+    ModuleItem(BindingId),
     Literal(Literal),
     List(Vec<ExprId>),
     Record(Vec<(Symbol, ExprId)>),

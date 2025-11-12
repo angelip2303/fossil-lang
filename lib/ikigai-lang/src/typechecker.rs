@@ -9,8 +9,8 @@ use thiserror::Error;
 use crate::ast::Literal;
 use crate::context::Symbol;
 use crate::context::{Arena, NodeId};
-use crate::ir::{Decl, Expr, ExprId, IrCtx};
 use crate::module::{Binding, ModuleRegistry};
+use crate::resolved::{Decl, DeclId, Expr, ExprId, IrCtx};
 
 type Result<T> = result::Result<T, TypeError>;
 
@@ -29,24 +29,6 @@ pub enum TypeError {
     AlreadyResolved,
 }
 
-/// Operations on types
-// trait TypeOps {
-//     /// Find the set of free type variables in the type
-//     fn ftv(&self, arena: &TypeArena) -> HashSet<TypeVar>;
-//     /// Apply a substitution to the type
-//     fn apply(&self, subst: &Subst, arena: &mut TypeArena) -> Self;
-// }
-
-// impl<T: TypeOps> TypeOps for Vec<T> {
-//     fn ftv(&self) -> HashSet<TypeVar> {
-//         self.iter().flat_map(|t| t.ftv()).collect()
-//     }
-
-//     fn apply(&self, subst: &Subst) -> Self {
-//         self.iter().map(|x| x.apply(s)).collect()
-//     }
-// }
-
 // Type variable for polymorphism
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeVar(pub usize);
@@ -56,22 +38,6 @@ impl fmt::Display for TypeVar {
         write!(f, "'t{}", self.0)
     }
 }
-
-// impl TypeVar {
-//     /// Attempt to bind a type variable to a type, returning an appropriate substitution
-//     fn bind(&self, ty: TypeId, arena: &TypeArena) -> Result<Subst> {
-//         if let Type::Var(var) = arena.get(ty)
-//             && var == self
-//         {
-//             return Ok(Default::default());
-//         }
-
-//         match ty.ftv(arena).contains(self) {
-//             true => Err(TypeError::RecursiveType(self.clone(), ty)),
-//             false => Ok(Subst::singleton(*self, ty)),
-//         }
-//     }
-// }
 
 pub struct TypeVarGen {
     supply: usize,
@@ -97,7 +63,7 @@ pub enum Type {
     Int,
     String,
     Bool,
-    Named(Symbol), // TODO: this should refer to the type's impl (i.e. declaration)
+    Named(DeclId),
     Var(TypeVar),
     Function(Vec<TypeId>, TypeId),
     List(TypeId),
@@ -133,71 +99,6 @@ impl TypeArena {
         }
     }
 }
-
-// impl TypeOps for TypeId {
-//     // fn ftv(&self, arena: &TypeArena) -> HashSet<TypeVar> {
-//     //     match arena.get(*self) {
-//     //         // primitive types have no free variables
-//     //         Type::Int | Type::String | Type::Bool => Default::default(),
-
-//     //         // for lists, we take the free type variables in the inner type
-//     //         Type::List(inner) => inner.ftv(arena),
-
-//     //         // for records, we take the free type variables in the field types
-//     //         Type::Record(fields) => fields.iter().flat_map(|(_, ty)| ty.ftv(arena)).collect(),
-
-//     //         // for a type variable, there is one free variable: the type variable itself
-//     //         Type::Var(var) => HashSet::from([*var]),
-
-//     //         // for functions, we take the all the free type variables in the parameters and return type
-//     //         Type::Function(params, ret) => {
-//     //             let mut ftv = params
-//     //                 .iter()
-//     //                 .flat_map(|param| param.ftv(arena))
-//     //                 .collect::<HashSet<_>>();
-//     //             ftv.extend(ret.ftv(arena));
-//     //             ftv
-//     //         }
-
-//     //         Type::Named(_) => todo!(),
-//     //     }
-//     // }
-
-//     fn apply(&self, subst: &Subst, arena: &mut TypeArena) -> Self {}
-// }
-
-// impl Type {
-//     fn mgu(&self, other: &Self) -> Result<Subst> {
-//         let subst = match (self, other) {
-//             // if they both are primitive types, no substitution needs to be performed
-//             (Type::Int, Type::Int) | (Type::String, Type::String) | (Type::Bool, Type::Bool) => {
-//                 Default::default()
-//             }
-
-//             // if they both are list types, return the mgu of the inner types
-//             (Type::List(inner1), Type::List(inner2)) => inner1.mgu(inner2)?,
-
-//             // if they both are record types,
-//             (Type::Record(fields1), Type::Record(fields2)) => todo!(),
-
-//             // if one of them is a type variable, we can bind the variable to the other type
-//             (Type::Var(var), ty) | (ty, Type::Var(var)) => var.bind(ty)?,
-
-//             // for functions, we find the most general unifier of the parameters, apply the resulting
-//             // substitution to the return type, find the most general unifier of the return types, and
-//             // compose the substitutions
-//             (Type::Function(params1, ret1), Type::Function(params2, ret2)) => {
-//                 let mut subst = Default::default();
-//                 for (param1, param2) in params1.iter().zip(params2) {
-//                     subst = subst.compose(param1.mgu(param2)?)?;
-//                 }
-//                 subst.compose(ret1.mgu(ret2)?)?
-//             }
-//         };
-
-//         Ok(subst)
-//     }
-// }
 
 /// Polytypes (or type schemes) are types containing variables bound by zero or more for-all
 /// quantifiers, e.g. `forall a. a -> a`. As an example, a function `forall a. a -> a` with
@@ -488,6 +389,7 @@ impl TypeChecker {
         Ok(subst)
     }
 
+    /// Attempt to bind a type variable to a type, returning an appropriate substitution
     fn bind(&self, var: TypeVar, id: TypeId) -> Result<Subst> {
         let ty = self.ctx.types.get(id).clone();
 
@@ -553,7 +455,7 @@ impl TypeChecker {
 
     /// Instantiate polytype to a monotype with fresh type variables. Replaces all bound type variables
     /// with fresh type variables and return the instantiated type.
-    pub fn instantiate(&mut self, poly: &Polytype) -> TypeId {
+    fn instantiate(&mut self, poly: &Polytype) -> TypeId {
         // in case of no bound variables, it already is a monotype, so return it
         if poly.vars.is_empty() {
             return poly.ty;

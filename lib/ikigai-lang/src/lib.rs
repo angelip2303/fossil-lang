@@ -1,7 +1,7 @@
 pub mod ast;
 pub mod context;
-pub mod ir;
 pub mod module;
+pub mod resolved;
 pub mod traits;
 pub mod typechecker;
 
@@ -24,9 +24,10 @@ pub fn compile(src: &str) -> Result<(), String> {
             todo!()
         })
         .unwrap();
+
     let ast = context.take();
 
-    let resolver = ir::Resolver::new(registry);
+    let resolver = resolved::Resolver::new(registry);
     let ir = resolver.resolve(ast).map_err(|err| todo!()).unwrap();
 
     let typechecker = typechecker::TypeChecker::new(ir);
