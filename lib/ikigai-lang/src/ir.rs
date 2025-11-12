@@ -10,7 +10,7 @@ use crate::ast::{Type as AstType, TypeId as AstTypeId};
 use crate::context::*;
 use crate::module::*;
 use crate::traits::provider::ProviderError;
-use crate::typechecker::Type;
+use crate::typechecker::{Type, TypeId};
 
 #[derive(Error, Debug)]
 pub enum LowererError {
@@ -29,7 +29,6 @@ pub enum LowererError {
 
 pub type DeclId = NodeId<Decl>;
 pub type ExprId = NodeId<Expr>;
-pub type TypeId = NodeId<Type>;
 
 #[derive(Debug)]
 pub struct IrCtx {
