@@ -373,30 +373,37 @@ impl TypeChecker {
     }
 
     fn infer(&mut self, expr: ExprId) -> Result<(Subst, TypeId)> {
-        let expr = self.ctx.exprs.get(expr);
+        let expr = self.ctx.exprs.get(expr).clone();
 
-        let (subst, ty) = match expr {
+        let ans = match expr {
             // a local variable is typed as an instantiation of the corresponding type in the environment
-            Expr::LocalItem(id) => match self.ctx.decls.get(*id) {
+            Expr::LocalItem(id) => match self.ctx.decls.get(id) {
                 Decl::Let(name, expr) => {
                     todo!("lookup?")
                 }
-                Decl::Type(_, ty) => (Default::default(), ty),
+                Decl::Type(_, ty) => (Default::default(), *ty),
                 Decl::Expr(expr) => self.infer(*expr)?,
             },
 
             // a module variable is typed as an instantiation of the corresponding type in the registry
-            Expr::ModuleItem(id) => match self.registry.get(*id) {
-                Binding::Function(func) => func.signature(),
+            Expr::ModuleItem(id) => match self.registry.get(id) {
+                Binding::Function(func) => {
+                    let signature = func.signature();
+                    // TODO: apply polytype as a type
+                    todo!()
+                }
                 Binding::Provider(_) => return Err(TypeError::AlreadyResolved),
             },
 
             // a literal is typed as its primitive type
-            Expr::Literal(lit) => match lit {
-                Literal::Boolean(_) => (Default::default(), Type::Bool),
-                Literal::Integer(_) => (Default::default(), Type::Int),
-                Literal::String(_) => (Default::default(), Type::String),
-            },
+            Expr::Literal(lit) => {
+                let ty = match lit {
+                    Literal::Boolean(_) => Type::Bool,
+                    Literal::Integer(_) => Type::Int,
+                    Literal::String(_) => Type::String,
+                };
+                (Default::default(), self.ctx.types.alloc(ty))
+            }
 
             Expr::List(items) => todo!(),
 
@@ -405,20 +412,19 @@ impl TypeChecker {
             Expr::Function { params, body } => todo!(),
 
             Expr::Application { callee, args } => {
-                let (s1, t1) = self.infer(*callee)?;
+                let (s1, t1) = self.infer(callee)?;
                 let actual = self.apply_subst_to_type(t1, &s1);
 
-                let args = args
-                    .iter()
-                    .map(|arg| {
-                        let (s2, t2) = self.infer(*arg)?;
-                        let subst = self.compose(&s1, &s2);
-                        Ok(self.apply_subst_to_type(t2, &subst))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                let mut ans: Vec<TypeId> = Vec::new();
+                for arg in args {
+                    let (s2, t2) = self.infer(arg)?;
+                    let subst = self.compose(&s1, &s2);
+                    let ty = self.apply_subst_to_type(t2, &subst);
+                    ans.push(ty);
+                }
 
                 let ret = self.ctx.types.alloc(Type::Var(self.tvg.next()));
-                let expected = self.ctx.types.alloc(Type::Function(args, ret));
+                let expected = self.ctx.types.alloc(Type::Function(ans, ret));
 
                 let s3 = self.mgu(actual, expected)?;
 
@@ -426,12 +432,12 @@ impl TypeChecker {
             }
         };
 
-        Ok((subst, self.ctx.types.alloc(ty)))
+        Ok(ans)
     }
 
-    fn mgu(&self, ty_id: TypeId, other_id: TypeId) -> Result<Subst> {
-        let ty = self.ctx.types.get(ty_id);
-        let other = self.ctx.types.get(other_id);
+    fn mgu(&mut self, ty_id: TypeId, other_id: TypeId) -> Result<Subst> {
+        let ty = self.ctx.types.get(ty_id).clone();
+        let other = self.ctx.types.get(other_id).clone();
 
         let subst = match (ty, other) {
             // if they both are primitive types, no substitution needs to be performed
@@ -442,14 +448,14 @@ impl TypeChecker {
             (Type::Named(a), Type::Named(b)) if a == b => Default::default(),
 
             // if they both are list types, return the mgu of the inner types
-            (Type::List(inner1), Type::List(inner2)) => self.mgu(*inner1, *inner2)?,
+            (Type::List(inner1), Type::List(inner2)) => self.mgu(inner1, inner2)?,
 
             // if they both are record types,
             (Type::Record(fields1), Type::Record(fields2)) => todo!(),
 
             // if one of them is a type variable, we can bind the variable to the other type
-            (Type::Var(var), _) => self.bind(*var, other_id)?,
-            (_, Type::Var(var)) => self.bind(*var, ty_id)?,
+            (Type::Var(var), _) => self.bind(var, other_id)?,
+            (_, Type::Var(var)) => self.bind(var, ty_id)?,
 
             // for functions, we find the most general unifier of the parameters, apply the resulting
             // substitution to the return type, find the most general unifier of the return types, and
@@ -464,10 +470,10 @@ impl TypeChecker {
 
                 let mut subst1 = Subst::default();
                 for (param1, param2) in params1.iter().zip(params2) {
-                    let subst2 = self.mgu(*param1, *param2)?;
+                    let subst2 = self.mgu(*param1, param2)?;
                     subst1 = self.compose(&subst1, &subst2);
                 }
-                let subst3 = self.mgu(*ret1, *ret2)?;
+                let subst3 = self.mgu(ret1, ret2)?;
                 self.compose(&subst1, &subst3)
             }
 
