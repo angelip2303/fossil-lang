@@ -1,5 +1,3 @@
-use ikigai_lang::module::ModuleRegistry;
-
 pub fn main() {
     let src = r#"
         let a = 5
@@ -10,7 +8,6 @@ pub fn main() {
         }
     "#;
 
-    ikigai_lang::compiler::Compiler::new(ModuleRegistry::default())
-        .compile(src)
-        .unwrap();
+    let compiler = fossil_lang::compiler::Compiler;
+    let _ = compiler.compile(src);
 }

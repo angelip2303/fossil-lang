@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::context::*;
-use crate::error::RegistryError;
+use crate::error::ResolveError;
 use crate::traits::function::FunctionImpl;
 use crate::traits::provider::TypeProviderImpl;
 
@@ -21,11 +21,7 @@ pub struct ModuleRegistry {
 }
 
 impl ModuleRegistry {
-    pub fn resolve(
-        &self,
-        path: &[Symbol],
-        interner: &Interner,
-    ) -> Result<BindingId, RegistryError> {
+    pub fn resolve(&self, path: &[Symbol], interner: &Interner) -> Result<BindingId, ResolveError> {
         let module_parts: Vec<_> = path
             .iter()
             .take(path.len() - 1)
@@ -37,7 +33,7 @@ impl ModuleRegistry {
         let module = self
             .modules
             .get(&module_name)
-            .ok_or_else(|| RegistryError::UndefinedModule(module_name.clone()))?;
+            .ok_or_else(|| ResolveError::UndefinedModule(module_name.clone()))?;
 
         let item = interner.resolve(*path.last().unwrap());
 
@@ -45,7 +41,7 @@ impl ModuleRegistry {
             .bindings
             .get(item)
             .copied()
-            .ok_or_else(|| RegistryError::UndefinedVariable(format!("{}.{}", module_name, item)))
+            .ok_or_else(|| ResolveError::UndefinedVariable(format!("{}.{}", module_name, item)))
     }
 
     pub fn alloc(&mut self, binding: Binding) -> BindingId {

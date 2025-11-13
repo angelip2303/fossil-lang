@@ -1,65 +1,107 @@
+use crate::ast::{TypeId, TypeVar};
 use thiserror::Error;
 
-use crate::checked::{TypeId, TypeVar};
-use crate::traits::provider::ProviderError;
-
-#[derive(Error, Debug)]
-pub enum RegistryError {
-    #[error("Undefined variable: {0}")]
-    UndefinedVariable(String),
-
-    #[error("Undefined module: {0}")]
-    UndefinedModule(String),
-}
-
-/// Errors from the lowering phase
-#[derive(Error, Debug)]
-pub enum LowerError {
-    #[error("Undefined variable: {0}")]
-    UndefinedVariable(String),
-
-    #[error("Undefined type: {0}")]
-    UndefinedType(String),
-
-    #[error("Not a type provider: {0}")]
-    NotAProvider(String),
-
-    #[error(transparent)]
-    Registry(#[from] RegistryError),
-}
-
-/// Errors from the type generation phase
-#[derive(Error, Debug)]
-pub enum TypeGenError {
-    #[error(transparent)]
-    ProviderError(#[from] ProviderError),
-}
-
-/// Errors from the type checking phase
-#[derive(Error, Debug)]
-pub enum TypeError {
-    #[error("Illegal recursive type: {0} appears in itself")]
-    RecursiveType(TypeVar),
-
-    #[error("Type mismatch: cannot unify types at {:?} and {:?}", .expected, .found)]
-    TypeMismatch { expected: TypeId, found: TypeId },
-
-    #[error("Arity mismatch: expected {expected} arguments, got {found}")]
-    ArityMismatch { expected: usize, found: usize },
-
-    #[error("Undefined variable: {0}")]
-    UndefinedVariable(String),
-}
-
-/// Overall compilation errors
+/// Top-level compilation error
 #[derive(Error, Debug)]
 pub enum CompileError {
     #[error(transparent)]
-    Lower(#[from] LowerError),
+    Parse(#[from] ParseError),
+
+    #[error(transparent)]
+    Resolve(#[from] ResolveError),
 
     #[error(transparent)]
     TypeGen(#[from] TypeGenError),
 
     #[error(transparent)]
     TypeCheck(#[from] TypeError),
+}
+
+/// Errors from the parsing phase
+#[derive(Error, Debug)]
+pub enum ParseError {
+    #[error("Unexpected token at {location}: expected {expected}, found {found}")]
+    UnexpectedToken {
+        location: String,
+        expected: String,
+        found: String,
+    },
+
+    #[error("Unclosed delimiter at {location}: expected {expected}")]
+    UnclosedDelimiter { location: String, expected: char },
+
+    #[error("Invalid number literal: {0}")]
+    InvalidNumber(String),
+
+    #[error("Invalid string literal: {0}")]
+    InvalidString(String),
+
+    #[error("Unexpected end of file")]
+    UnexpectedEof,
+}
+
+/// Errors from the name resolution phase
+#[derive(Error, Debug)]
+pub enum ResolveError {
+    #[error("Undefined variable: {0}")]
+    UndefinedVariable(String),
+
+    #[error("Undefined type: {0}")]
+    UndefinedType(String),
+
+    #[error("Undefined module: {0}")]
+    UndefinedModule(String),
+
+    #[error("Undefined type provider: {0}")]
+    UndefinedProvider(String),
+
+    #[error("Not a type provider: {0} is a function, not a type provider")]
+    NotAProvider(String),
+
+    #[error("Not a function: {0} is a type provider, not a function")]
+    NotAFunction(String),
+
+    #[error("Duplicate definition: {0} is already defined in this scope")]
+    DuplicateDefinition(String),
+}
+
+/// Errors from the type provider execution phase
+#[derive(Error, Debug)]
+pub enum TypeGenError {
+    #[error(transparent)]
+    Provider(#[from] ProviderError),
+}
+
+/// Errors from the provider execution phase
+#[derive(Error, Debug)]
+pub enum ProviderError {
+    #[error("Invalid argument count")]
+    InvalidArgumentCount,
+    #[error("Invalid argument type")]
+    InvalidArgumentType,
+}
+
+/// Errors from the type checking phase
+#[derive(Error, Debug)]
+pub enum TypeError {
+    #[error("Type mismatch: expected {expected:?}, found {found:?}")]
+    TypeMismatch { expected: TypeId, found: TypeId },
+
+    #[error("Record fields in lhs and rhs do not match")]
+    RecordFieldMismatch,
+
+    #[error("Record fields' sizes in lhs and rhs do not match")]
+    RecordSizeMismatch,
+
+    #[error("Arity mismatch: expected {expected}, found {found}")]
+    ArityMismatch { expected: usize, found: usize },
+
+    #[error("Infinite type: {0}")]
+    InfiniteType(TypeVar),
+
+    #[error("Cannot bind type")]
+    InvalidBinding,
+
+    #[error("Expression's type should have been already processed")]
+    InternalError,
 }
