@@ -55,7 +55,6 @@ where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
     recursive(|expr| {
-        // TODO: path parser
         let identifier = path(ctx).map(|path| ctx.ast().exprs.alloc(Expr::Identifier(path)));
 
         let literal = literal(ctx).map(|lit| ctx.ast().exprs.alloc(Expr::Literal(lit)));
@@ -77,11 +76,14 @@ where
             .delimited_by(just(Token::LBrace), just(Token::RBrace))
             .map(|fields| ctx.ast().exprs.alloc(Expr::Record(fields)));
 
-        let function = symbol(ctx)
-            .separated_by(just(Token::Comma))
-            .allow_trailing()
-            .collect()
-            .delimited_by(just(Token::LParen), just(Token::RParen))
+        let function = just(Token::Func)
+            .ignore_then(
+                symbol(ctx)
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
             .then_ignore(just(Token::Arrow))
             .then(expr.clone())
             .map(|(params, body)| ctx.ast().exprs.alloc(Expr::Function { params, body }));
@@ -162,7 +164,7 @@ where
             .collect()
             .delimited_by(just(Token::LParen), just(Token::RParen))
             .then(ty.clone())
-            .map(|(params, ret)| ctx.ast().types.alloc(Type::Function { params, ret }));
+            .map(|(params, ret)| ctx.ast().types.alloc(Type::Function(params, ret)));
 
         let list = ty
             .clone()

@@ -1,9 +1,7 @@
-use std::f64::consts::PI;
-
 use crate::error::CompileError;
 use crate::module::ModuleRegistry;
 use crate::phases::typecheck::TypeChecker;
-use crate::phases::typegen::{self, TypeGenerator};
+use crate::phases::typegen::TypeGenerator;
 use crate::phases::{parse::Parser, resolve::Resolver};
 
 pub struct Compiler;

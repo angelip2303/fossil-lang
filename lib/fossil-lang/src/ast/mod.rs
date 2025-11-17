@@ -62,7 +62,7 @@ pub enum Type {
     Provider { provider: Path, args: Vec<Literal> },
 
     /// A type function type `(T1, T2, ...) -> T`
-    Function { params: Vec<TypeId>, ret: TypeId },
+    Function(Vec<TypeId>, TypeId),
 
     /// A list type `[T]`
     List(TypeId),

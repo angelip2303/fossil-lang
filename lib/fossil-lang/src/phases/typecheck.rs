@@ -1,5 +1,5 @@
-// typecheck.rs - Versión mejorada
 use std::collections::{HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
 
 use crate::ast::*;
 use crate::context::Symbol;
@@ -7,6 +7,7 @@ use crate::error::TypeError;
 use crate::module::{Binding, ModuleRegistry};
 use crate::phases::{BindingRef, ResolutionTable, ResolvedProgram, TypedProgram};
 
+/// A type variable generator
 #[derive(Default)]
 pub struct TypeVarGen {
     supply: usize,
@@ -20,48 +21,162 @@ impl TypeVarGen {
     }
 }
 
+impl TypeVar {
+    /// Attempt to bind a type variable to a type, returning an appropriate substitution
+    fn bind(&self, ty: TypeId, ast: &Ast) -> Result<Subst, TypeError> {
+        if let Type::Var(v) = ast.types.get(ty)
+            && v == self
+        {
+            return Ok(Subst::default());
+        }
+
+        if ty.ftv(ast).contains(self) {
+            return Err(TypeError::InfiniteType(*self));
+        }
+
+        let mut s = Subst::default();
+        s.insert(*self, ty);
+        Ok(s)
+    }
+}
+
+impl TypeId {
+    /// Free type variables in a type
+    fn ftv(&self, ast: &Ast) -> HashSet<TypeVar> {
+        match ast.types.get(*self) {
+            Type::Var(var) => HashSet::from([*var]),
+
+            Type::List(inner) => inner.ftv(ast),
+
+            Type::Record(fields) => fields.iter().flat_map(|(_, ty)| ty.ftv(ast)).collect(),
+
+            Type::Function(params, ret) => {
+                let mut ans: HashSet<_> = params.iter().flat_map(|param| param.ftv(ast)).collect();
+                ans.extend(ret.ftv(ast));
+                ans
+            }
+
+            Type::Primitive(_) => HashSet::new(),
+
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Polytype {
+    fn ftv(&self, ast: &Ast) -> HashSet<TypeVar> {
+        let ty_ftv = self.ty.ftv(ast);
+        let bound: HashSet<_> = self.forall.iter().copied().collect();
+        ty_ftv.difference(&bound).cloned().collect()
+    }
+
+    /// Instantiate a polytype with fresh type variables
+    fn instantiate(&self, tvg: &mut TypeVarGen, ast: &mut Ast) -> TypeId {
+        if self.forall.is_empty() {
+            return self.ty;
+        }
+
+        let fresh_vars: HashMap<TypeVar, TypeId> = self
+            .forall
+            .iter()
+            .map(|old_var| (*old_var, ast.types.alloc(Type::Var(tvg.next()))))
+            .collect();
+
+        let subst = Subst(fresh_vars);
+        subst.apply(self.ty, ast)
+    }
+}
+
 /// A substitution is a mapping `σ: V -> T` from variables to types
 #[derive(Clone, Debug, Default)]
 pub struct Subst(HashMap<TypeVar, TypeId>);
 
+impl Deref for Subst {
+    type Target = HashMap<TypeVar, TypeId>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Subst {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl Subst {
-    pub fn singleton(var: TypeVar, ty: TypeId) -> Self {
-        Self([(var, ty)].into_iter().collect())
-    }
-
-    pub fn new(vars: impl IntoIterator<Item = (TypeVar, TypeId)>) -> Self {
-        Self(vars.into_iter().collect())
-    }
-
-    pub fn get(&self, var: &TypeVar) -> Option<TypeId> {
-        self.0.get(var).copied()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&TypeVar, &TypeId)> {
-        self.0.iter()
-    }
-
     /// Apply substitution to a type
-    /// Returns the same TypeId if no substitution needed
-    pub fn apply(&self, ty_id: TypeId, ast: &Ast) -> TypeId {
-        match ast.types.get(ty_id) {
-            Type::Var(var) => self.get(var).unwrap_or(ty_id),
-            _ => ty_id, // Tipos estructurales no se sustituyen directamente
+    pub fn apply(&self, ty_id: TypeId, ast: &mut Ast) -> TypeId {
+        self.apply_with_cache(ty_id, ast, &mut HashMap::new())
+    }
+
+    fn apply_with_cache(
+        &self,
+        ty: TypeId,
+        ast: &mut Ast,
+        cache: &mut HashMap<TypeId, TypeId>,
+    ) -> TypeId {
+        if let Some(&cached) = cache.get(&ty) {
+            return cached;
         }
+
+        let result = match ast.types.get(ty).clone() {
+            Type::Var(var) => match self.get(&var) {
+                Some(&ty) => self.apply_with_cache(ty, ast, cache),
+                None => ty,
+            },
+
+            Type::List(inner) => match self.apply_with_cache(inner, ast, cache) {
+                new_inner if new_inner == inner => ty,
+                new_inner => ast.types.alloc(Type::List(new_inner)),
+            },
+
+            Type::Record(fields) => {
+                let new_fields: Vec<_> = fields
+                    .iter()
+                    .map(|(name, field_ty)| (*name, self.apply_with_cache(*field_ty, ast, cache)))
+                    .collect();
+
+                match new_fields == fields {
+                    true => ty,
+                    false => ast.types.alloc(Type::Record(new_fields)),
+                }
+            }
+
+            Type::Function(params, ret) => {
+                let new_params: Vec<_> = params
+                    .iter()
+                    .map(|param| self.apply_with_cache(*param, ast, cache))
+                    .collect();
+
+                let new_ret = self.apply_with_cache(ret, ast, cache);
+
+                match new_ret == ret && new_params == params {
+                    true => ty,
+                    false => ast.types.alloc(Type::Function(new_params, new_ret)),
+                }
+            }
+
+            Type::Primitive(_) => ty,
+
+            Type::Named(_) | Type::Provider { .. } => unreachable!(),
+        };
+
+        cache.insert(ty, result);
+        result
     }
 
     /// Compose two substitutions: self ∘ other
-    pub fn compose(&self, other: &Subst, ast: &Ast) -> Subst {
+    pub fn compose(&self, other: &Subst, ast: &mut Ast) -> Subst {
         let mut composed = HashMap::new();
 
-        // Apply self to other's mappings
-        for (var, ty) in other.iter() {
-            composed.insert(*var, self.apply(*ty, ast));
+        for (&var, &ty) in other.iter() {
+            composed.insert(var, self.apply(ty, ast));
         }
 
-        // Add self's mappings that aren't in other
-        for (var, ty) in self.iter() {
-            composed.entry(*var).or_insert(*ty);
+        for (&var, &ty) in self.iter() {
+            composed.entry(var).or_insert(ty);
         }
 
         Subst(composed)
@@ -72,103 +187,45 @@ impl Subst {
 #[derive(Clone, Debug, Default)]
 pub struct TypeEnv(HashMap<Symbol, Polytype>);
 
+impl Deref for TypeEnv {
+    type Target = HashMap<Symbol, Polytype>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for TypeEnv {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl TypeEnv {
-    fn get(&self, name: &Symbol) -> Option<&Polytype> {
-        self.0.get(name)
-    }
-
-    fn insert(&mut self, name: Symbol, poly: Polytype) {
-        self.0.insert(name, poly);
-    }
-
-    fn values(&self) -> impl Iterator<Item = &Polytype> {
-        self.0.values()
-    }
-
-    /// Free type variables in the environment
-    fn ftv(&self, ast: &Ast) -> HashSet<TypeVar> {
-        let mut ans = HashSet::default();
-        for poly in self.values() {
-            let ftv = ftv_type(poly.ty, ast);
-            let bound: HashSet<_> = poly.forall.iter().copied().collect();
-            ans.extend(ftv.difference(&bound));
-        }
-        ans
-    }
-
-    /// Generalize: ∀(ftv(τ) \ ftv(Γ)). τ
+    /// Generalize a type with respect to this environment
     fn generalize(&self, ty: TypeId, ast: &Ast) -> Polytype {
-        let env_ftv = self.ftv(ast);
-        let ty_ftv = ftv_type(ty, ast);
-        let mut forall: Vec<TypeVar> = ty_ftv.difference(&env_ftv).copied().collect();
+        let env_ftv = self.values().flat_map(|poly| poly.ftv(ast)).collect();
+        let mut forall: Vec<TypeVar> = ty.ftv(ast).difference(&env_ftv).copied().collect();
         forall.sort_by_key(|v| v.0);
         Polytype { forall, ty }
     }
 }
 
-/// Free type variables in a type (flat computation)
-fn ftv_type(ty_id: TypeId, ast: &Ast) -> HashSet<TypeVar> {
-    let mut result = HashSet::new();
-    let mut stack = vec![ty_id];
-
-    while let Some(current) = stack.pop() {
-        match ast.types.get(current) {
-            Type::Var(var) => {
-                result.insert(*var);
-            }
-            Type::List(inner) => {
-                stack.push(*inner);
-            }
-            Type::Record(fields) => {
-                for (_, field_ty) in fields {
-                    stack.push(*field_ty);
-                }
-            }
-            Type::Function { params, ret } => {
-                stack.push(*ret);
-                for param in params {
-                    stack.push(*param);
-                }
-            }
-            Type::Primitive(_) => {}
-            Type::Named(_) | Type::Provider { .. } => {
-                panic!(
-                    "Unresolved type in type checking phase - TypeGen should have resolved these"
-                )
-            }
-        }
-    }
-
-    result
-}
-
-#[derive(Debug, Clone)]
-struct Constraint {
-    expected: TypeId,
-    actual: TypeId,
-}
-
 pub struct TypeChecker<'a> {
     registry: &'a ModuleRegistry,
-    env: TypeEnv,
     tvg: TypeVarGen,
     expr_types: HashMap<ExprId, TypeId>,
-    constraints: Vec<Constraint>,
 }
 
 impl<'a> TypeChecker<'a> {
     pub fn new(registry: &'a ModuleRegistry) -> Self {
         Self {
             registry,
-            env: TypeEnv::default(),
-            tvg: TypeVarGen::default(),
-            expr_types: HashMap::new(),
-            constraints: Vec::new(),
+            tvg: Default::default(),
+            expr_types: Default::default(),
         }
     }
 
-    /// Type check a resolved program
-    /// AST is NOT mutated - only type annotations are produced
     pub fn check(mut self, program: ResolvedProgram) -> Result<TypedProgram, TypeError> {
         let ResolvedProgram {
             mut ast,
@@ -176,258 +233,218 @@ impl<'a> TypeChecker<'a> {
             resolution,
         } = program;
 
-        // PASADA 1: Asignar types a todas las expresiones (flat loop)
-        self.assign_types(&mut ast, &resolution)?;
+        let mut env = TypeEnv::default();
 
-        // PASADA 2: Resolver constraints
-        let subst = self.solve_constraints(&ast)?;
+        let decl_ids: Vec<_> = ast.decls.iter().map(|(id, _)| id).collect();
+        for decl_id in decl_ids {
+            match ast.decls.get(decl_id).clone() {
+                Decl::Type { name, ty } => {
+                    env.insert(name, Polytype::mono(ty));
+                }
 
-        // PASADA 3: Aplicar substitution final
-        let final_types = self.apply_final_subst(&subst, &ast);
+                Decl::Let { name, value } => {
+                    let (subst, ty) = self.infer(&env, value, &mut ast, &resolution)?;
+                    let ty = subst.apply(ty, &mut ast);
+                    let poly = env.generalize(ty, &ast);
+                    env.insert(name, poly);
+                }
+
+                Decl::Expr(expr_id) => {
+                    self.infer(&env, expr_id, &mut ast, &resolution)?;
+                }
+            }
+        }
 
         Ok(TypedProgram {
             ast,
             symbols,
             resolution,
-            expr_types: final_types,
+            expr_types: self.expr_types.clone(),
         })
     }
 
-    // =========================================
-    // PASADA 1: ASSIGN TYPES (Flat loop)
-    // =========================================
-
-    fn assign_types(
+    fn infer(
         &mut self,
-        ast: &mut Ast,
-        resolution: &ResolutionTable,
-    ) -> Result<(), TypeError> {
-        let decl_ids: Vec<_> = ast.decls.iter().map(|(id, _)| id).collect();
-        for decl_id in &decl_ids {
-            let decl = ast.decls.get(*decl_id);
-            if let Decl::Type { name, ty } = decl {
-                self.env.insert(*name, Polytype::mono(*ty));
-            }
-        }
-
-        let exprs: Vec<_> = ast.exprs.iter().map(|(id, _)| id).collect();
-        for expr in exprs {
-            let ty = self.assign_expr_type(expr, ast, resolution)?;
-            self.expr_types.insert(expr, ty);
-        }
-
-        for decl_id in &decl_ids {
-            let decl = ast.decls.get(*decl_id);
-            if let Decl::Let { name, value } = decl {
-                let inferred_ty = self.expr_types[value];
-                self.env.insert(*name, Polytype::mono(inferred_ty));
-            }
-        }
-
-        Ok(())
-    }
-
-    fn assign_expr_type(
-        &mut self,
+        env: &TypeEnv,
         expr_id: ExprId,
         ast: &mut Ast,
         resolution: &ResolutionTable,
-    ) -> Result<TypeId, TypeError> {
-        let expr = ast.exprs.get(expr_id);
+    ) -> Result<(Subst, TypeId), TypeError> {
+        // we have a cached type representation (memoization), which allows us to exploit
+        // the capabilities of a Flattened AST, where child expressions appear before their parents.
+        // Thus, recursive calls from parents can just retrieve the type from the cache.
+        if let Some(&ty) = self.expr_types.get(&expr_id) {
+            return Ok((Subst::default(), ty));
+        }
 
-        let ty = match expr {
-            Expr::Identifier(_) => {
-                let binding = resolution
-                    .exprs
-                    .get(&expr_id)
-                    .ok_or(TypeError::InternalError)?;
-
-                match binding {
-                    BindingRef::Local(id) => {
-                        let decl = ast.decls.get(*id);
-                        match decl {
-                            Decl::Let { name, .. } => {
-                                if let Some(poly) = self.env.get(name).cloned() {
-                                    self.instantiate(&poly, ast)
-                                } else {
-                                    let var = self.tvg.next();
-                                    ast.types.alloc(Type::Var(var))
-                                }
-                            }
-
-                            _ => return Err(TypeError::InvalidBinding),
-                        }
-                    }
-
-                    BindingRef::Module(binding) => match self.registry.get(*binding) {
-                        Binding::Function(func) => {
-                            let signature = func.signature();
-                            self.instantiate(&signature, ast)
-                        }
-
-                        _ => return Err(TypeError::InvalidBinding),
-                    },
-                }
-            }
-
+        let (subst, ty) = match ast.exprs.get(expr_id).clone() {
             Expr::Literal(lit) => {
                 let ty = match lit {
                     Literal::Boolean(_) => Type::Primitive(PrimitiveType::Bool),
                     Literal::Integer(_) => Type::Primitive(PrimitiveType::Int),
                     Literal::String(_) => Type::Primitive(PrimitiveType::String),
                 };
-                ast.types.alloc(ty)
+
+                let ty_id = ast.types.alloc(ty);
+                (Subst::default(), ty_id)
+            }
+
+            Expr::Identifier(_) => {
+                let binding = resolution.exprs.get(&expr_id).unwrap();
+
+                let poly = match binding {
+                    BindingRef::Local(decl_id) => match ast.decls.get(*decl_id) {
+                        Decl::Let { name, .. } => env.get(name).unwrap().clone(),
+                        _ => return Err(TypeError::InvalidBinding),
+                    },
+                    BindingRef::Module(binding_id) => match self.registry.get(*binding_id) {
+                        Binding::Function(func) => func.signature(),
+                        _ => return Err(TypeError::InvalidBinding),
+                    },
+                };
+
+                let ty = poly.instantiate(&mut self.tvg, ast);
+                (Subst::default(), ty)
             }
 
             Expr::List(items) => {
                 if items.is_empty() {
                     let var = self.tvg.next();
-                    let inner = ast.types.alloc(Type::Var(var));
-                    ast.types.alloc(Type::List(inner))
+                    let elem_ty = ast.types.alloc(Type::Var(var));
+                    let list_ty = ast.types.alloc(Type::List(elem_ty));
+                    (Subst::default(), list_ty)
                 } else {
-                    let elem_var = self.tvg.next();
-                    let elem_ty = ast.types.alloc(Type::Var(elem_var));
+                    let (mut subst, elem_ty) = self.infer(env, items[0], ast, resolution)?;
 
-                    for item in items {
-                        self.constraints.push(Constraint {
-                            expected: elem_ty,
-                            actual: self.retrieve(item)?,
-                        });
+                    for &item in &items[1..] {
+                        let (s1, item_ty) = self.infer(env, item, ast, resolution)?;
+                        subst = subst.compose(&s1, ast);
+
+                        let elem_ty = subst.apply(elem_ty, ast);
+                        let s2 = self.unify(elem_ty, item_ty, ast)?;
+                        subst = subst.compose(&s2, ast);
                     }
 
-                    ast.types.alloc(Type::List(elem_ty))
+                    let final_elem_ty = subst.apply(elem_ty, ast);
+                    let list_ty = ast.types.alloc(Type::List(final_elem_ty));
+                    (subst, list_ty)
                 }
             }
 
             Expr::Record(fields) => {
+                let mut subst = Subst::default();
                 let mut field_types = Vec::new();
+
                 for (name, field_expr) in fields {
-                    let ty = self.retrieve(field_expr)?;
-                    field_types.push((*name, ty));
+                    let (s, field_ty) = self.infer(env, field_expr, ast, resolution)?;
+                    subst = subst.compose(&s, ast);
+
+                    let field_ty = subst.apply(field_ty, ast);
+                    field_types.push((name, field_ty));
                 }
-                ast.types.alloc(Type::Record(field_types))
+
+                let record_ty = ast.types.alloc(Type::Record(field_types));
+                (subst, record_ty)
             }
 
             Expr::Function { params, body } => {
                 let mut param_types = Vec::new();
+                let mut local_env = env.clone();
+
                 for param in params {
                     let var = self.tvg.next();
-                    let ty = ast.types.alloc(Type::Var(var));
-                    self.env.insert(*param, Polytype::mono(ty));
-                    param_types.push(ty);
+                    let param_ty = ast.types.alloc(Type::Var(var));
+                    local_env.insert(param, Polytype::mono(param_ty));
+                    param_types.push(param_ty);
                 }
 
-                let ret_ty = self.retrieve(body)?;
+                let (subst, ret) = self.infer(&local_env, body, ast, resolution)?;
 
-                ast.types.alloc(Type::Function {
-                    params: param_types,
-                    ret: ret_ty,
-                })
+                let params: Vec<_> = param_types
+                    .into_iter()
+                    .map(|ty| subst.apply(ty, ast))
+                    .collect();
+
+                let func_ty = ast.types.alloc(Type::Function(params, ret));
+
+                (subst, func_ty)
             }
 
             Expr::Application { callee, args } => {
-                let callee_ty = self.retrieve(callee)?;
+                let (mut subst, callee_ty) = self.infer(env, callee, ast, resolution)?;
 
-                let mut arg_types = Vec::new();
+                let mut params = Vec::new();
                 for arg in args {
-                    arg_types.push(self.retrieve(arg)?);
+                    let (s, arg_ty) = self.infer(env, arg, ast, resolution)?;
+                    subst = subst.compose(&s, ast);
+                    let arg_ty = subst.apply(arg_ty, ast);
+                    params.push(arg_ty);
                 }
 
                 let ret_var = self.tvg.next();
-                let ret_ty = ast.types.alloc(Type::Var(ret_var));
+                let ret = ast.types.alloc(Type::Var(ret_var));
 
-                let expected_func = ast.types.alloc(Type::Function {
-                    params: arg_types,
-                    ret: ret_ty,
-                });
+                let expected_func_ty = ast.types.alloc(Type::Function(params, ret));
 
-                self.constraints.push(Constraint {
-                    expected: expected_func,
-                    actual: callee_ty,
-                });
+                let callee_ty = subst.apply(callee_ty, ast);
+                let s = self.unify(callee_ty, expected_func_ty, ast)?;
+                subst = subst.compose(&s, ast);
 
-                ret_ty
+                let final_ret_ty = subst.apply(ret, ast);
+                (subst, final_ret_ty)
             }
         };
 
-        Ok(ty)
+        let final_ty = subst.apply(ty, ast);
+        self.expr_types.insert(expr_id, final_ty);
+
+        Ok((subst, final_ty))
     }
 
-    // =========================================
-    // PASADA 2: SOLVE CONSTRAINTS
-    // =========================================
-
-    fn solve_constraints(&mut self, ast: &Ast) -> Result<Subst, TypeError> {
-        let mut subst = Subst::default();
-
-        for constraint in &self.constraints {
-            let expected = subst.apply(constraint.expected, ast);
-            let actual = subst.apply(constraint.actual, ast);
-
-            let unifier = self.unify(expected, actual, ast)?;
-            subst = subst.compose(&unifier, ast);
-        }
-
-        Ok(subst)
-    }
-
-    /// Most General Unifier (MGU)
-    /// Encuentra la substitución más general que unifica dos tipos
-    fn unify(&self, ty1: TypeId, ty2: TypeId, ast: &Ast) -> Result<Subst, TypeError> {
+    fn unify(&self, ty1: TypeId, ty2: TypeId, ast: &mut Ast) -> Result<Subst, TypeError> {
         if ty1 == ty2 {
             return Ok(Subst::default());
         }
 
-        let t1 = ast.types.get(ty1);
-        let t2 = ast.types.get(ty2);
+        let t1 = ast.types.get(ty1).clone();
+        let t2 = ast.types.get(ty2).clone();
 
         match (t1, t2) {
-            // Unificación de variables
-            (Type::Var(v), _) => self.bind(*v, ty2, ast),
-            (_, Type::Var(v)) => self.bind(*v, ty1, ast),
+            (Type::Var(v), _) => v.bind(ty2, ast),
+            (_, Type::Var(v)) => v.bind(ty1, ast),
 
-            // Primitivos
             (Type::Primitive(p1), Type::Primitive(p2)) if p1 == p2 => Ok(Subst::default()),
 
-            // Listas
-            (Type::List(inner1), Type::List(inner2)) => self.unify(*inner1, *inner2, ast),
+            (Type::List(inner1), Type::List(inner2)) => self.unify(inner1, inner2, ast),
 
-            // Funciones
-            (
-                Type::Function {
-                    params: p1,
-                    ret: r1,
-                },
-                Type::Function {
-                    params: p2,
-                    ret: r2,
-                },
-            ) => {
-                if p1.len() != p2.len() {
+            (Type::Function(params1, ret1), Type::Function(params2, ret2)) => {
+                if params1.len() != params2.len() {
                     return Err(TypeError::ArityMismatch {
-                        expected: p1.len(),
-                        found: p2.len(),
+                        expected: params1.len(),
+                        found: params2.len(),
                     });
                 }
 
                 let mut subst = Subst::default();
 
-                // Unifica parámetros
-                for (param1, param2) in p1.iter().zip(p2.iter()) {
-                    let param1 = subst.apply(*param1, ast);
-                    let param2 = subst.apply(*param2, ast);
+                let params: Vec<_> = params1
+                    .iter()
+                    .zip(params2.iter())
+                    .map(|(&a, &b)| (a, b))
+                    .collect();
+
+                for (param1, param2) in params {
                     let s = self.unify(param1, param2, ast)?;
                     subst = subst.compose(&s, ast);
                 }
 
-                // Unifica returns
-                let r1 = subst.apply(*r1, ast);
-                let r2 = subst.apply(*r2, ast);
+                let r1 = subst.apply(ret1, ast);
+                let r2 = subst.apply(ret2, ast);
                 let s = self.unify(r1, r2, ast)?;
+
                 Ok(subst.compose(&s, ast))
             }
 
-            // Records
             (Type::Record(fields1), Type::Record(fields2)) => {
                 if fields1.len() != fields2.len() {
                     return Err(TypeError::RecordSizeMismatch);
@@ -435,13 +452,19 @@ impl<'a> TypeChecker<'a> {
 
                 let mut subst = Subst::default();
 
-                for ((name1, ty1), (name2, ty2)) in fields1.iter().zip(fields2.iter()) {
+                let field_pairs: Vec<_> = fields1
+                    .iter()
+                    .zip(fields2.iter())
+                    .map(|((n1, t1), (n2, t2))| ((*n1, *t1), (*n2, *t2)))
+                    .collect();
+
+                for ((name1, ty1), (name2, ty2)) in field_pairs {
                     if name1 != name2 {
                         return Err(TypeError::RecordFieldMismatch);
                     }
 
-                    let ty1 = subst.apply(*ty1, ast);
-                    let ty2 = subst.apply(*ty2, ast);
+                    let ty1 = subst.apply(ty1, ast);
+                    let ty2 = subst.apply(ty2, ast);
                     let s = self.unify(ty1, ty2, ast)?;
                     subst = subst.compose(&s, ast);
                 }
@@ -449,70 +472,10 @@ impl<'a> TypeChecker<'a> {
                 Ok(subst)
             }
 
-            // Tipos no resueltos (deberían haber sido resueltos por TypeGen)
-            (Type::Named(_), _) | (_, Type::Named(_)) => {
-                panic!("Named type should have been resolved by TypeGen")
-            }
-
-            (Type::Provider { .. }, _) | (_, Type::Provider { .. }) => {
-                panic!("Provider type should have been generated by TypeGen")
-            }
-
-            // Tipos incompatibles
             _ => Err(TypeError::TypeMismatch {
                 expected: ty1,
                 found: ty2,
             }),
         }
-    }
-
-    fn bind(&self, var: TypeVar, ty: TypeId, ast: &Ast) -> Result<Subst, TypeError> {
-        if let Type::Var(v) = ast.types.get(ty) {
-            if *v == var {
-                return Ok(Subst::default());
-            }
-        }
-
-        if ftv_type(ty, ast).contains(&var) {
-            return Err(TypeError::InfiniteType(var));
-        }
-
-        Ok(Subst::singleton(var, ty))
-    }
-
-    fn apply_final_subst(&self, subst: &Subst, ast: &Ast) -> HashMap<ExprId, TypeId> {
-        self.expr_types
-            .iter()
-            .map(|(expr_id, ty)| (*expr_id, subst.apply(*ty, ast)))
-            .collect()
-    }
-
-    /// Instantiate a polytype (replaces bound variables with fresh ones)
-    fn instantiate(&mut self, poly: &Polytype, ast: &mut Ast) -> TypeId {
-        if poly.forall.is_empty() {
-            return poly.ty;
-        }
-
-        // Crea variables frescas para cada variable ligada
-        let fresh_vars: HashMap<TypeVar, TypeId> = poly
-            .forall
-            .iter()
-            .map(|old_var| {
-                let fresh = self.tvg.next();
-                (*old_var, ast.types.alloc(Type::Var(fresh)))
-            })
-            .collect();
-
-        let subst = Subst(fresh_vars);
-
-        // Aplica la substitución al tipo
-        subst.apply(poly.ty, ast)
-    }
-
-    fn retrieve(&self, expr_id: &ExprId) -> Result<TypeId, TypeError> {
-        self.expr_types
-            .get(expr_id)
-            .copied()
-            .ok_or(TypeError::InternalError)
     }
 }

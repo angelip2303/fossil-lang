@@ -1,5 +1,6 @@
 use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
+use std::fmt;
 use std::rc::Rc;
 
 use crate::ast::*;
@@ -69,13 +70,70 @@ pub struct TypedProgram {
 }
 
 impl std::fmt::Display for TypedProgram {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (expr, ty) in self.expr_types.iter() {
-            let expr = self.ast.exprs.get(*expr);
-            let ty = self.ast.types.get(*ty);
-            writeln!(f, "(Expr: {:?}) -> (Type: {:?})", expr, ty)?;
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "=== Type Inference Results ===\n")?;
+
+        // Print declarations with their inferred types
+        for (decl_id, decl) in self.ast.decls.iter() {
+            match decl {
+                Decl::Let { name, value } => {
+                    let name_str = self.symbols.resolve(*name);
+                    let value_ty = self.expr_types.get(value);
+
+                    if let Some(ty_id) = value_ty {
+                        let ty_str = self.type_to_string(*ty_id);
+                        writeln!(f, "let {} : {}", name_str, ty_str)?;
+                    }
+                }
+                Decl::Type { name, ty } => {
+                    let name_str = self.symbols.resolve(*name);
+                    let ty_str = self.type_to_string(*ty);
+                    writeln!(f, "type {} = {}", name_str, ty_str)?;
+                }
+                Decl::Expr(expr_id) => {
+                    if let Some(ty_id) = self.expr_types.get(expr_id) {
+                        let ty_str = self.type_to_string(*ty_id);
+                        writeln!(f, "<expr> : {}", ty_str)?;
+                    }
+                }
+            }
         }
 
         Ok(())
+    }
+}
+
+impl TypedProgram {
+    fn type_to_string(&self, ty_id: TypeId) -> String {
+        match self.ast.types.get(ty_id) {
+            Type::Primitive(prim) => match prim {
+                PrimitiveType::Int => "int".to_string(),
+                PrimitiveType::String => "string".to_string(),
+                PrimitiveType::Bool => "bool".to_string(),
+            },
+            Type::Var(var) => format!("'{}", var),
+            Type::List(inner) => format!("[{}]", self.type_to_string(*inner)),
+            Type::Record(fields) => {
+                let field_strs: Vec<_> = fields
+                    .iter()
+                    .map(|(name, ty)| {
+                        let name_str = self.symbols.resolve(*name);
+                        let ty_str = self.type_to_string(*ty);
+                        format!("{}: {}", name_str, ty_str)
+                    })
+                    .collect();
+                format!("{{ {} }}", field_strs.join(", "))
+            }
+            Type::Function(params, ret) => {
+                let param_strs: Vec<_> = params.iter().map(|p| self.type_to_string(*p)).collect();
+                let ret_str = self.type_to_string(*ret);
+                format!("({}) -> {}", param_strs.join(", "), ret_str)
+            }
+            Type::Named(name) => {
+                let name_str = self.symbols.resolve(*name);
+                name_str.to_string()
+            }
+            Type::Provider { .. } => "<provider>".to_string(),
+        }
     }
 }
