@@ -1,3 +1,5 @@
+use fossil_lang::compiler::Compiler;
+
 pub fn main() {
     let src = r#"
         let number = 42
@@ -43,6 +45,6 @@ pub fn main() {
         let result2 = identity("hello")
     "#;
 
-    let compiler = fossil_lang::compiler::Compiler;
+    let compiler = Compiler::default();
     let _ = compiler.compile(src);
 }

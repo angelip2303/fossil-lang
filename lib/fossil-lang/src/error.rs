@@ -75,10 +75,11 @@ pub enum TypeGenError {
 /// Errors from the provider execution phase
 #[derive(Error, Debug)]
 pub enum ProviderError {
-    #[error("Invalid argument count")]
-    InvalidArgumentCount,
-    #[error("Invalid argument type")]
-    InvalidArgumentType,
+    #[error("Invalid arguments received")]
+    InvalidArguments,
+
+    #[error(transparent)]
+    Polars(#[from] polars::error::PolarsError),
 }
 
 /// Errors from the type checking phase

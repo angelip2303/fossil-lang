@@ -15,7 +15,6 @@ rust-version.workspace = true
 [dependencies]
 # external dependencies
 polars.workspace = true
-indexmap.workspace = true
 
 # internal dependencies
 fossil-lang.workspace = true

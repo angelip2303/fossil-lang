@@ -1,77 +1,58 @@
-use indexmap::IndexMap;
+use fossil_lang::context::Interner;
 use polars::prelude::*;
 
-use ikigai_lang::const_eval::ConstEvaluator;
-use ikigai_lang::error::Result;
-use ikigai_lang::function::RuntimeFunction;
-use ikigai_lang::module::Module;
-use ikigai_lang::provider::TypeProvider;
-use ikigai_lang::solver::Type;
-use ikigai_lang::solver::TypeScheme;
-use ikigai_lang::value::ListRepr;
-use ikigai_lang::value::Value;
+use fossil_lang::ast::PrimitiveType;
+use fossil_lang::ast::{Ast, Literal, Type};
+use fossil_lang::error::ProviderError;
+use fossil_lang::traits::provider::TypeProviderImpl;
 
 pub struct CsvProvider;
 
-impl TypeProvider for CsvProvider {
-    fn param_types(&self) -> Vec<Type> {
-        vec![Type::String]
-    }
-
-    fn provide_type(&self, ast: &Ast, args: &[Arg]) -> Result<Type> {
-        let eval = ConstEvaluator::new(ast);
-        let path = eval.eval_to_string(args[0].value)?;
-        let path = PlPath::from_str(&path);
+impl TypeProviderImpl for CsvProvider {
+    fn generate(
+        &self,
+        args: &[Literal],
+        ast: &mut Ast,
+        symbols: &mut Interner,
+    ) -> Result<Type, ProviderError> {
+        let path = match args {
+            [Literal::String(path)] => {
+                let path = symbols.resolve(*path);
+                PlPath::from_str(path)
+            }
+            _ => return Err(ProviderError::InvalidArguments),
+        };
 
         let mut lf = LazyCsvReader::new(path).finish()?;
         let schema = lf.collect_schema()?;
 
-        let fields: IndexMap<String, Box<Type>> = schema
+        let fields = schema
             .iter()
-            .map(|(name, dtype)| {
+            .map(move |(name, dtype)| {
                 let ty = match dtype {
-                    DataType::Boolean => Type::Bool,
-                    DataType::Int64 => Type::Int,
-                    DataType::String => Type::String,
-                    _ => Type::String, // fallback
+                    DataType::Boolean => Type::Primitive(PrimitiveType::Bool),
+
+                    DataType::Int8
+                    | DataType::Int16
+                    | DataType::Int32
+                    | DataType::Int64
+                    | DataType::UInt8
+                    | DataType::UInt16
+                    | DataType::UInt32
+                    | DataType::UInt64 => Type::Primitive(PrimitiveType::Int),
+
+                    DataType::String => Type::Primitive(PrimitiveType::String),
+
+                    _ => unimplemented!(),
                 };
-                (name.to_string(), Box::new(ty))
+
+                let name = symbols.intern(name);
+                let ty = ast.types.alloc(ty);
+
+                (name, ty)
             })
             .collect();
 
         Ok(Type::Record(fields))
-    }
-
-    fn generate_module(&self, name: &str, ty: Type) -> Result<Module> {
-        let mut module = Module::new(name);
-
-        module.add_function("load", CsvLoadFunction(ty));
-
-        Ok(module)
-    }
-}
-
-struct CsvLoadFunction(Type);
-
-impl RuntimeFunction for CsvLoadFunction {
-    fn type_scheme(&self) -> TypeScheme {
-        TypeScheme::mono(Type::Func(
-            Box::new(Type::String),
-            Box::new(Type::List(Box::new(self.0.clone()))),
-        ))
-    }
-
-    fn call(&self, args: Vec<Value>) -> Result<Value> {
-        let path = match &args[0] {
-            Value::String(s) => s.as_ref(),
-            _ => unreachable!("Type checker ensures correct types"), // TODO: I don't like this
-        };
-
-        let path = PlPath::from_str(path);
-
-        let mut lf = LazyCsvReader::new(path).finish()?;
-        let schema = lf.collect_schema()?;
-
-        Ok(Value::List(ListRepr::DataFrame { lf, schema }))
     }
 }

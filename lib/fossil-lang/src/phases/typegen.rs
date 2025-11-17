@@ -1,4 +1,5 @@
 use crate::ast::{Ast, Type, TypeId};
+use crate::context::Interner;
 use crate::error::TypeGenError;
 use crate::module::{Binding, ModuleRegistry};
 use crate::phases::BindingRef;
@@ -16,7 +17,7 @@ impl<'a> TypeGenerator<'a> {
     pub fn generate(self, program: ResolvedProgram) -> Result<ResolvedProgram, TypeGenError> {
         let ResolvedProgram {
             mut ast,
-            symbols,
+            mut symbols,
             resolution,
         } = program;
 
@@ -30,7 +31,7 @@ impl<'a> TypeGenerator<'a> {
             .collect();
 
         for id in providers {
-            self.generate_provider(id, &mut ast, &resolution)?;
+            self.generate_provider(id, &mut ast, &mut symbols, &resolution)?;
         }
 
         Ok(ResolvedProgram {
@@ -44,6 +45,7 @@ impl<'a> TypeGenerator<'a> {
         &self,
         ty: TypeId,
         ast: &mut Ast,
+        symbols: &mut Interner,
         resolution: &ResolutionTable,
     ) -> Result<(), TypeGenError> {
         let args = match ast.types.get(ty) {
@@ -61,7 +63,7 @@ impl<'a> TypeGenerator<'a> {
             _ => unreachable!("Resolver validated this"),
         };
 
-        let generated_type = provider.generate(&args)?;
+        let generated_type = provider.generate(&args, ast, symbols)?;
 
         *ast.types.get_mut(ty) = generated_type;
 
