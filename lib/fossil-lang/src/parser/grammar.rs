@@ -26,7 +26,8 @@ where
         .collect()
         .map(|path| Path::qualified(path));
 
-    choice((identifier, qualified))
+    // qualified must go first, or else identifier will match on qualified paths
+    choice((qualified, identifier))
 }
 
 pub fn decls<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, DeclId, ParserError<'a>> + Clone
@@ -145,7 +146,8 @@ where
             literal(ctx)
                 .separated_by(just(Token::Comma))
                 .at_least(1)
-                .collect(),
+                .collect()
+                .delimited_by(just(Token::LAngle), just(Token::RAngle)),
         )
         .map(|(provider, args)| ctx.ast().types.alloc(Type::Provider { provider, args }));
 

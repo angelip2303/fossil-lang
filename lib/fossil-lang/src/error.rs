@@ -78,6 +78,18 @@ pub enum ProviderError {
     #[error("Invalid arguments received")]
     InvalidArguments,
 
+    #[error("File not found: {0}")]
+    FileNotFound(String),
+
+    #[error("Path is not a file: {0}")]
+    NotAFile(String),
+
+    #[error("Invalid file extension: expected .{expected}, found {found}")]
+    InvalidExtension { expected: String, found: String },
+
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+
     #[error(transparent)]
     Polars(#[from] polars::error::PolarsError),
 }

@@ -2,18 +2,18 @@ use std::sync::Arc;
 
 use fossil_lang::compiler::Compiler;
 use fossil_lang::module::ModuleRegistry;
-use fossil_providers::csv::CsvProvider;
+use fossil_providers::json::JsonProvider;
 
 pub fn main() {
     let src = r#"
-        type Person = Data.Csv<"lib/fossil-providers/examples/csv/data.csv">;
+        type Person = Data.Json<"lib/fossil-providers/examples/json/data.json">;
     "#;
 
     let mut registry = ModuleRegistry::default();
 
     registry
         .module("Data")
-        .provider("Csv", Arc::new(CsvProvider))
+        .provider("Json", Arc::new(JsonProvider))
         .done();
 
     let compiler = Compiler::new(registry);

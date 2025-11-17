@@ -22,7 +22,7 @@ rust-version = "1.88.0"
 
 [workspace.dependencies]
 # external dependencies
-polars = {version = "0.51.0", features = ["lazy"]}
+polars = {version = "0.51.0", features = ["lazy", "json"]}
 thiserror = "2.0.17"
 
 # internal dependencies

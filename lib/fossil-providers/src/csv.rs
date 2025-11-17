@@ -1,10 +1,10 @@
-use fossil_lang::context::Interner;
-use polars::prelude::*;
-
-use fossil_lang::ast::PrimitiveType;
 use fossil_lang::ast::{Ast, Literal, Type};
+use fossil_lang::context::Interner;
 use fossil_lang::error::ProviderError;
 use fossil_lang::traits::provider::TypeProviderImpl;
+use polars::prelude::*;
+
+use crate::utils::*;
 
 pub struct CsvProvider;
 
@@ -15,43 +15,19 @@ impl TypeProviderImpl for CsvProvider {
         ast: &mut Ast,
         symbols: &mut Interner,
     ) -> Result<Type, ProviderError> {
-        let path = match args {
-            [Literal::String(path)] => {
-                let path = symbols.resolve(*path);
-                PlPath::from_str(path)
-            }
-            _ => return Err(ProviderError::InvalidArguments),
-        };
+        let path_str = extract_path_arg(args, symbols)?;
 
-        let mut lf = LazyCsvReader::new(path).finish()?;
-        let schema = lf.collect_schema()?;
+        validate_extension(path_str, &["csv"])?;
+        validate_local_file(path_str)?;
 
-        let fields = schema
-            .iter()
-            .map(move |(name, dtype)| {
-                let ty = match dtype {
-                    DataType::Boolean => Type::Primitive(PrimitiveType::Bool),
+        let df = CsvReadOptions::default()
+            .with_infer_schema_length(Some(100))
+            .with_has_header(true)
+            .try_into_reader_with_file_path(Some(path_str.into()))?
+            .finish()?;
 
-                    DataType::Int8
-                    | DataType::Int16
-                    | DataType::Int32
-                    | DataType::Int64
-                    | DataType::UInt8
-                    | DataType::UInt16
-                    | DataType::UInt32
-                    | DataType::UInt64 => Type::Primitive(PrimitiveType::Int),
-
-                    DataType::String => Type::Primitive(PrimitiveType::String),
-
-                    _ => unimplemented!(),
-                };
-
-                let name = symbols.intern(name);
-                let ty = ast.types.alloc(ty);
-
-                (name, ty)
-            })
-            .collect();
+        let schema = df.schema();
+        let fields = schema_to_fields(&schema, ast, symbols);
 
         Ok(Type::Record(fields))
     }

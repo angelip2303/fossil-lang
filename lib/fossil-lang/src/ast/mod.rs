@@ -1,3 +1,5 @@
+use polars::prelude::DataType;
+
 use crate::context::*;
 
 pub type DeclId = NodeId<Decl>;
@@ -114,6 +116,30 @@ pub enum PrimitiveType {
     Int,
     String,
     Bool,
+}
+
+impl From<DataType> for PrimitiveType {
+    fn from(value: DataType) -> Self {
+        match value {
+            DataType::Boolean => PrimitiveType::Bool,
+
+            DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::Int128
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64 => PrimitiveType::Int,
+
+            DataType::Float32 | DataType::Float64 => todo!(),
+
+            DataType::String => PrimitiveType::String,
+
+            _ => todo!(),
+        }
+    }
 }
 
 /// Type variable for polymorphism
