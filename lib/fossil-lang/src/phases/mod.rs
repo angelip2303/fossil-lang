@@ -19,11 +19,11 @@ pub struct AstCtx {
 }
 
 impl AstCtx {
-    pub fn ast(&self) -> RefMut<Ast> {
+    pub fn ast<'a>(&'a self) -> RefMut<'a, Ast> {
         self.ast.borrow_mut()
     }
 
-    pub fn symbols(&self) -> RefMut<Interner> {
+    pub fn symbols<'a>(&'a self) -> RefMut<'a, Interner> {
         self.symbols.borrow_mut()
     }
 
@@ -74,7 +74,7 @@ impl std::fmt::Display for TypedProgram {
         writeln!(f, "=== Type Inference Results ===\n")?;
 
         // Print declarations with their inferred types
-        for (decl_id, decl) in self.ast.decls.iter() {
+        for (_, decl) in self.ast.decls.iter() {
             match decl {
                 Decl::Let { name, value } => {
                     let name_str = self.symbols.resolve(*name);
