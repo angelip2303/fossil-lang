@@ -5,5 +5,5 @@ pub mod error;
 pub mod module;
 pub mod parser;
 pub mod phases;
+pub mod runtime;
 pub mod traits;
-// pub mod typechecker;

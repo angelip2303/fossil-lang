@@ -43,6 +43,7 @@ pub fn main() {
 
         let result = identity(42)
         let result2 = identity("hello")
+        let result3 = identity(result)
     "#;
 
     let compiler = Compiler::default();
