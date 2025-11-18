@@ -61,6 +61,15 @@ impl TypeId {
             _ => unreachable!(),
         }
     }
+
+    fn is_function(&self, ast: &Ast) -> bool {
+        match ast.types.get(*self) {
+            Type::Function(..) => true,
+            Type::List(inner) => inner.is_function(ast),
+            Type::Record(fields) => fields.iter().any(|(_, ty)| ty.is_function(ast)),
+            _ => false,
+        }
+    }
 }
 
 impl Polytype {
@@ -326,6 +335,12 @@ impl<'a> TypeChecker<'a> {
                     }
 
                     let final_elem_ty = subst.apply(elem_ty, ast);
+
+                    // we do not soport function types in lists
+                    if final_elem_ty.is_function(ast) {
+                        return Err(TypeError::InvalidListElement(final_elem_ty));
+                    }
+
                     let list_ty = ast.types.alloc(Type::List(final_elem_ty));
                     (subst, list_ty)
                 }
@@ -338,12 +353,18 @@ impl<'a> TypeChecker<'a> {
                 for (name, field_expr) in fields {
                     let (s, field_ty) = self.infer(env, field_expr, ast, resolution)?;
                     subst = subst.compose(&s, ast);
-
                     let field_ty = subst.apply(field_ty, ast);
+
+                    // we do not support function types in records' fields
+                    if field_ty.is_function(ast) {
+                        return Err(TypeError::InvalidRecordField(name, field_ty));
+                    }
+
                     field_types.push((name, field_ty));
                 }
 
                 let record_ty = ast.types.alloc(Type::Record(field_types));
+
                 (subst, record_ty)
             }
 

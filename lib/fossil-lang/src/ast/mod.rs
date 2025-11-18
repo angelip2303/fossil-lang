@@ -48,8 +48,6 @@ pub enum Expr {
     // TODO: member access
     // TODO: type annotation
     // TODO: cast
-    // TODO: unary op
-    // TODO: binary op
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -92,3 +92,20 @@ Multiple entries are separated by commas:
 Semantically, records are not primitive values but **context-dependent transformation blocks**.
 Their meaning depends on the function that consumes them. For example, in the `select` function, a record specifies how to construct the output dataset: each key becomes the alias of a resulting column, and each value is an expression that defines the content of that column.
 In other contexts (_e.g._ `Rdf.map` or `GraphQL.map`), records can be interpreted as mappings to RDF triples or GraphQL fields, respectively.
+
+Record fields cannot be of type Function or closure.
+
+## Lists
+
+Lists `[ ... ]` are expressions that define a sequence of values.
+The syntax is similar to an array literal: each value is separated by commas.
+
+```ikigai
+[1, 2, 3]
+```
+
+Semantically, lists are not primitive values but **context-dependent transformation blocks**.
+Their meaning depends on the function that consumes them. For example, in the `select` function, a list specifies how to construct the output dataset: each value becomes the content of a resulting column.
+In other contexts (_e.g._ `Rdf.map` or `GraphQL.map`), lists can be interpreted as mappings to RDF triples or GraphQL fields, respectively.
+
+Lists cannot be of type Function or closure.

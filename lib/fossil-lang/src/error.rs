@@ -1,5 +1,7 @@
-use crate::ast::{TypeId, TypeVar};
 use thiserror::Error;
+
+use crate::ast::{TypeId, TypeVar};
+use crate::context::Symbol;
 
 /// Top-level compilation error
 #[derive(Error, Debug)]
@@ -115,6 +117,18 @@ pub enum TypeError {
     #[error("Cannot bind type")]
     InvalidBinding,
 
+    #[error("List element cannot of type {0:?}")] // TODO: use display here
+    InvalidListElement(TypeId),
+
+    #[error("Record field with name {0:?} cannot of type {1:?}")] // TODO: use display here
+    InvalidRecordField(Symbol, TypeId),
+
     #[error("Expression's type should have been already processed")]
     InternalError,
+}
+
+#[derive(Error, Debug)]
+pub enum RuntimeError {
+    #[error(transparent)]
+    Polars(#[from] polars::error::PolarsError),
 }
