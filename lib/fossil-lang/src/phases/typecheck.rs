@@ -5,7 +5,7 @@ use crate::ast::*;
 use crate::context::Symbol;
 use crate::error::TypeError;
 use crate::module::{Binding, ModuleRegistry};
-use crate::phases::{BindingRef, ResolutionTable, ResolvedProgram, TypedProgram};
+use crate::phases::{BindingId, BindingRef, ResolutionTable, ResolvedProgram, TypedProgram};
 
 /// A type variable generator
 #[derive(Default)]
@@ -224,6 +224,7 @@ pub struct TypeChecker<'a> {
     registry: &'a ModuleRegistry,
     tvg: TypeVarGen,
     expr_types: HashMap<ExprId, TypeId>,
+    function_types: HashMap<BindingId, Polytype>,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -232,6 +233,7 @@ impl<'a> TypeChecker<'a> {
             registry,
             tvg: Default::default(),
             expr_types: Default::default(),
+            function_types: Default::default(),
         }
     }
 
@@ -307,10 +309,7 @@ impl<'a> TypeChecker<'a> {
                         _ => return Err(TypeError::InvalidBinding),
                     },
 
-                    BindingRef::Module(binding_id) => match self.registry.get(*binding_id) {
-                        Binding::Function(func) => func.signature(ast, &mut self.tvg),
-                        _ => return Err(TypeError::InvalidBinding),
-                    },
+                    BindingRef::Module(binding_id) => self.get_function_signature(*binding_id, ast),
                 };
 
                 let ty = poly.instantiate(&mut self.tvg, ast);
@@ -499,5 +498,19 @@ impl<'a> TypeChecker<'a> {
                 found: ty2,
             }),
         }
+    }
+
+    fn get_function_signature(&mut self, binding_id: BindingId, ast: &mut Ast) -> Polytype {
+        if let Some(poly) = self.function_types.get(&binding_id) {
+            return poly.clone();
+        }
+
+        let poly = match self.registry.get(binding_id) {
+            Binding::Function(func) => func.signature(ast, &mut self.tvg),
+            _ => panic!("Expected function"),
+        };
+
+        self.function_types.insert(binding_id, poly.clone());
+        poly
     }
 }
