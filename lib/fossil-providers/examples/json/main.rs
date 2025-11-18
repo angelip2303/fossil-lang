@@ -16,6 +16,6 @@ pub fn main() {
         .provider("Json", Arc::new(JsonProvider))
         .done();
 
-    let compiler = Compiler::new(registry);
+    let compiler = Compiler::new(&registry);
     let _ = compiler.compile(src);
 }

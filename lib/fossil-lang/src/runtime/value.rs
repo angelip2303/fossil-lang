@@ -17,7 +17,8 @@ pub enum Value {
     Series(Series),
     LazyFrame(LazyFrame),
 
-    // TODO: function values? Does this make sense?
+    // functions as values allow, for example, them to be passed
+    // as parameters to other functions (Higher-order functions)
     Closure {
         params: Vec<Symbol>,
         body: ExprId,

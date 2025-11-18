@@ -1,20 +1,20 @@
 use crate::error::CompileError;
 use crate::module::ModuleRegistry;
+use crate::phases::TypedProgram;
 use crate::phases::typecheck::TypeChecker;
 use crate::phases::typegen::TypeGenerator;
 use crate::phases::{parse::Parser, resolve::Resolver};
 
-#[derive(Default)]
-pub struct Compiler {
-    registry: ModuleRegistry,
+pub struct Compiler<'a> {
+    registry: &'a ModuleRegistry,
 }
 
-impl Compiler {
-    pub fn new(registry: ModuleRegistry) -> Self {
-        Self { registry }
+impl<'a> Compiler<'a> {
+    pub fn new(registry: &'a ModuleRegistry) -> Compiler<'a> {
+        Compiler { registry }
     }
 
-    pub fn compile(&self, src: &str) -> Result<(), CompileError> {
+    pub fn compile(&self, src: &str) -> Result<TypedProgram, CompileError> {
         let program = Parser::parse(src)?;
 
         let mut resolver = Resolver::new(&self.registry);
@@ -26,8 +26,6 @@ impl Compiler {
         let typecheck = TypeChecker::new(&self.registry);
         let typechecked = typecheck.check(generated)?;
 
-        println!("{}", typechecked);
-
-        Ok(())
+        Ok(typechecked)
     }
 }

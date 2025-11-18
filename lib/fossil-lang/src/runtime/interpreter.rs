@@ -1,7 +1,9 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use polars::prelude::{IntoLazy, UnionArgs, concat};
+use polars::prelude::{
+    Column, DataFrame, IntoColumn, IntoLazy, LazyFrame, NamedFrom, PlSmallStr, UnionArgs, concat,
+};
 use polars::series::Series;
 
 use crate::ast::*;
@@ -91,19 +93,20 @@ impl<'a> Interpreter<'a> {
             },
 
             Expr::Application { callee, args } => {
-                let callee = self.eval(*callee, ast, symbols, resolution)?;
+                let callee_val = self.eval(*callee, ast, symbols, resolution)?;
 
-                let arg_values = args
+                let arg_values: Vec<Value> = args
                     .iter()
                     .map(|arg| self.eval(*arg, ast, symbols, resolution))
-                    .collect()?;
+                    .collect::<Result<Vec<_>, _>>()?;
 
-                match callee {
+                match callee_val {
                     Value::Closure { params, body, env } => {
                         let saved_env = self.env.clone();
+                        self.env = (*env).clone();
 
-                        for (param, arg) in params.iter().zip(args) {
-                            self.env.bind(*param, arg);
+                        for (param, arg) in params.iter().zip(arg_values.iter()) {
+                            self.env.bind(*param, arg.clone());
                         }
 
                         let result = self.eval(body, ast, symbols, resolution)?;
@@ -133,7 +136,7 @@ impl<'a> Interpreter<'a> {
         resolution: &ResolutionTable,
     ) -> Result<Value, RuntimeError> {
         if items.is_empty() {
-            return Ok(Value::Series(Default::default()));
+            return Ok(Value::Series(Series::default()));
         }
 
         let values = items
@@ -141,34 +144,54 @@ impl<'a> Interpreter<'a> {
             .map(|item| self.eval(*item, ast, symbols, resolution))
             .collect::<Result<Vec<_>, _>>()?;
 
-        match values[0] {
-            // List of scalars → LazyFrame with single column
-            Value::Int(_) | Value::String(_) | Value::Bool(_) => {
-                Ok(Value::Series(Series::from_iter(values)))
+        match &values[0] {
+            Value::Int(_) => {
+                let ints = values.into_iter().map(|v| match v {
+                    Value::Int(i) => i,
+                    _ => unreachable!(),
+                });
+                Ok(Value::Series(Series::from_iter(ints)))
             }
 
-            // List of LazyFrames → concatenate them vertically
+            Value::String(_) => {
+                let strings = values.iter().map(|v| match v {
+                    Value::String(s) => s.as_ref(),
+                    _ => unreachable!(),
+                });
+                Ok(Value::Series(Series::from_iter(strings)))
+            }
+
+            Value::Bool(_) => {
+                let bools = values.into_iter().map(|v| match v {
+                    Value::Bool(b) => b,
+                    _ => unreachable!(),
+                });
+                Ok(Value::Series(Series::from_iter(bools)))
+            }
+
+            // TODO: shouldn't this be checked during typechecking?
             Value::LazyFrame(_) => {
-                let dfs = values
+                let dfs: Vec<_> = values
                     .into_iter()
                     .map(|v| match v {
                         Value::LazyFrame(df) => df.lazy(),
                         _ => unreachable!(),
                     })
-                    .collect::<Vec<_>>();
+                    .collect();
                 Ok(Value::LazyFrame(concat(dfs, UnionArgs::default())?))
             }
 
-            // List of Series → concatenate them horizontally
+            // TODO: am I sure about this?
             Value::Series(_) => {
                 let series = values.into_iter().map(|v| match v {
-                    Value::Series(s) => s,
+                    Value::Series(s) => s.into_column(),
                     _ => unreachable!(),
                 });
+                let df = DataFrame::from_iter(series);
+                Ok(Value::LazyFrame(df.lazy()))
             }
 
-            // we cannot build lists from function values
-            _ => unreachable!(),
+            Value::Closure { .. } | Value::Function(_) => unreachable!(),
         }
     }
 
@@ -179,7 +202,11 @@ impl<'a> Interpreter<'a> {
         symbols: &Interner,
         resolution: &ResolutionTable,
     ) -> Result<Value, RuntimeError> {
-        let evaluated = fields
+        if fields.is_empty() {
+            return Ok(Value::LazyFrame(Default::default()));
+        }
+
+        let evaluated: Vec<(Symbol, Value)> = fields
             .iter()
             .map(|(name, expr)| {
                 self.eval(*expr, ast, symbols, resolution)
@@ -187,15 +214,30 @@ impl<'a> Interpreter<'a> {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        let mut series_vec = Vec::new();
+
         for (name, value) in evaluated {
-            match value {
-                Value::Bool(bool) => {}
-                Value::Int(int) => {}
-                Value::String(s) => {}
-                Value::Series(series) => {}
-                Value::LazyFrame(df) => {}
-                _ => unreachable!(),
-            }
+            let name = PlSmallStr::from_str(symbols.resolve(name));
+
+            let series = match value {
+                Value::Int(i) => Series::new(name, vec![i]).into_column(),
+                Value::String(s) => Series::new(name, vec![s.as_ref()]).into_column(),
+                Value::Bool(b) => Series::new(name, vec![b]).into_column(),
+
+                Value::Series(mut s) => {
+                    s.rename(name);
+                    s.into_column()
+                }
+
+                Value::LazyFrame(lf) => unimplemented!(),
+
+                Value::Closure { .. } | Value::Function(_) => unreachable!(),
+            };
+
+            series_vec.push(series);
         }
+
+        let df = DataFrame::new(series_vec)?;
+        Ok(Value::LazyFrame(df.lazy()))
     }
 }

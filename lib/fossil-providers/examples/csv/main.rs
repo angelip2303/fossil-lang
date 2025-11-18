@@ -16,6 +16,6 @@ pub fn main() {
         .provider("Csv", Arc::new(CsvProvider))
         .done();
 
-    let compiler = Compiler::new(registry);
+    let compiler = Compiler::new(&registry);
     let _ = compiler.compile(src);
 }
