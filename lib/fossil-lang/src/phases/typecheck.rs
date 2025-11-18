@@ -306,8 +306,9 @@ impl<'a> TypeChecker<'a> {
                         Decl::Let { name, .. } => env.get(name).unwrap().clone(),
                         _ => return Err(TypeError::InvalidBinding),
                     },
+
                     BindingRef::Module(binding_id) => match self.registry.get(*binding_id) {
-                        Binding::Function(func) => func.signature(),
+                        Binding::Function(func) => func.signature(ast, &mut self.tvg),
                         _ => return Err(TypeError::InvalidBinding),
                     },
                 };

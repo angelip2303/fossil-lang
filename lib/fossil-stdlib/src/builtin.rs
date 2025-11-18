@@ -1,23 +1,28 @@
+use fossil_lang::phases::typecheck::TypeVarGen;
 use polars::prelude::*;
 
-use ikigai_lang::error::Result;
-use ikigai_lang::function::RuntimeFunction;
-use ikigai_lang::solver::Type;
-use ikigai_lang::solver::TypeScheme;
-use ikigai_lang::solver::TypeVar;
-use ikigai_lang::value::Value;
+use fossil_lang::ast::{Ast, Polytype, PrimitiveType, Type, TypeVar};
+use fossil_lang::error::RuntimeError;
+use fossil_lang::runtime::value::Value;
+use fossil_lang::traits::function::FunctionImpl;
 
 pub struct RandomNextFunction;
 
-impl RuntimeFunction for RandomNextFunction {
-    fn type_scheme(&self) -> TypeScheme {
-        TypeScheme::mono(Type::Func(
-            Box::new(Type::Int),
-            Box::new(Type::Func(Box::new(Type::Int), Box::new(Type::Int))),
-        ))
+impl FunctionImpl for RandomNextFunction {
+    fn signature(&self, ast: &mut Ast, tvg: &mut TypeVarGen) -> Polytype {
+        let input = vec![
+            ast.types.alloc(Type::Primitive(PrimitiveType::Int)),
+            ast.types.alloc(Type::Primitive(PrimitiveType::Int)),
+        ];
+
+        let output = ast.types.alloc(Type::Primitive(PrimitiveType::Int));
+
+        let ty = ast.types.alloc(Type::Function(input, output));
+
+        Polytype::mono(ty)
     }
 
-    fn call(&self, args: Vec<Value>) -> Result<Value> {
+    fn call(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match (&args[0], &args[1]) {
             (Value::Int(min), Value::Int(max)) => {
                 use rand::Rng;
@@ -30,32 +35,37 @@ impl RuntimeFunction for RandomNextFunction {
 
 pub struct CsvWriteFunction;
 
-impl RuntimeFunction for CsvWriteFunction {
-    fn type_scheme(&self) -> TypeScheme {
-        let a = TypeVar::Named("a");
+impl FunctionImpl for CsvWriteFunction {
+    fn signature(&self, ast: &mut Ast, tvg: &mut TypeVarGen) -> Polytype {
+        let var = tvg.next();
 
-        TypeScheme {
-            forall: vec![a],
-            ty: Type::Func(
-                Box::new(Type::List(Box::new(Type::Var(a)))),
-                Box::new(Type::Func(Box::new(Type::String), Box::new(Type::Unit))),
-            ),
-        }
+        let input = vec![
+            ast.types.alloc(Type::Var(var)),
+            ast.types.alloc(Type::Primitive(PrimitiveType::String)),
+        ];
+
+        let output = ast.types.alloc(Type::Primitive(PrimitiveType::Int));
+
+        let ty = ast.types.alloc(Type::Function(input, output));
+
+        Polytype::poly(vec![var], ty)
     }
 
-    fn call(&self, args: Vec<Value>) -> Result<Value> {
-        let data = &args[0];
+    fn call(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let lf = match &args[0] {
+            Value::LazyFrame(lf) => lf.clone(),
+            _ => unreachable!("Type checker ensures correct types"), // TODO: I don't like this
+        };
+
         let path = match &args[1] {
             Value::String(s) => s.as_ref(),
             _ => unreachable!(), // TODO: I don't like this
         };
 
-        let lf = data.as_lazyframe()?; // TODO: should this also be necessary?
         let mut df = lf.collect()?;
-
         let file = std::fs::File::create(path)?;
         CsvWriter::new(file).finish(&mut df)?;
 
-        Ok(Value::Unit)
+        Ok(Value::Bool(true)) // TODO: this is a placeholder
     }
 }

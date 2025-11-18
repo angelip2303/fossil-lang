@@ -3,7 +3,7 @@ members = [
     "cli",
     "lib/fossil-lang",
     "lib/fossil-providers",
-    # "lib/fossil-stdlib"
+    "lib/fossil-stdlib"
 ]
 resolver = "2"
 
@@ -28,7 +28,7 @@ thiserror = "2.0.17"
 # internal dependencies
 fossil-lang = { path = "./lib/fossil-lang" }
 fossil-providers = { path = "./lib/fossil-providers" }
-# fossil-stdlib = { path = "./lib/fossil-stdlib" }
+fossil-stdlib = { path = "./lib/fossil-stdlib" }
 
 [profile.release]
 lto = true

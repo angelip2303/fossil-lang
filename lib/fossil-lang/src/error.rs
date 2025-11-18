@@ -3,6 +3,15 @@ use thiserror::Error;
 use crate::ast::{TypeId, TypeVar};
 use crate::context::Symbol;
 
+#[derive(Error, Debug)]
+pub enum FossilError {
+    #[error(transparent)]
+    Compile(#[from] CompileError),
+
+    #[error(transparent)]
+    Runtime(#[from] RuntimeError),
+}
+
 /// Top-level compilation error
 #[derive(Error, Debug)]
 pub enum CompileError {
@@ -131,4 +140,7 @@ pub enum TypeError {
 pub enum RuntimeError {
     #[error(transparent)]
     Polars(#[from] polars::error::PolarsError),
+
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
 }
