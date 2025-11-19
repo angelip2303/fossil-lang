@@ -5,8 +5,9 @@ use fossil_lang::runtime::interpreter::Interpreter;
 
 pub fn main() -> Result<(), FossilError> {
     let src = r#"
-        open IO as io
-        io.println("Hello, World!")
+        let identity = fun (x) -> x
+        identity(42)
+        42 |> identity
     "#;
 
     let registry = ModuleRegistry::default();

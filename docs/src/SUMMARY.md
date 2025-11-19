@@ -1,8 +1,8 @@
 # Getting started
 
 - [Getting started](getting-started/README.md)
-- [Dissecting the basic pipeline](getting-started/dissecting-the-basic-pipeline.md)
-- [Anatomy of a program](getting-started/anatomy-of-a-program.md)
+- [Dissecting Hello World!](getting-started/dissecting-hello-world.md)
+- [Anatomy of a fossil program](getting-started/anatomy-of-a-fossil-program.md)
 
 # Syntax and semantics
 

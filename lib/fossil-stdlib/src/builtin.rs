@@ -1,15 +1,15 @@
-use fossil_lang::phases::typecheck::TypeVarGen;
 use polars::prelude::*;
 
-use fossil_lang::ast::{Ast, Polytype, PrimitiveType, Type, TypeVar};
+use fossil_lang::ast::{Ast, Polytype, PrimitiveType, Type};
 use fossil_lang::error::RuntimeError;
+use fossil_lang::phases::typecheck::TypeVarGen;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::FunctionImpl;
 
 pub struct RandomNextFunction;
 
 impl FunctionImpl for RandomNextFunction {
-    fn signature(&self, ast: &mut Ast, tvg: &mut TypeVarGen) -> Polytype {
+    fn signature(&self, ast: &mut Ast, _: &mut TypeVarGen) -> Polytype {
         let input = vec![
             ast.types.alloc(Type::Primitive(PrimitiveType::Int)),
             ast.types.alloc(Type::Primitive(PrimitiveType::Int)),
@@ -66,6 +66,6 @@ impl FunctionImpl for CsvWriteFunction {
         let file = std::fs::File::create(path)?;
         CsvWriter::new(file).finish(&mut df)?;
 
-        Ok(Value::Bool(true)) // TODO: this is a placeholder
+        Ok(Value::Unit)
     }
 }
