@@ -300,7 +300,7 @@ impl<'a> TypeChecker<'a> {
                 (Subst::default(), ty_id)
             }
 
-            Expr::Identifier(_) => {
+            Expr::Identifier(path) => {
                 let binding = resolution.exprs.get(&expr_id).unwrap();
 
                 let poly = match binding {
@@ -310,6 +310,17 @@ impl<'a> TypeChecker<'a> {
                     },
 
                     BindingRef::Module(binding_id) => self.get_function_signature(*binding_id, ast),
+
+                    BindingRef::Parameter { function: _ } => {
+                        let name = match path {
+                            Path::Simple(n) => n,
+                            _ => unreachable!(),
+                        };
+
+                        env.get(&name)
+                            .expect("Parameter should be in environment")
+                            .clone()
+                    }
                 };
 
                 let ty = poly.instantiate(&mut self.tvg, ast);

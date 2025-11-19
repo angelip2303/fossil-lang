@@ -1,9 +1,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use polars::prelude::{
-    Column, DataFrame, IntoColumn, IntoLazy, LazyFrame, NamedFrom, PlSmallStr, UnionArgs, concat,
-};
+use polars::prelude::{DataFrame, IntoColumn, IntoLazy, NamedFrom, PlSmallStr, UnionArgs, concat};
 use polars::series::Series;
 
 use crate::ast::*;
@@ -70,16 +68,25 @@ impl<'a> Interpreter<'a> {
                 Literal::Boolean(b) => Value::Bool(*b),
             },
 
-            Expr::Identifier(_) => match resolution.exprs.get(&expr_id).unwrap() {
-                BindingRef::Local(decl_id) => match ast.decls.get(*decl_id) {
+            Expr::Identifier(path) => match resolution.exprs.get(&expr_id).unwrap() {
+                BindingRef::Local(decl) => match ast.decls.get(*decl) {
                     Decl::Let { name, .. } => self.env.lookup(*name).cloned().unwrap(),
                     _ => unreachable!(),
                 },
 
-                BindingRef::Module(binding_id) => match self.registry.get(*binding_id) {
-                    Binding::Function(_) => Value::Function(*binding_id),
+                BindingRef::Module(binding) => match self.registry.get(*binding) {
+                    Binding::Function(_) => Value::Function(*binding),
                     _ => unreachable!(),
                 },
+
+                BindingRef::Parameter { function: _ } => {
+                    let name = match path {
+                        Path::Simple(n) => n,
+                        Path::Qualified(_) => unreachable!(),
+                    };
+
+                    self.env.lookup(*name).cloned().unwrap()
+                }
             },
 
             Expr::List(items) => self.eval_list(items, ast, symbols, resolution)?,

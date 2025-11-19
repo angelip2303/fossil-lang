@@ -47,10 +47,15 @@ pub struct ResolvedProgram {
     pub resolution: ResolutionTable,
 }
 
+/// Reference to a binding (where an identifier is defined)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingRef {
+    /// A local declaration (let or type)
     Local(DeclId),
+    /// A module binding (function or provider)
     Module(BindingId),
+    /// A function parameter (includes which function defines it)
+    Parameter { function: ExprId },
 }
 
 #[derive(Debug, Default)]
