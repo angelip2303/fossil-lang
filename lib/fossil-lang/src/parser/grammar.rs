@@ -21,7 +21,7 @@ where
     let identifier = symbol(ctx).map(|n| Path::simple(n));
 
     let qualified = symbol(ctx)
-        .separated_by(just(Token::Dot))
+        .separated_by(just(Token::ModuleSep))
         .at_least(1)
         .collect()
         .map(|path| Path::qualified(path));
@@ -56,7 +56,7 @@ where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
     recursive(|expr| {
-        let identifier = path(ctx).map(|path| ctx.ast().exprs.alloc(Expr::Identifier(path)));
+        let path = path(ctx).map(|path| ctx.ast().exprs.alloc(Expr::Identifier(path)));
 
         let unit = just(Token::LParen)
             .then(just(Token::RParen))
@@ -93,7 +93,7 @@ where
             .then(expr.clone())
             .map(|(params, body)| ctx.ast().exprs.alloc(Expr::Function { params, body }));
 
-        let application = identifier
+        let application = path
             .clone()
             .then(
                 expr.clone()
@@ -104,15 +104,7 @@ where
             )
             .map(|(callee, args)| ctx.ast().exprs.alloc(Expr::Application { callee, args }));
 
-        let atom = choice((
-            application,
-            unit,
-            literal,
-            list,
-            record,
-            function,
-            identifier,
-        ));
+        let atom = choice((application, unit, literal, list, record, function, path));
 
         // let pratt = atom.pratt((
         //     postfix(
@@ -170,8 +162,6 @@ where
             Token::StringType => ctx.ast().types.alloc(Type::Primitive(PrimitiveType::String)),
         };
 
-        let named = symbol(ctx).map(|name| ctx.ast().types.alloc(Type::Named(name)));
-
         let function = ty
             .clone()
             .separated_by(just(Token::Comma))
@@ -194,7 +184,9 @@ where
             .delimited_by(just(Token::LBrace), just(Token::RBrace))
             .map(|fields| ctx.ast().types.alloc(Type::Record(fields)));
 
-        choice((primitive, named, function, list, record))
+        let named = path(ctx).map(|name| ctx.ast().types.alloc(Type::Named(name)));
+
+        choice((primitive, function, list, record, named))
     });
 
     choice((provider, ty))

@@ -50,6 +50,8 @@ pub enum Token<'a> {
     LAngle,
     #[token(">")]
     RAngle,
+    #[token("::")]
+    ModuleSep,
 
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice())]
     Identifier(&'a str),

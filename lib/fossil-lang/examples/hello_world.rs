@@ -6,7 +6,7 @@ use fossil_lang::runtime::interpreter::Interpreter;
 pub fn main() -> Result<(), FossilError> {
     let src = r#"
         open IO as io
-        io.println("Hello, World!")
+        io::println("Hello, World!")
     "#;
 
     let registry = ModuleRegistry::default();

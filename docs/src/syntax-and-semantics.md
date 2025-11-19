@@ -82,4 +82,4 @@ The syntax is similar to an array literal in many programming languages: each va
 [1, 2, 3, 4]
 ```
 
-> Lists cannot be of type Function, closure, List or Unit.
+> List elements cannot be of type Function, closure, List or Unit.

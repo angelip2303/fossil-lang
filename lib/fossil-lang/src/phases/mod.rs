@@ -135,10 +135,17 @@ impl TypedProgram {
                 let ret_str = self.type_to_string(*ret);
                 format!("({}) -> {}", param_strs.join(", "), ret_str)
             }
-            Type::Named(name) => {
-                let name_str = self.symbols.resolve(*name);
-                name_str.to_string()
-            }
+            Type::Named(path) => match path {
+                Path::Simple(name) => {
+                    let name_str = self.symbols.resolve(*name);
+                    name_str.to_string()
+                }
+                Path::Qualified(parts) => parts
+                    .iter()
+                    .map(|s| self.symbols.resolve(*s))
+                    .collect::<Vec<_>>()
+                    .join("::"),
+            },
             Type::Provider { .. } => "<provider>".to_string(),
         }
     }

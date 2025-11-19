@@ -163,6 +163,7 @@ impl<'a> Resolver<'a> {
                     resolution.exprs.insert(expr_id, binding);
                     Ok(())
                 } else {
+                    // in case a module has been imported globally
                     match self.registry.resolve(&[name], symbols) {
                         Ok(binding_id) => {
                             resolution
@@ -232,16 +233,42 @@ impl<'a> Resolver<'a> {
         resolution: &mut ResolutionTable,
     ) -> Result<(), ResolveError> {
         match ast.types.get(type_id) {
-            Type::Named(name) => match self.stack.lookup_type(*name) {
-                Some(binding) => {
+            Type::Named(path) => {
+                let name = match path {
+                    Path::Simple(n) => *n,
+                    Path::Qualified(parts) => match self.registry.resolve(parts, symbols) {
+                        Ok(binding_id) => {
+                            resolution
+                                .types
+                                .insert(type_id, BindingRef::Module(binding_id));
+                            return Ok(());
+                        }
+                        Err(_) => {
+                            let name = parts_to_string(parts, symbols);
+                            return Err(ResolveError::UndefinedType(name));
+                        }
+                    },
+                };
+
+                if let Some(binding) = self.stack.lookup_type(name) {
                     resolution.types.insert(type_id, binding);
                     Ok(())
+                } else {
+                    // in case a module has been imported globally
+                    match self.registry.resolve(&[name], symbols) {
+                        Ok(binding_id) => {
+                            resolution
+                                .types
+                                .insert(type_id, BindingRef::Module(binding_id));
+                            Ok(())
+                        }
+                        Err(_) => {
+                            let name_str = symbols.resolve(name).to_string();
+                            Err(ResolveError::UndefinedType(name_str))
+                        }
+                    }
                 }
-                None => {
-                    let name = parts_to_string(&[*name], symbols);
-                    Err(ResolveError::UndefinedType(name))
-                }
-            },
+            }
 
             Type::Provider { provider, .. } => {
                 let path = match provider.clone() {
@@ -301,5 +328,5 @@ fn parts_to_string(parts: &[Symbol], symbols: &Interner) -> String {
         .iter()
         .map(|s| symbols.resolve(*s))
         .collect::<Vec<_>>()
-        .join(".")
+        .join("::")
 }

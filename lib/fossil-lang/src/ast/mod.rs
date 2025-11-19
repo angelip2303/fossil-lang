@@ -56,7 +56,7 @@ pub enum Expr {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     /// A named type
-    Named(Symbol),
+    Named(Path),
 
     /// A primitive type
     Primitive(PrimitiveType),
