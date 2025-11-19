@@ -189,11 +189,8 @@ impl<'a> Interpreter<'a> {
                 Ok(Value::LazyFrame(concat(dfs, UnionArgs::default())?))
             }
 
-            Value::Series(_) => unreachable!("Nested lists prohibited by typecheck"),
-
-            // Type checker prevents Unit, nested lists, functions, and closures
-            Value::Unit | Value::Closure { .. } | Value::Function(_) => {
-                unreachable!("Type checker prevents Unit, functions, and closures in lists")
+            Value::Unit | Value::Closure { .. } | Value::Function(_) | Value::Series(_) => {
+                unreachable!("Type checker prevents Unit, functions and lists as elements in lists")
             }
         }
     }
@@ -232,11 +229,10 @@ impl<'a> Interpreter<'a> {
                     s.into_column()
                 }
 
-                Value::LazyFrame(lf) => unimplemented!(),
-
-                // Type checker prevents Unit, nested lists, functions, and closures
-                Value::Unit | Value::Closure { .. } | Value::Function(_) => {
-                    unreachable!("Type checker prevents Unit, functions, and closures in lists")
+                Value::Unit | Value::Closure { .. } | Value::Function(_) | Value::LazyFrame(_) => {
+                    unreachable!(
+                        "Type checker prevents Unit, functions and records as fields in a record"
+                    )
                 }
             };
 

@@ -22,6 +22,7 @@ pub enum Decl {
     Type { name: Symbol, ty: TypeId },
     /// An expression declaration `expr`
     Expr(ExprId),
+    // TODO: import
 }
 
 /// An expression in the language
@@ -49,8 +50,6 @@ pub enum Expr {
     Application { callee: ExprId, args: Vec<ExprId> },
     // TODO: pipe
     // TODO: member access
-    // TODO: type annotation
-    // TODO: cast
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

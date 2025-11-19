@@ -70,13 +70,12 @@ impl TypeId {
         matches!(ast.types.get(*self), Type::List(_))
     }
 
+    fn is_record(&self, ast: &Ast) -> bool {
+        matches!(ast.types.get(*self), Type::Record(_))
+    }
+
     fn is_function(&self, ast: &Ast) -> bool {
-        match ast.types.get(*self) {
-            Type::Function(..) => true,
-            Type::List(inner) => inner.is_function(ast),
-            Type::Record(fields) => fields.iter().any(|(_, ty)| ty.is_function(ast)),
-            _ => false,
-        }
+        matches!(ast.types.get(*self), Type::Function(..))
     }
 }
 
@@ -361,10 +360,10 @@ impl<'a> TypeChecker<'a> {
 
                     let final_elem_ty = subst.apply(elem_ty, ast);
 
-                    // we do not support unit types nor list types nor function types in lists
+                    // we do not support unit, function, or list types as an element of a list
                     if final_elem_ty.is_unit(ast)
-                        | final_elem_ty.is_list(ast)
                         | final_elem_ty.is_function(ast)
+                        | final_elem_ty.is_list(ast)
                     {
                         return Err(TypeError::InvalidListElement(final_elem_ty));
                     }
@@ -383,8 +382,8 @@ impl<'a> TypeChecker<'a> {
                     subst = subst.compose(&s, ast);
                     let field_ty = subst.apply(field_ty, ast);
 
-                    // we do not support unit types nor function types in records' fields
-                    if field_ty.is_unit(ast) | field_ty.is_function(ast) {
+                    // we do not support unit, function, or record types as a field of a record
+                    if field_ty.is_unit(ast) | field_ty.is_function(ast) | field_ty.is_record(ast) {
                         return Err(TypeError::InvalidRecordField(name, field_ty));
                     }
 

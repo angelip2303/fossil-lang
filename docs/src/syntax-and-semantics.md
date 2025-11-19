@@ -69,7 +69,7 @@ Multiple entries are separated by commas:
 let trilobite = { species = "Eldredgeops rana", size = 10 }
 ```
 
-> Record fields cannot be of type Function, closure or Unit, they should have concrete values.
+> Record fields cannot be of type Function, closure, Record or Unit.
 
 > It is not possible to concatenate records with mismatched fields.
 

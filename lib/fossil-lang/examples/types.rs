@@ -21,14 +21,6 @@ pub fn main() {
             active = true
         }
 
-        let company = {
-            name = "TechCorp",
-            headquarters = {
-                building = "Tower A",
-                floor = 10
-            }
-        }
-
         let numbers = [1, 2, 3, 4, 5]
 
         let strings = ["hello", "world", "fossil"]
@@ -63,16 +55,26 @@ pub fn main() {
         }
 
         let compatible_list = [record, compatible]
+
         let not_compatible = [record, other]
 
         let list = [1, 2, 3]
         let nested_list = [[list]]
 
         let unit_list = [(), (), ()]
+
         let unit_field = {
             name = "John",
             age = 30,
             active = ()
+        }
+
+        let nested = {
+            name = "TechCorp",
+            headquarters = {
+                building = "Tower A",
+                floor = 10
+            }
         }
     "#;
 
