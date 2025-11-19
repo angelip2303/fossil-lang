@@ -12,7 +12,7 @@ open Data.Rdf as Rdf
 type Person = ShEx<"path/to/shape.shex">
 
 Csv.read "path/to/input.csv"
-  |> map (fun person -> {
+  |> map (fn person -> {
         name = person.name;
         age = person.age;
         email = person.email;

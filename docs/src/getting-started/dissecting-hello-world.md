@@ -15,7 +15,7 @@ let people = Person.load "people.csv"
 
 let peopleWithAge =
     people
-        |> map (fun person -> {
+        |> map (fn person -> {
             name = person.name,
             age = Random.int 0 100
         } :> PersonWithAge)

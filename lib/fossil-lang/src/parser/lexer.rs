@@ -7,7 +7,7 @@ pub enum Token<'a> {
     Let,
     #[token("type")]
     Type,
-    #[token("fun")]
+    #[token("fn")]
     Func,
     #[token("true")]
     True,

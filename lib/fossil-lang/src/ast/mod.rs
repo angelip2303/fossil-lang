@@ -43,7 +43,7 @@ pub enum Expr {
     /// A record `{ field = expr, field = expr, ... }`
     Record(Vec<(Symbol, ExprId)>),
 
-    /// A function definition `fun (param1, param2, ...) -> expr`
+    /// A function definition `fn (param1, param2, ...) -> expr`
     Function { params: Vec<Symbol>, body: ExprId },
 
     /// A function application `callee(arg1, arg2, ...)`

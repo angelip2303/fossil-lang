@@ -10,7 +10,7 @@ Converting the casing of a string is a common operation and `fossil` supports it
 open Data.Csv
 
 read "path/to/file.csv"
-    |> map (fun row -> {
+    |> map (fn row -> {
         name    = row.name |> upper,
         surname = lower row.surname,
     })
@@ -27,7 +27,7 @@ This is the `trim` function.
 open Data.Csv
 
 read "path/to/file.csv"
-    |> map (fun row -> {
+    |> map (fn row -> {
         name    = row.name |> trim,
         surname = trim row.surname,
     })

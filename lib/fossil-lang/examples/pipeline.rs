@@ -5,7 +5,7 @@ use fossil_lang::runtime::interpreter::Interpreter;
 
 pub fn main() -> Result<(), FossilError> {
     let src = r#"
-        let identity = fun (x) -> x
+        let identity = fn (x) -> x
         identity(42)
         42 |> identity
     "#;

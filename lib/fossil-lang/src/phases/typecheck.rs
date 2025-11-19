@@ -94,9 +94,9 @@ impl TypeValidation for TypeId {
             }
 
             Type::Record(fields) => {
-                for (_, ty) in fields {
+                for (name, ty) in fields {
                     if ty.is_record(ast) | ty.is_unit(ast) | ty.is_function(ast) {
-                        return Err(TypeError::InvalidListElement(*ty));
+                        return Err(TypeError::InvalidRecordField(*name, *ty));
                     }
                     ty.validate(ast)?;
                 }

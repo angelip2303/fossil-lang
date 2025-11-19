@@ -46,7 +46,7 @@ Another way to call a function is to use the `|>` operator, which allows you to 
 This is called a _pipeline_.
 
 ```
-let identity = fun (x) -> x
+let identity = fn (x) -> x
 identity(42)
 42 |> identity
 ```
