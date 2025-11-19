@@ -59,7 +59,7 @@ pub fn main() {
         let not_compatible = [record, other]
 
         let list = [1, 2, 3]
-        let nested_list = [[list]]
+        let nested_list = [list]
 
         let unit_list = [(), (), ()]
 

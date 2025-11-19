@@ -79,6 +79,44 @@ impl TypeId {
     }
 }
 
+trait TypeValidation {
+    fn validate(&self, ast: &Ast) -> Result<(), TypeError>;
+}
+
+impl TypeValidation for TypeId {
+    fn validate(&self, ast: &Ast) -> Result<(), TypeError> {
+        match ast.types.get(*self) {
+            Type::List(ty) => {
+                if ty.is_list(ast) | ty.is_unit(ast) | ty.is_function(ast) {
+                    return Err(TypeError::InvalidListElement(*ty));
+                }
+                ty.validate(ast)
+            }
+
+            Type::Record(fields) => {
+                for (_, ty) in fields {
+                    if ty.is_record(ast) | ty.is_unit(ast) | ty.is_function(ast) {
+                        return Err(TypeError::InvalidListElement(*ty));
+                    }
+                    ty.validate(ast)?;
+                }
+                Ok(())
+            }
+
+            Type::Function(params, ret) => {
+                for param in params {
+                    param.validate(ast)?;
+                }
+                ret.validate(ast)
+            }
+
+            Type::Var(_) | Type::Primitive(_) => Ok(()),
+
+            _ => unreachable!(),
+        }
+    }
+}
+
 impl Polytype {
     fn ftv(&self, ast: &Ast) -> HashSet<TypeVar> {
         let ty_ftv = self.ty.ftv(ast);
@@ -359,15 +397,6 @@ impl<'a> TypeChecker<'a> {
                     }
 
                     let final_elem_ty = subst.apply(elem_ty, ast);
-
-                    // we do not support unit, function, or list types as an element of a list
-                    if final_elem_ty.is_unit(ast)
-                        | final_elem_ty.is_function(ast)
-                        | final_elem_ty.is_list(ast)
-                    {
-                        return Err(TypeError::InvalidListElement(final_elem_ty));
-                    }
-
                     let list_ty = ast.types.alloc(Type::List(final_elem_ty));
                     (subst, list_ty)
                 }
@@ -381,12 +410,6 @@ impl<'a> TypeChecker<'a> {
                     let (s, field_ty) = self.infer(env, field_expr, ast, resolution)?;
                     subst = subst.compose(&s, ast);
                     let field_ty = subst.apply(field_ty, ast);
-
-                    // we do not support unit, function, or record types as a field of a record
-                    if field_ty.is_unit(ast) | field_ty.is_function(ast) | field_ty.is_record(ast) {
-                        return Err(TypeError::InvalidRecordField(name, field_ty));
-                    }
-
                     field_types.push((name, field_ty));
                 }
 
@@ -444,6 +467,7 @@ impl<'a> TypeChecker<'a> {
         };
 
         let final_ty = subst.apply(ty, ast);
+        final_ty.validate(ast)?; // validate whether the final type is valid
         self.expr_types.insert(expr_id, final_ty);
 
         Ok((subst, final_ty))
@@ -464,6 +488,34 @@ impl<'a> TypeChecker<'a> {
             (Type::Primitive(p1), Type::Primitive(p2)) if p1 == p2 => Ok(Subst::default()),
 
             (Type::List(inner1), Type::List(inner2)) => self.unify(inner1, inner2, ast),
+
+            (Type::Record(fields1), Type::Record(fields2)) => {
+                if fields1.len() != fields2.len() {
+                    return Err(TypeError::RecordSizeMismatch);
+                }
+
+                let mut subst = Subst::default();
+
+                let field_pairs: Vec<_> = fields1
+                    .iter()
+                    .zip(fields2.iter())
+                    .map(|((n1, t1), (n2, t2))| ((*n1, *t1), (*n2, *t2)))
+                    .collect();
+
+                for ((name1, ty1), (name2, ty2)) in field_pairs {
+                    // if the names are not equal -> error
+                    if name1 != name2 {
+                        return Err(TypeError::RecordFieldMismatch);
+                    }
+
+                    let ty1 = subst.apply(ty1, ast);
+                    let ty2 = subst.apply(ty2, ast);
+                    let s = self.unify(ty1, ty2, ast)?;
+                    subst = subst.compose(&s, ast);
+                }
+
+                Ok(subst)
+            }
 
             (Type::Function(params1, ret1), Type::Function(params2, ret2)) => {
                 if params1.len() != params2.len() {
@@ -493,40 +545,12 @@ impl<'a> TypeChecker<'a> {
                 Ok(subst.compose(&s, ast))
             }
 
-            (Type::Record(fields1), Type::Record(fields2)) => {
-                if fields1.len() != fields2.len() {
-                    return Err(TypeError::RecordSizeMismatch);
-                }
-
-                let mut subst = Subst::default();
-
-                let field_pairs: Vec<_> = fields1
-                    .iter()
-                    .zip(fields2.iter())
-                    .map(|((n1, t1), (n2, t2))| ((*n1, *t1), (*n2, *t2)))
-                    .collect();
-
-                for ((name1, ty1), (name2, ty2)) in field_pairs {
-                    if name1 != name2 {
-                        return Err(TypeError::RecordFieldMismatch);
-                    }
-
-                    let ty1 = subst.apply(ty1, ast);
-                    let ty2 = subst.apply(ty2, ast);
-                    let s = self.unify(ty1, ty2, ast)?;
-                    subst = subst.compose(&s, ast);
-                }
-
-                Ok(subst)
-            }
-
             _ => Err(TypeError::TypeMismatch {
                 expected: ty1,
                 found: ty2,
             }),
         }
     }
-
     fn get_function_signature(&mut self, binding_id: BindingId, ast: &mut Ast) -> Polytype {
         if let Some(poly) = self.function_types.get(&binding_id) {
             return poly.clone();
