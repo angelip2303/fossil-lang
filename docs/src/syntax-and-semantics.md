@@ -69,17 +69,17 @@ Multiple entries are separated by commas:
 let trilobite = { species = "Eldredgeops rana", size = 10 }
 ```
 
-> Record fields cannot be of type Function, closure, Record or Unit.
+> Record fields cannot be of type Function, Record or Unit.
 
 > It is not possible to concatenate records with mismatched fields.
 
 ## List expressions
 
-Lists `[ ... ]` are expressions that define a sequence of values.
+Lists `[ ... ]` are expressions that define a sequence of homogeneous values (_i.e._ all elements have the same type).
 The syntax is similar to an array literal in many programming languages: each value is separated by commas.
 
 ```
 [1, 2, 3, 4]
 ```
 
-> List elements cannot be of type Function, closure, List or Unit.
+> List elements cannot be of type Function, List or Unit.
