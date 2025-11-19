@@ -62,6 +62,10 @@ impl TypeId {
         }
     }
 
+    fn is_unit(&self, ast: &Ast) -> bool {
+        matches!(ast.types.get(*self), Type::Primitive(PrimitiveType::Unit))
+    }
+
     fn is_list(&self, ast: &Ast) -> bool {
         matches!(ast.types.get(*self), Type::List(_))
     }
@@ -293,6 +297,12 @@ impl<'a> TypeChecker<'a> {
         }
 
         let (subst, ty) = match ast.exprs.get(expr_id).clone() {
+            Expr::Unit => {
+                let ty = Type::Primitive(PrimitiveType::Unit);
+                let ty_id = ast.types.alloc(ty);
+                (Subst::default(), ty_id)
+            }
+
             Expr::Literal(lit) => {
                 let ty = match lit {
                     Literal::Boolean(_) => Type::Primitive(PrimitiveType::Bool),
@@ -351,12 +361,11 @@ impl<'a> TypeChecker<'a> {
 
                     let final_elem_ty = subst.apply(elem_ty, ast);
 
-                    // we do not soport function types in lists
-                    if final_elem_ty.is_function(ast) {
-                        return Err(TypeError::InvalidListElement(final_elem_ty));
-                    }
-
-                    if final_elem_ty.is_list(ast) {
+                    // we do not support unit types nor list types nor function types in lists
+                    if final_elem_ty.is_unit(ast)
+                        | final_elem_ty.is_list(ast)
+                        | final_elem_ty.is_function(ast)
+                    {
                         return Err(TypeError::InvalidListElement(final_elem_ty));
                     }
 
@@ -374,8 +383,8 @@ impl<'a> TypeChecker<'a> {
                     subst = subst.compose(&s, ast);
                     let field_ty = subst.apply(field_ty, ast);
 
-                    // we do not support function types in records' fields
-                    if field_ty.is_function(ast) {
+                    // we do not support unit types nor function types in records' fields
+                    if field_ty.is_unit(ast) | field_ty.is_function(ast) {
                         return Err(TypeError::InvalidRecordField(name, field_ty));
                     }
 

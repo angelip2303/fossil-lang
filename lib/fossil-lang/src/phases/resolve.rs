@@ -220,7 +220,7 @@ impl<'a> Resolver<'a> {
                 Ok(())
             }
 
-            Expr::Literal(_) => Ok(()),
+            Expr::Unit | Expr::Literal(_) => Ok(()),
         }
     }
 

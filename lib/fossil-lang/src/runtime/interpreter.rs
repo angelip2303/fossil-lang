@@ -62,6 +62,8 @@ impl<'a> Interpreter<'a> {
         resolution: &ResolutionTable,
     ) -> Result<Value, RuntimeError> {
         let value = match ast.exprs.get(expr_id) {
+            Expr::Unit => Value::Unit,
+
             Expr::Literal(lit) => match lit {
                 Literal::Integer(i) => Value::Int(*i),
                 Literal::String(s) => Value::String(Arc::from(symbols.resolve(*s))),
@@ -189,7 +191,10 @@ impl<'a> Interpreter<'a> {
 
             Value::Series(_) => unreachable!("Nested lists prohibited by typecheck"),
 
-            Value::Closure { .. } | Value::Function(_) => unreachable!(),
+            // Type checker prevents Unit, nested lists, functions, and closures
+            Value::Unit | Value::Closure { .. } | Value::Function(_) => {
+                unreachable!("Type checker prevents Unit, functions, and closures in lists")
+            }
         }
     }
 
@@ -218,9 +223,9 @@ impl<'a> Interpreter<'a> {
             let name = PlSmallStr::from_str(symbols.resolve(name));
 
             let series = match value {
-                Value::Int(i) => Series::new(name, vec![i]).into_column(),
-                Value::String(s) => Series::new(name, vec![s.as_ref()]).into_column(),
-                Value::Bool(b) => Series::new(name, vec![b]).into_column(),
+                Value::Int(i) => Series::new(name, &[i]).into_column(),
+                Value::String(s) => Series::new(name, &[s.as_ref()]).into_column(),
+                Value::Bool(b) => Series::new(name, &[b]).into_column(),
 
                 Value::Series(mut s) => {
                     s.rename(name);
@@ -229,7 +234,10 @@ impl<'a> Interpreter<'a> {
 
                 Value::LazyFrame(lf) => unimplemented!(),
 
-                Value::Closure { .. } | Value::Function(_) => unreachable!(),
+                // Type checker prevents Unit, nested lists, functions, and closures
+                Value::Unit | Value::Closure { .. } | Value::Function(_) => {
+                    unreachable!("Type checker prevents Unit, functions, and closures in lists")
+                }
             };
 
             series_vec.push(series);

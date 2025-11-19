@@ -48,6 +48,8 @@ pub fn main() {
         let result4 = identity(identity)
         let result5 = result4(3)
 
+        let unit = ()
+
         let record = {
             name = "John",
         }
@@ -65,6 +67,13 @@ pub fn main() {
 
         let list = [1, 2, 3]
         let nested_list = [[list]]
+
+        let unit_list = [(), (), ()]
+        let unit_field = {
+            name = "John",
+            age = 30,
+            active = ()
+        }
     "#;
 
     let registry = ModuleRegistry::default();

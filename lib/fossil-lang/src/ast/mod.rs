@@ -30,6 +30,9 @@ pub enum Expr {
     /// A local or qualified identifier (unresolved)
     Identifier(Path),
 
+    /// A unit value `()`
+    Unit,
+
     /// A literal value, e.g. `1`, `"hello"`, `true`
     Literal(Literal),
 
@@ -114,6 +117,7 @@ pub enum PrimitiveType {
     Int,
     String,
     Bool,
+    Unit,
 }
 
 impl From<DataType> for PrimitiveType {
@@ -134,6 +138,8 @@ impl From<DataType> for PrimitiveType {
             DataType::Float32 | DataType::Float64 => todo!(),
 
             DataType::String => PrimitiveType::String,
+
+            DataType::Null => PrimitiveType::Unit,
 
             _ => todo!(),
         }

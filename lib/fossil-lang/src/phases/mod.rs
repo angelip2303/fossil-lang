@@ -115,6 +115,7 @@ impl TypedProgram {
                 PrimitiveType::Int => "int".to_string(),
                 PrimitiveType::String => "string".to_string(),
                 PrimitiveType::Bool => "bool".to_string(),
+                PrimitiveType::Unit => "()".to_string(),
             },
             Type::Var(var) => format!("'{}", var),
             Type::List(inner) => format!("[{}]", self.type_to_string(*inner)),

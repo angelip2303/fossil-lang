@@ -58,6 +58,10 @@ where
     recursive(|expr| {
         let identifier = path(ctx).map(|path| ctx.ast().exprs.alloc(Expr::Identifier(path)));
 
+        let unit = just(Token::LParen)
+            .then(just(Token::RParen))
+            .map(|_| ctx.ast().exprs.alloc(Expr::Unit));
+
         let literal = literal(ctx).map(|lit| ctx.ast().exprs.alloc(Expr::Literal(lit)));
 
         let list = expr
@@ -100,7 +104,15 @@ where
             )
             .map(|(callee, args)| ctx.ast().exprs.alloc(Expr::Application { callee, args }));
 
-        let atom = choice((application, literal, list, record, function, identifier));
+        let atom = choice((
+            application,
+            unit,
+            literal,
+            list,
+            record,
+            function,
+            identifier,
+        ));
 
         // let pratt = atom.pratt((
         //     postfix(

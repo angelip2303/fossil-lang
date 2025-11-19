@@ -16,6 +16,7 @@ pub enum Value {
     Bool(bool),
     Series(Series),
     LazyFrame(LazyFrame),
+    Unit,
 
     // functions as values allow, for example, them to be passed
     // as parameters to other functions (Higher-order functions)
