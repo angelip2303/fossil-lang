@@ -52,11 +52,16 @@ pub fn main() {
             name = "John",
         }
 
+        let compatible = {
+            name = "Alice",
+        }
+
         let other = {
             surname = "Doe",
         }
 
-        let list = [record, other]
+        let compatible_list = [record, compatible]
+        let not_compatible = [record, other]
 
         let list = [1, 2, 3]
         let nested_list = [[list]]

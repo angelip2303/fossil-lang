@@ -94,6 +94,7 @@ Their meaning depends on the function that consumes them. For example, in the `s
 In other contexts (_e.g._ `Rdf.map` or `GraphQL.map`), records can be interpreted as mappings to RDF triples or GraphQL fields, respectively.
 
 Record fields cannot be of type Function or closure.
+Cannot concat records with mismatched types.
 
 ## Lists
 
@@ -109,3 +110,4 @@ Their meaning depends on the function that consumes them. For example, in the `s
 In other contexts (_e.g._ `Rdf.map` or `GraphQL.map`), lists can be interpreted as mappings to RDF triples or GraphQL fields, respectively.
 
 Lists cannot be of type Function or closure.
+Nested list are not supported.
