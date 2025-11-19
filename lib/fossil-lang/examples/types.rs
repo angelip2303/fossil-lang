@@ -47,6 +47,19 @@ pub fn main() {
         let result3 = identity(result)
         let result4 = identity(identity)
         let result5 = result4(3)
+
+        let record = {
+            name = "John",
+        }
+
+        let other = {
+            surname = "Doe",
+        }
+
+        let list = [record, other]
+
+        let list = [1, 2, 3]
+        let nested_list = [[list]]
     "#;
 
     let registry = ModuleRegistry::default();

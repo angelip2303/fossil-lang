@@ -62,6 +62,10 @@ impl TypeId {
         }
     }
 
+    fn is_list(&self, ast: &Ast) -> bool {
+        matches!(ast.types.get(*self), Type::List(_))
+    }
+
     fn is_function(&self, ast: &Ast) -> bool {
         match ast.types.get(*self) {
             Type::Function(..) => true,
@@ -349,6 +353,10 @@ impl<'a> TypeChecker<'a> {
 
                     // we do not soport function types in lists
                     if final_elem_ty.is_function(ast) {
+                        return Err(TypeError::InvalidListElement(final_elem_ty));
+                    }
+
+                    if final_elem_ty.is_list(ast) {
                         return Err(TypeError::InvalidListElement(final_elem_ty));
                     }
 

@@ -176,7 +176,6 @@ impl<'a> Interpreter<'a> {
                 Ok(Value::Series(Series::from_iter(bools)))
             }
 
-            // TODO: shouldn't this be checked during typechecking?
             Value::LazyFrame(_) => {
                 let dfs: Vec<_> = values
                     .into_iter()
@@ -188,15 +187,7 @@ impl<'a> Interpreter<'a> {
                 Ok(Value::LazyFrame(concat(dfs, UnionArgs::default())?))
             }
 
-            // TODO: am I sure about this?
-            Value::Series(_) => {
-                let series = values.into_iter().map(|v| match v {
-                    Value::Series(s) => s.into_column(),
-                    _ => unreachable!(),
-                });
-                let df = DataFrame::from_iter(series);
-                Ok(Value::LazyFrame(df.lazy()))
-            }
+            Value::Series(_) => unreachable!("Nested lists prohibited by typecheck"),
 
             Value::Closure { .. } | Value::Function(_) => unreachable!(),
         }
