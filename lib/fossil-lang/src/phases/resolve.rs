@@ -1,10 +1,26 @@
 use std::collections::HashMap;
 
+use crate::ast::visitor::{Visitor, walk_ast};
 use crate::ast::*;
 use crate::context::{Interner, Symbol};
 use crate::error::ResolveError;
 use crate::module::{Binding, ModuleRegistry};
 use crate::phases::{BindingRef, ParsedProgram, ResolutionTable, ResolvedProgram};
+
+pub struct Resolver<'a> {
+    registry: &'a ModuleRegistry,
+}
+
+impl<'a> Resolver<'a> {
+    pub fn new(registry: &'a ModuleRegistry) -> Self {
+        Self { registry }
+    }
+
+    pub fn resolve(&mut self, program: ParsedProgram) -> Result<ResolvedProgram, ResolveError> {
+        let visitor = ResolverVisitor::new(self.registry);
+        visitor.resolve(program)
+    }
+}
 
 struct ScopeStack {
     scopes: Vec<Scope>,
@@ -13,8 +29,7 @@ struct ScopeStack {
 impl ScopeStack {
     fn new() -> Self {
         Self {
-            // start with one global scope
-            scopes: vec![Default::default()],
+            scopes: vec![Scope::default()],
         }
     }
 
@@ -23,7 +38,6 @@ impl ScopeStack {
     }
 
     fn pop(&mut self) -> Option<Scope> {
-        // cannot pop the global scope
         if self.scopes.len() > 1 {
             self.scopes.pop()
         } else {
@@ -32,11 +46,9 @@ impl ScopeStack {
     }
 
     fn current_mut(&mut self) -> &mut Scope {
-        // we at least have the global scope
         self.scopes.last_mut().unwrap()
     }
 
-    /// Lookup a value starting from the innermost scope and moving outward
     fn lookup_value(&self, name: Symbol) -> Option<BindingRef> {
         self.scopes
             .iter()
@@ -44,12 +56,20 @@ impl ScopeStack {
             .find_map(|scope| scope.lookup_value(name))
     }
 
-    /// Lookup a type starting from the innermost scope and moving outward
     fn lookup_type(&self, name: Symbol) -> Option<BindingRef> {
         self.scopes
             .iter()
             .rev()
             .find_map(|scope| scope.lookup_type(name))
+    }
+
+    fn resolve_qualified(&self, alias: Symbol, rest: &[Symbol]) -> Option<Vec<Symbol>> {
+        self.scopes.iter().rev().find_map(|scope| {
+            scope
+                .imports
+                .get(&alias)
+                .map(|prefix| prefix.iter().chain(rest).copied().collect())
+        })
     }
 }
 
@@ -57,6 +77,7 @@ impl ScopeStack {
 struct Scope {
     values: HashMap<Symbol, BindingRef>,
     types: HashMap<Symbol, BindingRef>,
+    imports: HashMap<Symbol, Vec<Symbol>>,
 }
 
 impl Scope {
@@ -75,258 +96,268 @@ impl Scope {
     fn lookup_type(&self, name: Symbol) -> Option<BindingRef> {
         self.types.get(&name).copied()
     }
+
+    fn add_import(&mut self, alias: Symbol, module_path: Vec<Symbol>) {
+        self.imports.insert(alias, module_path);
+    }
 }
 
-pub struct Resolver<'a> {
+/// Resolver using the elegant visitor pattern
+///
+/// Notice how clean this is! We only implement the methods for nodes
+/// we care about. All the traversal logic is handled automatically.
+pub struct ResolverVisitor<'a> {
     registry: &'a ModuleRegistry,
     stack: ScopeStack,
+    resolution: ResolutionTable,
 }
 
-impl<'a> Resolver<'a> {
+impl<'a> ResolverVisitor<'a> {
     pub fn new(registry: &'a ModuleRegistry) -> Self {
         Self {
             registry,
             stack: ScopeStack::new(),
+            resolution: ResolutionTable::default(),
         }
     }
 
-    /// Resolve names in a parsed program
-    pub fn resolve(&mut self, program: ParsedProgram) -> Result<ResolvedProgram, ResolveError> {
+    pub fn resolve(mut self, program: ParsedProgram) -> Result<ResolvedProgram, ResolveError> {
         let ParsedProgram { ast, symbols } = program;
-        let mut resolution = ResolutionTable::default();
 
-        // first pass: hoisting (at the global scope)
-        for (id, decl) in ast.decls.iter() {
-            match decl {
-                Decl::Let { name, .. } => self
-                    .stack
-                    .current_mut()
-                    .insert_value(*name, BindingRef::Local(id)),
+        // Phase 1: Hoisting
+        self.hoist_declarations(&ast, &symbols)?;
 
-                Decl::Type { name, .. } => self
-                    .stack
-                    .current_mut()
-                    .insert_type(*name, BindingRef::Local(id)),
-
-                _ => {}
-            }
-        }
-
-        // second pass: resolve expressions starting from declarations
-        for (_, decl) in ast.decls.iter() {
-            match decl {
-                Decl::Let { value, .. } => {
-                    self.resolve_expr(*value, &ast, &symbols, &mut resolution)?;
-                }
-                Decl::Expr(expr_id) => {
-                    self.resolve_expr(*expr_id, &ast, &symbols, &mut resolution)?;
-                }
-                Decl::Type { ty, .. } => {
-                    self.resolve_type(*ty, &ast, &symbols, &mut resolution)?;
-                }
-            }
-        }
+        // Phase 2: Resolution using visitor
+        walk_ast(&mut self, &ast, &symbols)?;
 
         Ok(ResolvedProgram {
             ast,
             symbols,
-            resolution,
+            resolution: self.resolution,
         })
     }
 
-    fn resolve_expr(
-        &mut self,
-        expr_id: ExprId,
-        ast: &Ast,
-        symbols: &Interner,
-        resolution: &mut ResolutionTable,
-    ) -> Result<(), ResolveError> {
-        match ast.exprs.get(expr_id) {
-            Expr::Identifier(path) => {
-                let name = match path {
-                    Path::Simple(n) => *n,
-                    Path::Qualified(parts) => match self.registry.resolve(parts, symbols) {
-                        Ok(binding_id) => {
-                            resolution
-                                .exprs
-                                .insert(expr_id, BindingRef::Module(binding_id));
-                            return Ok(());
-                        }
-                        Err(_) => {
-                            let name = parts_to_string(parts, symbols);
-                            return Err(ResolveError::UndefinedVariable(name));
-                        }
-                    },
-                };
-
-                if let Some(binding) = self.stack.lookup_value(name) {
-                    resolution.exprs.insert(expr_id, binding);
-                    Ok(())
-                } else {
-                    // in case a module has been imported globally
-                    match self.registry.resolve(&[name], symbols) {
-                        Ok(binding_id) => {
-                            resolution
-                                .exprs
-                                .insert(expr_id, BindingRef::Module(binding_id));
-                            Ok(())
-                        }
-                        Err(_) => {
-                            let name_str = symbols.resolve(name).to_string();
-                            Err(ResolveError::UndefinedVariable(name_str))
-                        }
-                    }
-                }
-            }
-
-            Expr::Function { params, body } => {
-                let function_id = expr_id;
-
-                let mut function_scope = Scope::default();
-
-                for param in params {
-                    function_scope.insert_value(
-                        *param,
-                        BindingRef::Parameter {
-                            function: function_id,
-                        },
-                    );
+    fn hoist_declarations(&mut self, ast: &Ast, symbols: &Interner) -> Result<(), ResolveError> {
+        for (id, decl) in ast.decls.iter() {
+            match decl {
+                Decl::Let { name, .. } => {
+                    self.stack
+                        .current_mut()
+                        .insert_value(*name, BindingRef::Local(id));
                 }
 
-                self.stack.push(function_scope);
-                self.resolve_expr(*body, ast, symbols, resolution)?;
-                self.stack.pop();
-                Ok(())
-            }
-
-            Expr::List(items) => {
-                for item in items {
-                    self.resolve_expr(*item, ast, symbols, resolution)?;
+                Decl::Type { name, .. } => {
+                    self.stack
+                        .current_mut()
+                        .insert_type(*name, BindingRef::Local(id));
                 }
-                Ok(())
-            }
 
-            Expr::Record(fields) => {
-                for (_, field_expr) in fields {
-                    self.resolve_expr(*field_expr, ast, symbols, resolution)?;
+                Decl::Import { module, alias } => {
+                    let module_path = module.as_slice().to_vec();
+
+                    self.registry.resolve(&module_path, symbols).map_err(|_| {
+                        let name = parts_to_string(&module_path, symbols);
+                        ResolveError::UndefinedModule(name)
+                    })?;
+
+                    self.stack.current_mut().add_import(*alias, module_path);
                 }
-                Ok(())
-            }
 
-            Expr::Application { callee, args } => {
-                self.resolve_expr(*callee, ast, symbols, resolution)?;
-                for arg in args {
-                    self.resolve_expr(*arg, ast, symbols, resolution)?;
-                }
-                Ok(())
+                Decl::Expr(_) => {}
             }
-
-            Expr::Unit | Expr::Literal(_) => Ok(()),
         }
+        Ok(())
     }
 
-    fn resolve_type(
+    fn resolve_value_path(
         &mut self,
-        type_id: TypeId,
-        ast: &Ast,
-        symbols: &Interner,
-        resolution: &mut ResolutionTable,
+        expr_id: ExprId,
+        path: &Path,
+        interner: &Interner,
     ) -> Result<(), ResolveError> {
-        match ast.types.get(type_id) {
-            Type::Named(path) => {
-                let name = match path {
-                    Path::Simple(n) => *n,
-                    Path::Qualified(parts) => match self.registry.resolve(parts, symbols) {
-                        Ok(binding_id) => {
-                            resolution
-                                .types
-                                .insert(type_id, BindingRef::Module(binding_id));
-                            return Ok(());
-                        }
-                        Err(_) => {
-                            let name = parts_to_string(parts, symbols);
-                            return Err(ResolveError::UndefinedType(name));
-                        }
-                    },
-                };
-
-                if let Some(binding) = self.stack.lookup_type(name) {
-                    resolution.types.insert(type_id, binding);
-                    Ok(())
-                } else {
-                    // in case a module has been imported globally
-                    match self.registry.resolve(&[name], symbols) {
-                        Ok(binding_id) => {
-                            resolution
-                                .types
-                                .insert(type_id, BindingRef::Module(binding_id));
-                            Ok(())
-                        }
-                        Err(_) => {
-                            let name_str = symbols.resolve(name).to_string();
-                            Err(ResolveError::UndefinedType(name_str))
-                        }
-                    }
+        match path {
+            Path::Simple(name) => {
+                if let Some(binding) = self.stack.lookup_value(*name) {
+                    self.resolution.exprs.insert(expr_id, binding);
+                    return Ok(());
                 }
-            }
 
-            Type::Provider { provider, .. } => {
-                let path = match provider.clone() {
-                    Path::Simple(s) => vec![s],
-                    Path::Qualified(q) => q,
-                };
-
-                match self.registry.resolve(&path, symbols) {
-                    Ok(binding) => match self.registry.get(binding) {
-                        Binding::Provider(_) => {
-                            resolution
-                                .providers
-                                .insert(type_id, BindingRef::Module(binding));
+                match self.registry.resolve(&[*name], interner) {
+                    Ok(binding_id) => match self.registry.get(binding_id) {
+                        Binding::Function(_) => {
+                            self.resolution
+                                .exprs
+                                .insert(expr_id, BindingRef::Module(binding_id));
                             Ok(())
                         }
-
-                        _ => {
-                            let name = parts_to_string(&path, symbols);
-                            Err(ResolveError::NotAProvider(name))
+                        Binding::Provider(_) => {
+                            let name_str = interner.resolve(*name).to_string();
+                            Err(ResolveError::NotAFunction(name_str))
                         }
                     },
                     Err(_) => {
-                        let name = parts_to_string(&path, symbols);
-                        Err(ResolveError::UndefinedProvider(name))
+                        let name_str = interner.resolve(*name).to_string();
+                        Err(ResolveError::UndefinedVariable(name_str))
                     }
                 }
             }
 
-            Type::List(inner) => {
-                self.resolve_type(*inner, ast, symbols, resolution)?;
-                Ok(())
-            }
+            Path::Qualified(parts) => {
+                let alias = parts[0];
+                let rest = &parts[1..];
 
-            Type::Record(fields) => {
-                for (_, field_ty) in fields {
-                    self.resolve_type(*field_ty, ast, symbols, resolution)?;
+                let full_path = self
+                    .stack
+                    .resolve_qualified(alias, rest)
+                    .unwrap_or_else(|| parts.clone());
+
+                match self.registry.resolve(&full_path, interner) {
+                    Ok(binding_id) => match self.registry.get(binding_id) {
+                        Binding::Function(_) => {
+                            self.resolution
+                                .exprs
+                                .insert(expr_id, BindingRef::Module(binding_id));
+                            Ok(())
+                        }
+                        Binding::Provider(_) => {
+                            let name = parts_to_string(&full_path, interner);
+                            Err(ResolveError::NotAFunction(name))
+                        }
+                    },
+                    Err(_) => {
+                        let name = parts_to_string(&full_path, interner);
+                        Err(ResolveError::UndefinedVariable(name))
+                    }
                 }
-                Ok(())
             }
+        }
+    }
 
-            Type::Function(params, ret) => {
-                for param in params {
-                    self.resolve_type(*param, ast, symbols, resolution)?;
+    fn resolve_type_path(
+        &mut self,
+        type_id: TypeId,
+        path: &Path,
+        interner: &Interner,
+    ) -> Result<(), ResolveError> {
+        match path {
+            Path::Simple(name) => {
+                if let Some(binding) = self.stack.lookup_type(*name) {
+                    self.resolution.types.insert(type_id, binding);
+                    Ok(())
+                } else {
+                    let name_str = interner.resolve(*name).to_string();
+                    Err(ResolveError::UndefinedType(name_str))
                 }
-
-                self.resolve_type(*ret, ast, symbols, resolution)?;
-                Ok(())
             }
 
-            Type::Primitive(_) | Type::Var(_) => Ok(()),
+            Path::Qualified(parts) => {
+                let name = parts_to_string(parts, interner);
+                Err(ResolveError::UndefinedType(name))
+            }
         }
     }
 }
 
-fn parts_to_string(parts: &[Symbol], symbols: &Interner) -> String {
+// ============================================================================
+// Visitor Implementation - Only override what we care about!
+// ============================================================================
+
+impl<'a> Visitor for ResolverVisitor<'a> {
+    type Error = ResolveError;
+
+    // ========================================================================
+    // Expression visitors - Only special cases!
+    // ========================================================================
+
+    fn visit_identifier(
+        &mut self,
+        expr_id: ExprId,
+        path: &Path,
+        _ast: &Ast,
+        interner: &Interner,
+    ) -> Result<(), Self::Error> {
+        // ONLY the resolution logic - no traversal needed
+        self.resolve_value_path(expr_id, path, interner)
+    }
+
+    fn visit_function(
+        &mut self,
+        expr_id: ExprId,
+        params: &[Symbol],
+        body: ExprId,
+        ast: &Ast,
+        interner: &Interner,
+    ) -> Result<(), Self::Error> {
+        // ONLY the scope management logic
+        let mut scope = Scope::default();
+
+        for param in params {
+            scope.insert_value(*param, BindingRef::Parameter { function: expr_id });
+        }
+
+        self.stack.push(scope);
+
+        // Visit body (default traversal happens here)
+        self.visit_expr(body, ast, interner)?;
+
+        self.stack.pop();
+        Ok(())
+    }
+
+    // For Application, List, Record, Pipe, etc. - we don't need to implement!
+    // The default implementation does the traversal for us.
+
+    // ========================================================================
+    // Type visitors - Only special cases!
+    // ========================================================================
+
+    fn visit_type_named(
+        &mut self,
+        type_id: TypeId,
+        path: &Path,
+        _ast: &Ast,
+        interner: &Interner,
+    ) -> Result<(), Self::Error> {
+        // ONLY the resolution logic
+        self.resolve_type_path(type_id, path, interner)
+    }
+
+    fn visit_type_provider(
+        &mut self,
+        type_id: TypeId,
+        provider: &Path,
+        _args: &[Literal],
+        _ast: &Ast,
+        interner: &Interner,
+    ) -> Result<(), Self::Error> {
+        // ONLY the provider resolution logic
+        let path = provider.as_slice();
+
+        match self.registry.resolve(path, interner) {
+            Ok(binding_id) => match self.registry.get(binding_id) {
+                Binding::Provider(_) => {
+                    self.resolution
+                        .providers
+                        .insert(type_id, BindingRef::Module(binding_id));
+                    Ok(())
+                }
+                Binding::Function(_) => {
+                    let name = parts_to_string(path, interner);
+                    Err(ResolveError::NotAProvider(name))
+                }
+            },
+            Err(_) => {
+                let name = parts_to_string(path, interner);
+                Err(ResolveError::UndefinedProvider(name))
+            }
+        }
+    }
+}
+
+fn parts_to_string(parts: &[Symbol], interner: &Interner) -> String {
     parts
         .iter()
-        .map(|s| symbols.resolve(*s))
+        .map(|s| interner.resolve(*s))
         .collect::<Vec<_>>()
         .join("::")
 }

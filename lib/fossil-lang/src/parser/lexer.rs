@@ -7,6 +7,10 @@ pub enum Token<'a> {
     Let,
     #[token("type")]
     Type,
+    #[token("open")]
+    Open,
+    #[token("as")]
+    As,
     #[token("fn")]
     Func,
     #[token("true")]

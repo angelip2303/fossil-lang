@@ -1,3 +1,4 @@
+use chumsky::pratt::{infix, right};
 use chumsky::prelude::*;
 
 use crate::ast::*;
@@ -34,6 +35,12 @@ pub fn decls<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, DeclId, ParserError<'
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
+    let import_decl = just(Token::Open)
+        .ignore_then(path(ctx))
+        .then_ignore(just(Token::As))
+        .then(symbol(ctx))
+        .map(|(module, alias)| ctx.ast().decls.alloc(Decl::Import { module, alias }));
+
     let let_decl = just(Token::Let)
         .ignore_then(symbol(ctx))
         .then_ignore(just(Token::Eq))
@@ -48,7 +55,7 @@ where
 
     let expr_decl = exprs(ctx).map(|expr| ctx.ast().decls.alloc(Decl::Expr(expr)));
 
-    choice((let_decl, type_decl, expr_decl))
+    choice((import_decl, let_decl, type_decl, expr_decl))
 }
 
 fn exprs<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, ExprId, ParserError<'a>> + Clone
@@ -106,26 +113,28 @@ where
 
         let atom = choice((application, unit, literal, list, record, function, path));
 
-        // let pratt = atom.pratt((
-        //     postfix(
-        //         10,
-        //         just(Token::Dot).ignore_then(name_parser(ctx)),
-        //         |lhs, field, _| todo(),
-        //     ),
-        //     postfix(
-        //         3,
-        //         just(Token::Cast).ignore_then(type_parser(ctx)),
-        //         |expr, ty, _| todo(),
-        //     ),
-        //     postfix(
-        //         2,
-        //         just(Token::Colon).ignore_then(type_parser(ctx)),
-        //         |expr, ty, _| todo(),
-        //     ),
-        //     infix(right(1), just(Token::Pipe), |lhs, _, rhs, _| todo()),
-        // ));
+        let pratt = atom.pratt((
+            //     postfix(
+            //         10,
+            //         just(Token::Dot).ignore_then(name_parser(ctx)),
+            //         |lhs, field, _| todo(),
+            //     ),
+            //     postfix(
+            //         3,
+            //         just(Token::Cast).ignore_then(type_parser(ctx)),
+            //         |expr, ty, _| todo(),
+            //     ),
+            //     postfix(
+            //         2,
+            //         just(Token::Colon).ignore_then(type_parser(ctx)),
+            //         |expr, ty, _| todo(),
+            //     ),
+            infix(right(1), just(Token::Pipe), |lhs, _, rhs, _| {
+                ctx.ast().exprs.alloc(Expr::Pipe { lhs, rhs })
+            }),
+        ));
 
-        atom
+        pratt
     })
 }
 

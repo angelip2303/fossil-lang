@@ -2,6 +2,8 @@ use polars::prelude::DataType;
 
 use crate::context::*;
 
+pub mod visitor;
+
 pub type DeclId = NodeId<Decl>;
 pub type ExprId = NodeId<Expr>;
 pub type TypeId = NodeId<Type>;
@@ -16,13 +18,14 @@ pub struct Ast {
 /// A declaration in the language
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Decl {
+    /// An import declaration `open Module as alias`
+    Import { module: Path, alias: Symbol },
     /// A value binding `let name = expr`
     Let { name: Symbol, value: ExprId },
     /// A type definition `type name = type`
     Type { name: Symbol, ty: TypeId },
     /// An expression declaration `expr`
     Expr(ExprId),
-    // TODO: import
 }
 
 /// An expression in the language
@@ -30,25 +33,20 @@ pub enum Decl {
 pub enum Expr {
     /// A local or qualified identifier (unresolved)
     Identifier(Path),
-
     /// A unit value `()`
     Unit,
-
     /// A literal value, e.g. `1`, `"hello"`, `true`
     Literal(Literal),
-
     /// A list `[expr, expr, ...]`
     List(Vec<ExprId>),
-
     /// A record `{ field = expr, field = expr, ... }`
     Record(Vec<(Symbol, ExprId)>),
-
     /// A function definition `fn (param1, param2, ...) -> expr`
     Function { params: Vec<Symbol>, body: ExprId },
-
     /// A function application `callee(arg1, arg2, ...)`
     Application { callee: ExprId, args: Vec<ExprId> },
-    // TODO: pipe
+    /// A pipe expression `lhs |> rhs`
+    Pipe { lhs: ExprId, rhs: ExprId },
     // TODO: member access
 }
 
@@ -56,22 +54,16 @@ pub enum Expr {
 pub enum Type {
     /// A named type
     Named(Path),
-
     /// A primitive type
     Primitive(PrimitiveType),
-
     /// A type provider invocation `Provider<arg1, arg2, ...>` (unresolved)
     Provider { provider: Path, args: Vec<Literal> },
-
     /// A type function type `(T1, T2, ...) -> T`
     Function(Vec<TypeId>, TypeId),
-
     /// A list type `[T]`
     List(TypeId),
-
     /// A record type `{ field: T, field: T, ... }`
     Record(Vec<(Symbol, TypeId)>),
-
     /// A type variable (for type inference)
     Var(TypeVar),
 }

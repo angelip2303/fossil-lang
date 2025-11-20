@@ -294,6 +294,8 @@ impl<'a> TypeChecker<'a> {
         let decl_ids: Vec<_> = ast.decls.iter().map(|(id, _)| id).collect();
         for decl_id in decl_ids {
             match ast.decls.get(decl_id).clone() {
+                Decl::Import { .. } => {}
+
                 Decl::Type { name, ty } => {
                     env.insert(name, Polytype::mono(ty));
                 }
@@ -463,6 +465,26 @@ impl<'a> TypeChecker<'a> {
 
                 let final_ret_ty = subst.apply(ret, ast);
                 (subst, final_ret_ty)
+            }
+
+            Expr::Pipe { lhs, rhs } => {
+                let (s1, arg_ty) = self.infer(env, lhs, ast, resolution)?;
+                let (s2, func_ty) = self.infer(env, rhs, ast, resolution)?;
+
+                let mut subst = s1.compose(&s2, ast);
+
+                let ret_var = self.tvg.next();
+                let ret = ast.types.alloc(Type::Var(ret_var));
+
+                let arg_ty = subst.apply(arg_ty, ast);
+                let expected_func_ty = ast.types.alloc(Type::Function(vec![arg_ty], ret));
+
+                let func_ty = subst.apply(func_ty, ast);
+                let s3 = self.unify(func_ty, expected_func_ty, ast)?;
+                subst = subst.compose(&s3, ast);
+
+                let final_ret = subst.apply(ret, ast);
+                (subst, final_ret)
             }
         };
 
