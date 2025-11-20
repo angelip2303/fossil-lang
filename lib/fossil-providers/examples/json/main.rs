@@ -6,13 +6,13 @@ use fossil_providers::json::JsonProvider;
 
 pub fn main() {
     let src = r#"
-        type Person = Data.Json<"lib/fossil-providers/examples/json/data.json">;
+        type Person = data::Json<"lib/fossil-providers/examples/json/data.json">;
     "#;
 
     let mut registry = ModuleRegistry::default();
 
     registry
-        .module("Data")
+        .module("data")
         .provider("Json", Arc::new(JsonProvider))
         .done();
 

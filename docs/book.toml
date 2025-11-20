@@ -3,7 +3,7 @@ authors = ["Ángel Iglesias Préstamo"]
 language = "en"
 multilingual = false
 src = "src"
-title = "ikigai-lang"
+title = "fossil-lang"
 site-url = "/docs/"
 
 [output.html.print]

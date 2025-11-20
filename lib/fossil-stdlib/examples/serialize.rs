@@ -13,13 +13,13 @@ pub fn main() -> Result<(), FossilError> {
             surname = "Doe"
         }
 
-        Csv.write(data, "out.csv")
+        csv::write(data, "out.csv")
     "#;
 
     let mut registry = ModuleRegistry::default();
 
     registry
-        .module("Csv")
+        .module("csv")
         .function("write", Arc::new(CsvWriteFunction))
         .done();
 
