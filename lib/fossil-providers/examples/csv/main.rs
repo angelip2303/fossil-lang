@@ -6,7 +6,7 @@ use fossil_providers::csv::CsvProvider;
 
 pub fn main() {
     let src = r#"
-        type Person = data::Csv<"lib/fossil-providers/examples/csv/data.csv">;
+        type Person = data::Csv<"lib/fossil-providers/examples/csv/data.csv">
     "#;
 
     let mut registry = ModuleRegistry::default();

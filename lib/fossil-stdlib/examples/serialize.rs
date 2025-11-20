@@ -8,12 +8,15 @@ use fossil_stdlib::builtin::CsvWriteFunction;
 
 pub fn main() -> Result<(), FossilError> {
     let src = r#"
-        let data = {
+        let data = [{
             name = "John",
             surname = "Doe"
-        }
+        }, {
+            name = "Jane",
+            surname = "Doe"
+        }];
 
-        csv::write(data, "out.csv")
+        csv::write(data, "tmp/out.csv")
     "#;
 
     let mut registry = ModuleRegistry::default();
