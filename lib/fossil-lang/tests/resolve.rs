@@ -9,6 +9,14 @@ fn compile(src: &str) -> Result<(), CompileError> {
 }
 
 #[test]
+fn resolve_undefined_variable() {
+    let src = r#"
+        y
+    "#;
+    assert!(compile(src).is_err());
+}
+
+#[test]
 fn resolve_simple_variable() {
     let src = r#"
         let x = 42
@@ -18,18 +26,38 @@ fn resolve_simple_variable() {
 }
 
 #[test]
-fn resolve_undefined_variable() {
+fn resolve_simple_variable_defined_after_use() {
     let src = r#"
-        y
+        x
+        let x = 42
     "#;
     assert!(compile(src).is_err());
 }
 
 #[test]
-fn resolve_variable_with_hoisting() {
+fn resolve_function() {
     let src = r#"
-        x
+        let f = fn () -> ()
+        f()
+    "#;
+    assert!(compile(src).is_ok());
+}
+
+#[test]
+fn resolve_function_defined_after_use() {
+    let src = r#"
+        f()
+        let f = fn () -> ()
+    "#;
+    assert!(compile(src).is_ok());
+}
+
+#[test]
+fn resolve_function_captures() {
+    let src = r#"
         let x = 42
+        let f = fn () -> x
+        f()
     "#;
     assert!(compile(src).is_ok());
 }
@@ -53,16 +81,6 @@ fn resolve_shadowing() {
             let x = "hello"
             x
         }
-        f()
-    "#;
-    assert!(compile(src).is_ok());
-}
-
-#[test]
-fn resolve_closure_captures() {
-    let src = r#"
-        let x = 42
-        let f = fn () -> x
         f()
     "#;
     assert!(compile(src).is_ok());
@@ -265,19 +283,6 @@ fn resolve_unused_variable() {
 }
 
 #[test]
-fn resolve_multiple_definitions_same_name() {
-    let src = r#"
-        let x = 1
-        let x = 2
-        x
-    "#;
-    // Shadowing at the same scope level
-    // This depends on your hoisting strategy
-    // Most languages either allow it (last definition wins) or error
-    // Adjust this test based on your design decision
-}
-
-#[test]
 fn resolve_complex_nesting() {
     let src = r#"
         let outer = 1
@@ -295,4 +300,17 @@ fn resolve_complex_nesting() {
         f1()
     "#;
     assert!(compile(src).is_ok());
+}
+
+#[test]
+fn resolve_multiple_definitions_same_name() {
+    let src = r#"
+        let x = 1
+        let x = 2
+        x
+    "#;
+    // Shadowing at the same scope level
+    // This depends on your hoisting strategy
+    // Most languages either allow it (last definition wins) or error
+    // Adjust this test based on your design decision
 }

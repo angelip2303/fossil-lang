@@ -1,0 +1,25 @@
+open data::rdf
+open data::csv
+
+type Person = CSV<"people.csv">;
+
+type PersonShape = {
+    #[iri("http://example.com/person/name")]
+    name: string,
+    #[iri("http://example.com/person/age")]
+    age: int,
+}
+
+type {
+    Address,
+    "http://empresa.legacy/CRITICAL_DATA_V2#Person_Entity" as Person
+} = ShEx<"social.shexc">
+
+Person::load()
+    |> map(fn (row) -> {
+            PersonShape {
+                name: row.name,
+                age: row.age,
+            } |> Entity::with_id(`http://example.com/person/{row.id}`)
+        })
+    |> rdf::serialize("people.ttl")

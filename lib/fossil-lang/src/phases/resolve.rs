@@ -20,7 +20,7 @@ impl<'a> Resolver<'a> {
         let ParsedProgram { ast, symbols } = program;
 
         // Phase 1: Hoisting - collect all top-level declarations
-        let mut hoisting = HoistingVisitor::new(self.registry);
+        let mut hoisting = HoistingVisitor::new();
         walk_ast(&mut hoisting, &ast, &symbols)?;
 
         // Phase 2: Resolution - resolve all identifiers using hoisted scope
@@ -115,68 +115,41 @@ impl Scope {
     }
 }
 
-struct HoistingVisitor<'a> {
-    registry: &'a ModuleRegistry,
+struct HoistingVisitor {
     stack: ScopeStack,
 }
 
-impl<'a> HoistingVisitor<'a> {
-    fn new(registry: &'a ModuleRegistry) -> Self {
+impl HoistingVisitor {
+    fn new() -> Self {
         Self {
-            registry,
             stack: ScopeStack::new(),
         }
     }
 }
 
-impl<'a> Visitor for HoistingVisitor<'a> {
+impl Visitor for HoistingVisitor {
     type Error = ResolveError;
-
-    fn visit_import_decl(
-        &mut self,
-        _decl_id: DeclId,
-        module: &Path,
-        alias: Symbol,
-        _ast: &Ast,
-        interner: &Interner,
-    ) -> Result<(), Self::Error> {
-        let module_path = module.as_slice().to_vec();
-
-        self.registry.resolve(&module_path, interner).map_err(|_| {
-            let name = parts_to_string(&module_path, interner);
-            ResolveError::UndefinedModule(name)
-        })?;
-
-        self.stack.current_mut().add_import(alias, module_path);
-
-        Ok(())
-    }
 
     fn visit_let_decl(
         &mut self,
         decl_id: DeclId,
         name: Symbol,
         _value: ExprId,
-        _ast: &Ast,
+        ast: &Ast,
         _interner: &Interner,
     ) -> Result<(), Self::Error> {
-        self.stack
-            .current_mut()
-            .insert_value(name, BindingRef::Local(decl_id));
-        Ok(())
-    }
+        let rhs = match ast.decls.get(decl_id) {
+            Decl::Let { value, .. } => *value,
+            _ => unreachable!(), // we know we are visiting a let declaration
+        };
 
-    fn visit_type_decl(
-        &mut self,
-        decl_id: DeclId,
-        name: Symbol,
-        _ty: TypeId,
-        _ast: &Ast,
-        _interner: &Interner,
-    ) -> Result<(), Self::Error> {
-        self.stack
-            .current_mut()
-            .insert_type(name, BindingRef::Local(decl_id));
+        // we only insert the value if it's a function (function hoisting)
+        if let Expr::Function { .. } = ast.exprs.get(rhs) {
+            self.stack
+                .current_mut()
+                .insert_value(name, BindingRef::Local(decl_id));
+        }
+
         Ok(())
     }
 }
@@ -243,21 +216,21 @@ impl<'a> Visitor for ResolutionVisitor<'a> {
             Path::Simple(name) => {
                 if let Some(binding) = self.stack.lookup_value(*name) {
                     self.resolution.exprs.insert(expr_id, binding);
-                    return Ok(());
+                } else {
+                    let binding_id =
+                        self.resolve_binding(&[*name], interner, |binding| match binding {
+                            Binding::Function(_) => Ok(()),
+                            Binding::Provider(_) => {
+                                let name_str = interner.resolve(*name).to_string();
+                                Err(ResolveError::NotAFunction(name_str))
+                            }
+                        })?;
+
+                    self.resolution
+                        .exprs
+                        .insert(expr_id, BindingRef::Module(binding_id));
                 }
 
-                let binding_id =
-                    self.resolve_binding(&[*name], interner, |binding| match binding {
-                        Binding::Function(_) => Ok(()),
-                        Binding::Provider(_) => {
-                            let name_str = interner.resolve(*name).to_string();
-                            Err(ResolveError::NotAFunction(name_str))
-                        }
-                    })?;
-
-                self.resolution
-                    .exprs
-                    .insert(expr_id, BindingRef::Module(binding_id));
                 Ok(())
             }
 

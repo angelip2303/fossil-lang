@@ -119,16 +119,6 @@ where
             //         just(Token::Dot).ignore_then(name_parser(ctx)),
             //         |lhs, field, _| todo(),
             //     ),
-            //     postfix(
-            //         3,
-            //         just(Token::Cast).ignore_then(type_parser(ctx)),
-            //         |expr, ty, _| todo(),
-            //     ),
-            //     postfix(
-            //         2,
-            //         just(Token::Colon).ignore_then(type_parser(ctx)),
-            //         |expr, ty, _| todo(),
-            //     ),
             infix(right(1), just(Token::Pipe), |lhs, _, rhs, _| {
                 ctx.ast().exprs.alloc(Expr::Pipe { lhs, rhs })
             }),

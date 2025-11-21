@@ -19,10 +19,7 @@ impl Parser {
             .collect::<Vec<_>>()
             .parse(tokens.as_slice())
             .into_result()
-            .map_err(|e| {
-                eprintln!("Parse error: {:?}", e);
-                todo!()
-            })?;
+            .map_err(|_| todo!())?;
 
         let (ast, symbols) = ctx.take();
 
