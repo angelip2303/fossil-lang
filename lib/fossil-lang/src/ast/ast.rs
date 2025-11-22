@@ -54,6 +54,8 @@ pub enum ExprKind {
     Function { params: Vec<Symbol>, body: ExprId },
     /// A function application `callee(arg1, arg2, ...)`
     Application { callee: ExprId, args: Vec<ExprId> },
+    /// A pipe expression `lhs |> rhs`
+    Pipe { lhs: ExprId, rhs: ExprId },
     // TODO: member access
 }
 
@@ -69,14 +71,14 @@ pub enum TypeKind {
     Named(Path),
     /// A primitive type
     Primitive(PrimitiveType),
+    /// A type provider invocation `Provider<arg1, arg2, ...>` (unresolved)
+    Provider { provider: Path, args: Vec<Literal> },
     /// A type function type `(T1, T2, ...) -> T`
     Function(Vec<TypeId>, TypeId),
     /// A list type `[T]`
     List(TypeId),
     /// A record type `{ field: T, field: T, ... }`
     Record(Vec<(Symbol, TypeId)>),
-    /// A type variable (for type inference)
-    Var(TypeVar),
 }
 
 /// A path to an identifier (either simple or qualified)

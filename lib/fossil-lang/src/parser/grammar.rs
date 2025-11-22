@@ -1,7 +1,7 @@
 use chumsky::pratt::{infix, right};
 use chumsky::prelude::*;
 
-use crate::ast::*;
+use crate::ast::ast::*;
 use crate::context::Symbol;
 use crate::parser::lexer::Token;
 use crate::phases::AstCtx;
@@ -39,7 +39,7 @@ where
         .ignore_then(path(ctx))
         .then_ignore(just(Token::As))
         .then(symbol(ctx))
-        .map(|(module, alias)| ctx.ast().decls.alloc(Decl::Import { module, alias }));
+        .map_with(|(module, alias), e| ctx.ast().decls.alloc(Decl::Import { module, alias }));
 
     let let_decl = just(Token::Let)
         .ignore_then(symbol(ctx))

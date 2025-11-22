@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
+use crate::ast::ast::*;
 use crate::ast::visitor::{Visitor, walk_ast};
-use crate::ast::*;
 use crate::context::{Interner, Symbol};
 use crate::error::ResolveError;
 use crate::module::{Binding, ModuleRegistry};
@@ -170,7 +170,7 @@ impl Visitor for ForwardReferenceCollector {
             _ => unreachable!(),
         };
 
-        if let Expr::Function { .. } = ast.exprs.get(rhs) {
+        if let ExprKind::Function { .. } = ast.exprs.get(rhs) {
             self.stack
                 .current_mut()
                 .insert_value(name, BindingRef::Local(decl_id));

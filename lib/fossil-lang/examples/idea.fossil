@@ -4,9 +4,9 @@ open data::csv
 type Person = CSV<"people.csv">;
 
 type PersonShape = {
-    #[iri("http://example.com/person/name")]
+    #[serialization_name = iri("http://example.com/person/name")]
     name: string,
-    #[iri("http://example.com/person/age")]
+    #[serialization_name = iri("http://example.com/person/age")]
     age: int,
 }
 
