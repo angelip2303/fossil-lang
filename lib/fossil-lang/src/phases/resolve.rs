@@ -7,6 +7,31 @@ use crate::error::ResolveError;
 use crate::module::{Binding, ModuleRegistry};
 use crate::phases::{BindingId, BindingRef, ParsedProgram, ResolutionTable, ResolvedProgram};
 
+/// The name resolution pass - resolves all identifiers to their declarations.
+///
+/// This pass runs in two sub-passes to support forward references:
+///
+/// ## Pass 2a: Name-Finding (Forward Reference Collection)
+/// Collects declarations that can be referenced before they're defined:
+/// - Functions (in `let` declarations)
+/// - Type aliases (in `type` declarations)
+///
+/// ## Pass 2b: Name-Binding
+/// Resolves every identifier occurrence to its declaration:
+/// - Local variables and functions
+/// - Module imports and qualified names
+/// - Function parameters
+/// - Type names
+/// - Type providers
+///
+/// ## Why Two Sub-Passes?
+/// Forward references require knowing about declarations before we encounter their uses.
+/// For example:
+/// ```fossil
+/// f()                 // Use comes first
+/// let f = fn() -> 42  // Definition comes later
+/// ```
+/// Without the first pass, we wouldn't know `f` exists when we try to resolve `f()`.
 pub struct Resolver<'a> {
     registry: &'a ModuleRegistry,
 }
@@ -19,12 +44,14 @@ impl<'a> Resolver<'a> {
     pub fn resolve(&mut self, program: ParsedProgram) -> Result<ResolvedProgram, ResolveError> {
         let ParsedProgram { ast, symbols } = program;
 
-        // Phase 1: Hoisting - collect all top-level declarations
-        let mut hoisting = HoistingVisitor::new();
-        walk_ast(&mut hoisting, &ast, &symbols)?;
+        // Pass 2a: Name-Finding
+        // Collect all forward-referenceable declarations (functions and type aliases)
+        let mut collector = ForwardReferenceCollector::new();
+        walk_ast(&mut collector, &ast, &symbols)?;
 
-        // Phase 2: Resolution - resolve all identifiers using hoisted scope
-        let mut resolution = ResolutionVisitor::new(self.registry, hoisting.stack);
+        // Pass 2b: Name-Binding
+        // Resolve all identifier references using the collected declarations
+        let mut resolution = ResolutionVisitor::new(self.registry, collector.stack);
         walk_ast(&mut resolution, &ast, &symbols)?;
 
         Ok(ResolvedProgram {
@@ -115,11 +142,11 @@ impl Scope {
     }
 }
 
-struct HoistingVisitor {
+struct ForwardReferenceCollector {
     stack: ScopeStack,
 }
 
-impl HoistingVisitor {
+impl ForwardReferenceCollector {
     fn new() -> Self {
         Self {
             stack: ScopeStack::new(),
@@ -127,7 +154,7 @@ impl HoistingVisitor {
     }
 }
 
-impl Visitor for HoistingVisitor {
+impl Visitor for ForwardReferenceCollector {
     type Error = ResolveError;
 
     fn visit_let_decl(
@@ -140,16 +167,29 @@ impl Visitor for HoistingVisitor {
     ) -> Result<(), Self::Error> {
         let rhs = match ast.decls.get(decl_id) {
             Decl::Let { value, .. } => *value,
-            _ => unreachable!(), // we know we are visiting a let declaration
+            _ => unreachable!(),
         };
 
-        // we only insert the value if it's a function (function hoisting)
         if let Expr::Function { .. } = ast.exprs.get(rhs) {
             self.stack
                 .current_mut()
                 .insert_value(name, BindingRef::Local(decl_id));
         }
 
+        Ok(())
+    }
+
+    fn visit_type_decl(
+        &mut self,
+        decl_id: DeclId,
+        name: Symbol,
+        _ty: TypeId,
+        _ast: &Ast,
+        _interner: &Interner,
+    ) -> Result<(), Self::Error> {
+        self.stack
+            .current_mut()
+            .insert_type(name, BindingRef::Local(decl_id));
         Ok(())
     }
 }

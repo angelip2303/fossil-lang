@@ -2,9 +2,6 @@ use polars::prelude::DataType;
 
 use crate::context::*;
 
-pub mod hir;
-pub mod visitor;
-
 pub type DeclId = NodeId<Decl>;
 pub type ExprId = NodeId<Expr>;
 pub type TypeId = NodeId<Type>;
@@ -46,8 +43,6 @@ pub enum Expr {
     Function { params: Vec<Symbol>, body: ExprId },
     /// A function application `callee(arg1, arg2, ...)`
     Application { callee: ExprId, args: Vec<ExprId> },
-    /// A pipe expression `lhs |> rhs`
-    Pipe { lhs: ExprId, rhs: ExprId },
     // TODO: member access
 }
 
@@ -57,8 +52,6 @@ pub enum Type {
     Named(Path),
     /// A primitive type
     Primitive(PrimitiveType),
-    /// A type provider invocation `Provider<arg1, arg2, ...>` (unresolved)
-    Provider { provider: Path, args: Vec<Literal> },
     /// A type function type `(T1, T2, ...) -> T`
     Function(Vec<TypeId>, TypeId),
     /// A list type `[T]`
