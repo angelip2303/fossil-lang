@@ -6,7 +6,7 @@ pub type ExprId = NodeId<Expr>;
 pub type TypeId = NodeId<Type>;
 
 #[derive(Default, Debug)]
-pub struct Ast {
+pub struct Hir {
     pub decls: Arena<Decl>,
     pub exprs: Arena<Expr>,
     pub types: Arena<Type>,

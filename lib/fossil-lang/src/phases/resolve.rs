@@ -159,18 +159,18 @@ impl Visitor for ForwardReferenceCollector {
 
     fn visit_let_decl(
         &mut self,
-        decl_id: DeclId,
+        decl_id: StmtId,
         name: Symbol,
         _value: ExprId,
         ast: &Ast,
         _interner: &Interner,
     ) -> Result<(), Self::Error> {
         let rhs = match ast.decls.get(decl_id) {
-            Decl::Let { value, .. } => *value,
+            Stmt::Let { value, .. } => *value,
             _ => unreachable!(),
         };
 
-        if let ExprKind::Function { .. } = ast.exprs.get(rhs) {
+        if let ExprKind::Function { .. } = ast.stmts.get(rhs) {
             self.stack
                 .current_mut()
                 .insert_value(name, BindingRef::Local(decl_id));
@@ -181,7 +181,7 @@ impl Visitor for ForwardReferenceCollector {
 
     fn visit_type_decl(
         &mut self,
-        decl_id: DeclId,
+        decl_id: StmtId,
         name: Symbol,
         _ty: TypeId,
         _ast: &Ast,

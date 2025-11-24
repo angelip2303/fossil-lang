@@ -1,26 +1,26 @@
 use crate::ast::Span;
 use crate::context::*;
 
-pub type DeclId = NodeId<Decl>;
+pub type StmtId = NodeId<Stmt>;
 pub type ExprId = NodeId<Expr>;
 pub type TypeId = NodeId<Type>;
 
 #[derive(Default, Debug)]
 pub struct Ast {
-    pub decls: Arena<Decl>,
-    pub exprs: Arena<Expr>,
+    pub decls: Arena<Stmt>,
+    pub stmts: Arena<Expr>,
     pub types: Arena<Type>,
 }
 
 #[derive(Debug)]
-pub struct Decl {
+pub struct Stmt {
     pub span: Span,
-    pub kind: DeclKind,
+    pub kind: StmtKind,
 }
 
 /// A declaration in the language
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum DeclKind {
+pub enum StmtKind {
     /// An import declaration `open Module as alias`
     Import { module: Path, alias: Symbol },
     /// A value binding `let name = expr`
@@ -98,13 +98,6 @@ impl Path {
             Path::Simple(parts[0])
         } else {
             Path::Qualified(parts)
-        }
-    }
-
-    pub fn as_slice(&self) -> &[Symbol] {
-        match self {
-            Path::Simple(s) => std::slice::from_ref(s),
-            Path::Qualified(v) => v.as_slice(),
         }
     }
 }

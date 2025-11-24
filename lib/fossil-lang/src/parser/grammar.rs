@@ -31,7 +31,7 @@ where
     choice((qualified, identifier))
 }
 
-pub fn decls<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, DeclId, ParserError<'a>> + Clone
+pub fn decls<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, StmtId, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
@@ -39,21 +39,21 @@ where
         .ignore_then(path(ctx))
         .then_ignore(just(Token::As))
         .then(symbol(ctx))
-        .map_with(|(module, alias), e| ctx.ast().decls.alloc(Decl::Import { module, alias }));
+        .map_with(|(module, alias), e| ctx.ast().decls.alloc(Stmt::Import { module, alias }));
 
     let let_decl = just(Token::Let)
         .ignore_then(symbol(ctx))
         .then_ignore(just(Token::Eq))
         .then(exprs(ctx))
-        .map(|(name, value)| ctx.ast().decls.alloc(Decl::Let { name, value }));
+        .map(|(name, value)| ctx.ast().decls.alloc(Stmt::Let { name, value }));
 
     let type_decl = just(Token::Type)
         .ignore_then(symbol(ctx))
         .then_ignore(just(Token::Eq))
         .then(types(ctx))
-        .map(|(name, ty)| ctx.ast().decls.alloc(Decl::Type { name, ty }));
+        .map(|(name, ty)| ctx.ast().decls.alloc(Stmt::Type { name, ty }));
 
-    let expr_decl = exprs(ctx).map(|expr| ctx.ast().decls.alloc(Decl::Expr(expr)));
+    let expr_decl = exprs(ctx).map(|expr| ctx.ast().decls.alloc(Stmt::Expr(expr)));
 
     choice((import_decl, let_decl, type_decl, expr_decl))
 }

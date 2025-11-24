@@ -3,26 +3,26 @@ use polars::prelude::DataType;
 use crate::ast::Span;
 use crate::context::*;
 
-pub type DeclId = NodeId<Decl>;
+pub type StmtId = NodeId<Stmt>;
 pub type ExprId = NodeId<Expr>;
 pub type TypeId = NodeId<Type>;
 
 #[derive(Default, Debug)]
-pub struct Ast {
-    pub decls: Arena<Decl>,
+pub struct TypedHir {
+    pub stmts: Arena<Stmt>,
     pub exprs: Arena<Expr>,
     pub types: Arena<Type>,
 }
 
 #[derive(Debug)]
-pub struct Decl {
+pub struct Stmt {
     pub span: Span,
-    pub kind: DeclKind,
+    pub kind: StmtKind,
 }
 
-/// A declaration in the language
+/// A statement in the language
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum DeclKind {
+pub enum StmtKind {
     /// An import declaration `open Module as alias`
     Import { module: Path, alias: Symbol },
     /// A value binding `let name = expr`
