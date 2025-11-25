@@ -1,11 +1,16 @@
-use crate::ast::{Ast, Polytype};
-use crate::error::RuntimeError;
-use crate::phases::typecheck::TypeVarGen;
-use crate::runtime::value::Value;
+use crate::ast::thir::{Polytype, TypedHir};
+use crate::error::{RuntimeError, TypeVar};
+
+// TODO: Define Value type when runtime module is implemented
+pub type Value = ();
 
 pub trait FunctionImpl: Send + Sync {
     /// Returns the type signature of the function
-    fn signature(&self, ast: &mut Ast, tvg: &mut TypeVarGen) -> Polytype;
+    fn signature(
+        &self,
+        thir: &mut TypedHir,
+        next_type_var: &mut dyn FnMut() -> TypeVar,
+    ) -> Polytype;
 
     /// Execute the function with the given arguments at runtime
     fn call(&self, args: Vec<Value>) -> Result<Value, RuntimeError>;

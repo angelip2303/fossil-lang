@@ -1,0 +1,31 @@
+open data::json
+open data::rdf::shex
+
+type Films = json::<"films.json">
+type { Film, Actor } = shex::<"films.shexc">
+
+let make_film_iri = fn (id) -> iri(`http://example.com/films#${id}`)
+let make_actor_iri = fn (name) -> iri(`http://example.com/actors#${name}`)
+
+let raw_data = Films::load()
+
+let films = raw_data.map(fn(f) -> {
+    Film {
+        ..f,
+        actor: f.cast.map(fn(a) -> make_actor_iri(a.name))
+    }
+    |> Entity::with_id(make_film_iri(f.id))
+})
+
+let actors = raw_data
+    .flat_map(fn(f) -> {
+        f.actors.map(fn(a) -> {
+            Actor {
+                name: a.name,
+                appear_on: f.name,
+            }
+            |> Entity::with_id(make_actor_iri(a.name))
+        })
+    })
+
+rdf::write((films, actors))

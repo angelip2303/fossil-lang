@@ -29,6 +29,11 @@ abc123_
 true
 ```
 
+## The unit type
+
+Unit is a type that has only one value, the unit value `()`.
+This is used when functions do not return a useful value, representing the absence of a value.
+
 ## Comments
 
 As it could be seen in the snippet above, comments are denoted by the `//` symbol.

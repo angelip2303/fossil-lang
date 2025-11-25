@@ -135,33 +135,6 @@ impl<'a> Interpreter<'a> {
                     _ => unreachable!(),
                 }
             }
-
-            Expr::Pipe { lhs, rhs } => {
-                let arg_val = self.eval(*lhs, ast, symbols, resolution)?;
-                let func_val = self.eval(*rhs, ast, symbols, resolution)?;
-
-                match func_val {
-                    Value::Closure { params, body, env } => {
-                        let saved_env = self.env.clone();
-                        self.env = (*env).clone();
-
-                        if let Some(param) = params.first() {
-                            self.env.bind(*param, arg_val);
-                        }
-
-                        let result = self.eval(body, ast, symbols, resolution)?;
-                        self.env = saved_env;
-                        result
-                    }
-
-                    Value::Function(binding_id) => match self.registry.get(binding_id) {
-                        Binding::Function(func) => func.call(vec![arg_val])?,
-                        _ => unreachable!(),
-                    },
-
-                    _ => unreachable!(),
-                }
-            }
         };
         Ok(value)
     }

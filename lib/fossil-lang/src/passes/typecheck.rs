@@ -1,13 +1,19 @@
-use std::collections::{HashMap, HashSet};
-use std::ops::{Deref, DerefMut};
+//! Type checking and inference module
+//!
+//! This module implements Hindley-Milner type inference to convert HIR to THIR.
+//! The type checker performs:
+//! - Type inference for expressions
+//! - Unification to solve type constraints
+//! - Generalization and instantiation for polymorphism
 
-use crate::ast::*;
-use crate::context::Symbol;
-use crate::error::TypeError;
-use crate::module::{Binding, ModuleRegistry};
-use crate::phases::{BindingId, BindingRef, ResolutionTable, ResolvedProgram, TypedProgram};
+use std::collections::HashMap;
 
-/// A type variable generator
+use crate::ast::{hir, thir};
+use crate::context::{DefId, Symbol};
+use crate::error::{CompileError, CompileErrorKind, TypeVar};
+use crate::phases::{HirProgram, ThirProgram};
+
+/// Type variable generator
 #[derive(Default)]
 pub struct TypeVarGen {
     supply: usize,

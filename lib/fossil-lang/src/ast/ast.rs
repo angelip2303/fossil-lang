@@ -1,4 +1,4 @@
-use crate::ast::Span;
+use crate::ast::Loc;
 use crate::context::*;
 
 pub type StmtId = NodeId<Stmt>;
@@ -7,14 +7,14 @@ pub type TypeId = NodeId<Type>;
 
 #[derive(Default, Debug)]
 pub struct Ast {
-    pub decls: Arena<Stmt>,
-    pub stmts: Arena<Expr>,
+    pub stmts: Arena<Stmt>,
+    pub exprs: Arena<Expr>,
     pub types: Arena<Type>,
 }
 
 #[derive(Debug)]
 pub struct Stmt {
-    pub span: Span,
+    pub loc: Loc,
     pub kind: StmtKind,
 }
 
@@ -33,7 +33,7 @@ pub enum StmtKind {
 
 #[derive(Debug)]
 pub struct Expr {
-    pub span: Span,
+    pub loc: Loc,
     pub kind: ExprKind,
 }
 
@@ -51,7 +51,7 @@ pub enum ExprKind {
     /// A record `{ field = expr, field = expr, ... }`
     Record(Vec<(Symbol, ExprId)>),
     /// A function definition `fn (param1, param2, ...) -> expr`
-    Function { params: Vec<Symbol>, body: ExprId },
+    Function { params: Vec<Param>, body: ExprId },
     /// A function application `callee(arg1, arg2, ...)`
     Application { callee: ExprId, args: Vec<ExprId> },
     /// A pipe expression `lhs |> rhs`
@@ -61,7 +61,7 @@ pub enum ExprKind {
 
 #[derive(Debug)]
 pub struct Type {
-    pub span: Span,
+    pub loc: Loc,
     pub kind: TypeKind,
 }
 
@@ -69,6 +69,8 @@ pub struct Type {
 pub enum TypeKind {
     /// A named type
     Named(Path),
+    /// A unit type
+    Unit,
     /// A primitive type
     Primitive(PrimitiveType),
     /// A type provider invocation `Provider<arg1, arg2, ...>` (unresolved)
@@ -100,6 +102,63 @@ impl Path {
             Path::Qualified(parts)
         }
     }
+
+    pub fn parent(&self) -> Option<Path> {
+        match self {
+            Path::Simple(_) => None,
+            Path::Qualified(parts) => Some(Path::Qualified(parts.split_last().unwrap().1.to_vec())),
+        }
+    }
+
+    pub fn item(&self) -> Symbol {
+        match self {
+            Path::Simple(sym) => *sym,
+            Path::Qualified(parts) => *parts.last().unwrap(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Path::Simple(_) => 1,
+            Path::Qualified(parts) => parts.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn rev(&self) -> Path {
+        match self {
+            Path::Simple(sym) => Path::Simple(*sym),
+            Path::Qualified(parts) => Path::Qualified(parts.iter().rev().copied().collect()),
+        }
+    }
+}
+
+impl From<Path> for Vec<Symbol> {
+    fn from(path: Path) -> Self {
+        match path {
+            Path::Simple(sym) => vec![sym],
+            Path::Qualified(parts) => parts,
+        }
+    }
+}
+
+impl From<Vec<Symbol>> for Path {
+    fn from(parts: Vec<Symbol>) -> Self {
+        if parts.len() == 1 {
+            Path::Simple(parts[0])
+        } else {
+            Path::Qualified(parts)
+        }
+    }
+}
+
+impl From<Symbol> for Path {
+    fn from(sym: Symbol) -> Self {
+        Path::Simple(sym)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -109,10 +168,15 @@ pub enum Literal {
     Boolean(bool),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Param {
+    pub name: Symbol,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrimitiveType {
+    Unit,
     Int,
     String,
     Bool,
-    Unit,
 }

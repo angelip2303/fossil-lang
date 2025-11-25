@@ -2,6 +2,11 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
+use std::sync::Arc;
+
+use crate::ast::ast::Path;
+use crate::traits::function::FunctionImpl;
+use crate::traits::provider::TypeProviderImpl;
 
 pub struct NodeId<T> {
     idx: u32,
@@ -142,5 +147,103 @@ impl Default for Interner {
             map: HashMap::new(),
             strings: Vec::new(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DefId(u32);
+
+impl DefId {
+    pub fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub fn index(self) -> u32 {
+        self.0
+    }
+}
+
+pub struct Def {
+    id: DefId,
+    parent: Option<DefId>,
+    pub name: Symbol,
+    pub kind: DefKind,
+}
+
+#[derive(Clone)]
+pub enum DefKind {
+    Mod,
+    Let,
+    Type,
+    Func(Option<Arc<dyn FunctionImpl>>),
+    Provider(Arc<dyn TypeProviderImpl>),
+}
+
+impl Def {
+    pub fn new(id: DefId, parent: Option<DefId>, name: Symbol, kind: DefKind) -> Self {
+        Self {
+            id,
+            parent,
+            name,
+            kind,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Definitions {
+    items: Vec<Def>,
+}
+
+impl Definitions {
+    pub fn insert(&mut self, parent: Option<DefId>, name: Symbol, kind: DefKind) -> DefId {
+        let id = DefId::new(self.items.len() as u32);
+        self.items.push(Def::new(id, parent, name, kind));
+        id
+    }
+
+    pub fn get(&self, id: DefId) -> &Def {
+        &self.items[id.index() as usize]
+    }
+
+    pub fn get_by_name(&self, name: Symbol) -> Option<&Def> {
+        self.items.iter().find(|def| def.name == name)
+    }
+
+    pub fn resolve(&self, path: impl Into<Path>) -> Option<DefId> {
+        let path = path.into();
+
+        // if the path is empty, return None
+        if path.is_empty() {
+            return None;
+        }
+
+        // try to find the item by name, return None otherwise
+        let mut item = match self.get_by_name(path.item()) {
+            Some(item) => item,
+            None => return None,
+        };
+
+        // if the path has a parent, resolve it recursively, return None otherwise
+        let parent = match path.parent() {
+            Some(parent) => parent,
+            None => {
+                return match item.parent {
+                    Some(parent) => Some(parent),
+                    None => Some(item.id),
+                };
+            }
+        };
+
+        Into::<Vec<Symbol>>::into(parent.rev())
+            .iter()
+            .all(|i: &Symbol| match item.parent {
+                Some(parent) => {
+                    item = self.get(parent);
+                    i == &item.name
+                }
+                None => false,
+            })
+            .then(|| item.id)
     }
 }

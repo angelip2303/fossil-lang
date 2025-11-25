@@ -1,19 +1,20 @@
 open data::rdf
 open data::csv
 
-type Person = CSV<"people.csv">;
+// turbofish to pass static parameters at compile time
+type Person = csv::<"people.csv">;
 
 type PersonShape = {
-    #[serialization_name = iri("http://example.com/person/name")]
+    #[rename = iri("http://example.com/person/name")]
     name: string,
-    #[serialization_name = iri("http://example.com/person/age")]
+    #[rename = iri("http://example.com/person/age")]
     age: int,
 }
 
 type {
     Address,
     "http://empresa.legacy/CRITICAL_DATA_V2#Person_Entity" as Person
-} = ShEx<"social.shexc">
+} = rdf::shex::<"social.shexc">
 
 Person::load()
     |> map(fn (row) -> {

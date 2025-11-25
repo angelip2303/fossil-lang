@@ -1,13 +1,12 @@
-use crate::ast::{Ast, Literal, Type};
+use crate::ast::ast::{Literal, TypeKind};
 use crate::context::Interner;
 use crate::error::ProviderError;
 
-/// The TypeProvider trait generates a whole module at compile-time
+/// The TypeProvider trait generates a type at compile-time
 pub trait TypeProviderImpl: Send + Sync {
     fn generate(
         &self,
         args: &[Literal],
-        ast: &mut Ast,
         interner: &mut Interner,
-    ) -> Result<Type, ProviderError>;
+    ) -> Result<TypeKind, ProviderError>;
 }

@@ -1,31 +1,51 @@
-use crate::error::CompileError;
-use crate::module::ModuleRegistry;
-use crate::phases::TypedProgram;
-use crate::phases::typecheck::TypeChecker;
-use crate::phases::typegen::TypeGenerator;
-use crate::phases::{parse::Parser, resolve::Resolver};
+//! Compiler orchestration module
+//!
+//! This module coordinates the compilation pipeline:
+//! Source -> Parse -> AST -> Lower -> HIR -> TypeCheck -> THIR -> Interpret/Execute
 
-pub struct Compiler<'a> {
-    registry: &'a ModuleRegistry,
+use crate::error::CompileError;
+use crate::passes::{
+    HirProgram, ParsedProgram, ThirProgram, lower::Lowering, parse::Parser, typecheck::TypeChecker,
+};
+
+pub struct Compiler {
+    /// The source ID for error reporting
+    source_id: usize,
 }
 
-impl<'a> Compiler<'a> {
-    pub fn new(registry: &'a ModuleRegistry) -> Compiler<'a> {
-        Compiler { registry }
+impl Compiler {
+    pub fn new() -> Self {
+        Self { source_id: 0 }
     }
 
-    pub fn compile(&self, src: &str) -> Result<TypedProgram, CompileError> {
-        let program = Parser::parse(src)?;
+    /// Compile source code through the full pipeline
+    pub fn compile(&self, src: &str) -> Result<ThirProgram, CompileError> {
+        // Phase 1: Parse source -> AST
+        let parsed = Parser::parse(src, self.source_id)?;
 
-        let mut resolver = Resolver::new(&self.registry);
-        let resolved = resolver.resolve(program)?;
+        // Phase 2: Lower AST -> HIR (resolve names, desugar syntax)
+        let hir = self.lower(parsed)?;
 
-        let typegen = TypeGenerator::new(&self.registry);
-        let generated = typegen.generate(resolved)?;
+        // Phase 3: TypeCheck HIR -> THIR (type inference and checking)
+        let thir = self.typecheck(hir)?;
 
-        let typecheck = TypeChecker::new(&self.registry);
-        let typechecked = typecheck.check(generated)?;
+        Ok(thir)
+    }
 
-        Ok(typechecked)
+    /// Lower AST to HIR
+    fn lower(&self, parsed: ParsedProgram) -> Result<HirProgram, CompileError> {
+        Lowering::lower(parsed)
+    }
+
+    /// Type check HIR to THIR
+    // fn typecheck(&self, hir: HirProgram) -> Result<ThirProgram, CompileError> {
+    //     let checker = TypeChecker::new();
+    //     checker.check(hir)
+    // }
+}
+
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
     }
 }
