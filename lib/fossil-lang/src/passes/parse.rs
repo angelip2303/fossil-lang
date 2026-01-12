@@ -51,7 +51,7 @@ impl Parser {
 
         // Create Chumsky stream from tokens
         // Stream::from_iter() automatically handles span tracking with SimpleSpan
-        let stream = chumsky::input::Stream::from_iter(tokens.into_iter());
+        let stream = chumsky::input::Stream::from_iter(tokens);
 
         match parser.parse(stream).into_result() {
             Ok(root_stmts) => {

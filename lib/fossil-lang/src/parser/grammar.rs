@@ -237,7 +237,9 @@ where
             .map_with(|expr, e| (expr, e.span()))
             .boxed();
 
-        let pratt = atom
+        
+
+        atom
             .pratt((
                 postfix(
                     10, // Highest precedence
@@ -267,9 +269,7 @@ where
                     },
                 ),
             ))
-            .map(|expr| expr.0);
-
-        pratt
+            .map(|expr| expr.0)
     })
 }
 

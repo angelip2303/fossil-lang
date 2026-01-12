@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use fossil_lang::ast::ast::{Literal, Ast, PrimitiveType, Type as AstType, TypeKind as AstTypeKind};
+use fossil_lang::ast::ast::{Literal, Ast, Type as AstType, TypeKind as AstTypeKind};
 use fossil_lang::ast::thir::{TypedHir, Polytype, TypeVar, Type as ThirType, TypeKind as ThirTypeKind};
 use fossil_lang::ast::Loc;
 use fossil_lang::context::Interner;
@@ -103,8 +103,8 @@ impl TypeProviderImpl for CsvProvider {
         let options = parse_csv_options(args, interner)?;
         let path_str = &options.path;
 
-        validate_extension(&path_str, &["csv"], interner)?;
-        validate_local_file(&path_str, interner)?;
+        validate_extension(path_str, &["csv"], interner)?;
+        validate_local_file(path_str, interner)?;
 
         // Read CSV to infer schema using configured options
         let mut csv_reader = CsvReadOptions::default()
@@ -140,7 +140,7 @@ impl TypeProviderImpl for CsvProvider {
             })?;
 
         let schema = df.schema();
-        let fields = schema_to_ast_fields(&schema, ast, interner);
+        let fields = schema_to_ast_fields(schema, ast, interner);
 
         // Create AST record type
         let record_ty = ast.types.alloc(AstType {

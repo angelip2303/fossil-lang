@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use fossil_lang::ast::ast::{Literal, Ast, TypeId, Type, TypeKind, PrimitiveType, RecordField};
-use fossil_lang::context::{Interner, Symbol};
+use fossil_lang::ast::ast::{Literal, Ast, Type, TypeKind, PrimitiveType, RecordField};
+use fossil_lang::context::Interner;
 use fossil_lang::error::ProviderError;
 use polars::prelude::*;
 

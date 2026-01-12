@@ -39,7 +39,7 @@ impl TypeProviderImpl for JsonProvider {
             .finish()?;
 
         let schema = df.schema();
-        let fields = schema_to_ast_fields(&schema, ast, interner);
+        let fields = schema_to_ast_fields(schema, ast, interner);
 
         // Create AST record type
         let record_ty = ast.types.alloc(Type {

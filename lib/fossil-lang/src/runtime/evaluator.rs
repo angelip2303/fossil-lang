@@ -136,7 +136,7 @@ impl<'a> ThirEvaluator<'a> {
         }
 
         let df = DataFrame::new(series_vec)
-            .map_err(|e| self.make_error(&format!("Failed to create DataFrame: {}", e)))?;
+            .map_err(|e| self.make_error(format!("Failed to create DataFrame: {}", e)))?;
 
         Ok(Value::LazyFrame(df.lazy()))
     }
@@ -195,7 +195,7 @@ impl<'a> ThirEvaluator<'a> {
                     })
                     .collect();
                 let concatenated = concat(dfs, UnionArgs::default()).map_err(|e| {
-                    self.make_error(&format!("Failed to concatenate LazyFrames: {}", e))
+                    self.make_error(format!("Failed to concatenate LazyFrames: {}", e))
                 })?;
                 Ok(Value::LazyFrame(concatenated))
             }
@@ -277,11 +277,11 @@ impl<'a> ThirEvaluator<'a> {
                 // Collect only the selected column
                 let df = lf_selected
                     .collect()
-                    .map_err(|e| self.make_error(&format!("Failed to collect LazyFrame: {}", e)))?;
+                    .map_err(|e| self.make_error(format!("Failed to collect LazyFrame: {}", e)))?;
 
                 // Get the column (should be the only one)
                 let column = df.column(field_name).map_err(|e| {
-                    self.make_error(&format!("Field '{}' not found: {}", field_name, e))
+                    self.make_error(format!("Field '{}' not found: {}", field_name, e))
                 })?;
 
                 // Convert Column to Series
@@ -336,7 +336,7 @@ impl<'a> ThirEvaluator<'a> {
 
         let any_value = series
             .get(0)
-            .map_err(|e| self.make_error(&format!("Failed to get value from series: {}", e)))?;
+            .map_err(|e| self.make_error(format!("Failed to get value from series: {}", e)))?;
 
         match any_value {
             AnyValue::Int64(i) => Ok(Value::Int(i)),
@@ -345,7 +345,7 @@ impl<'a> ThirEvaluator<'a> {
             AnyValue::UInt32(u) => Ok(Value::Int(u as i64)),
             AnyValue::UInt64(u) => Ok(Value::Int(u as i64)),
             AnyValue::Int32(i) => Ok(Value::Int(i as i64)),
-            _ => Err(self.make_error(&format!("Unsupported series type: {:?}", any_value))),
+            _ => Err(self.make_error(format!("Unsupported series type: {:?}", any_value))),
         }
     }
 

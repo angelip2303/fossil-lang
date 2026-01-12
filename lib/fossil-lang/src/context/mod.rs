@@ -127,6 +127,7 @@ impl Symbol {
 }
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct Interner {
     map: HashMap<String, Symbol>,
     strings: Vec<String>,
@@ -149,14 +150,6 @@ impl Interner {
     }
 }
 
-impl Default for Interner {
-    fn default() -> Self {
-        Interner {
-            map: HashMap::new(),
-            strings: Vec::new(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DefId(u32);
