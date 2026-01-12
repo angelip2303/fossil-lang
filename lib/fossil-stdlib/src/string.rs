@@ -4,7 +4,6 @@
 //! particularly for generating URIs from data values.
 
 use fossil_lang::ast::thir::{Polytype, Type, TypeKind, TypeVar, TypedHir};
-use fossil_lang::context::Symbol;
 use fossil_lang::ast::Loc;
 use fossil_lang::ast::ast::PrimitiveType;
 use fossil_lang::error::RuntimeError;
@@ -63,7 +62,7 @@ impl FunctionImpl for StringConcatFunction {
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
         use fossil_lang::error::{CompileError, CompileErrorKind};
-        use fossil_lang::context::Interner;
+        
 
         // Extract first string
         let s1 = match &args[0] {
@@ -145,7 +144,7 @@ impl FunctionImpl for ToStringFunction {
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
         use fossil_lang::error::{CompileError, CompileErrorKind};
-        use fossil_lang::context::Interner;
+        
 
         let value = &args[0];
 

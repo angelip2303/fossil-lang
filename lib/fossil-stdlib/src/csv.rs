@@ -9,7 +9,6 @@
 use fossil_lang::ast::thir::{Polytype, Type, TypeKind, TypeVar, TypedHir};
 use fossil_lang::ast::Loc;
 use fossil_lang::ast::ast::PrimitiveType;
-use fossil_lang::context::Symbol;
 use fossil_lang::error::RuntimeError;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
@@ -64,7 +63,7 @@ impl FunctionImpl for CsvLoadFunction {
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
         use fossil_lang::error::{CompileError, CompileErrorKind};
-        use fossil_lang::context::Interner;
+        
 
         // Extract file path
         let path = match &args[0] {

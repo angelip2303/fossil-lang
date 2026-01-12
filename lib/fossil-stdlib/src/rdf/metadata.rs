@@ -49,7 +49,7 @@ impl RdfMetadata {
 
                 for field in fields {
                     // Look for #[uri("...")] attribute
-                    if let Some(uri) = extract_uri_attribute(&field, interner) {
+                    if let Some(uri) = extract_uri_attribute(field, interner) {
                         metadata.predicates.insert(field.name, uri);
                     }
                 }

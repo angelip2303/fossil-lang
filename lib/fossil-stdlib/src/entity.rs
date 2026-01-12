@@ -23,9 +23,8 @@ use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use fossil_lang::ast::thir::{Polytype, Type, TypeKind, TypeVar, TypedHir};
-use fossil_lang::context::Symbol;
 use fossil_lang::ast::Loc;
-use fossil_lang::context::{DefId, Interner};
+use fossil_lang::context::DefId;
 use fossil_lang::error::RuntimeError;
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::{ExtensionMetadata, ExtensionTypeId, Value};

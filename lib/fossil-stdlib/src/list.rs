@@ -6,7 +6,6 @@
 use fossil_lang::ast::Loc;
 use fossil_lang::ast::ast::PrimitiveType;
 use fossil_lang::ast::thir::{Polytype, Type, TypeKind, TypeVar, TypedHir};
-use fossil_lang::context::Symbol;
 use fossil_lang::error::RuntimeError;
 use fossil_lang::runtime::evaluator::ThirEvaluator;
 use fossil_lang::runtime::value::Value;
@@ -82,7 +81,7 @@ impl FunctionImpl for MapFunction {
     }
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
-        use fossil_lang::context::Interner;
+        
         use fossil_lang::error::{CompileError, CompileErrorKind};
 
         // Extract LazyFrame
@@ -239,7 +238,7 @@ impl FunctionImpl for EachFunction {
     }
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
-        use fossil_lang::context::Interner;
+        
         use fossil_lang::error::{CompileError, CompileErrorKind};
 
         // Extract LazyFrame

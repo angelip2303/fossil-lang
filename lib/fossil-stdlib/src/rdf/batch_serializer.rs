@@ -8,11 +8,9 @@
 
 use std::fs::File;
 
-use oxigraph::io::RdfSerializer;
-use oxigraph::model::{GraphNameRef, Literal, NamedNode, Quad, Triple, TripleRef};
+use oxigraph::model::{GraphNameRef, Literal, NamedNode, Triple};
 use oxigraph::store::Store;
 use polars::prelude::*;
-use std::io::BufWriter;
 
 use super::RdfMetadata;
 
@@ -161,7 +159,7 @@ impl BatchRdfSerializer {
                 let values = series
                     .str()
                     .map_err(|e| format!("Failed to cast to string: {}", e))?;
-                Ok(values.get(idx).map(|v| Literal::new_simple_literal(v)))
+                Ok(values.get(idx).map(Literal::new_simple_literal))
             }
             DataType::Int64 | DataType::Int32 | DataType::UInt32 | DataType::UInt64 => {
                 let values = series
