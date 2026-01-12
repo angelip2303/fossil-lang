@@ -38,6 +38,8 @@ pub enum Token<'a> {
     Pipe,
     #[token(",")]
     Comma,
+    #[token("#")]
+    Hash,
     #[token("(")]
     LParen,
     #[token(")")]

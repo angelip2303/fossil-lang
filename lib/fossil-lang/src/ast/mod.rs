@@ -1,6 +1,8 @@
 pub mod ast;
+pub mod folder;
 pub mod hir;
 pub mod thir;
+// pub mod visitor;
 
 pub type SourceId = usize;
 pub type Span = std::ops::Range<usize>;
@@ -16,6 +18,14 @@ impl Loc {
         Loc {
             source: self.source,
             span: self.span.start..other.span.end,
+        }
+    }
+
+    /// Create a synthetic/generated location (used for generated code)
+    pub fn generated() -> Self {
+        Loc {
+            source: 0,
+            span: 0..0,
         }
     }
 }

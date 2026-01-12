@@ -1,16 +1,32 @@
 use crate::ast::Loc;
-use crate::ast::ast::{Literal, Param, Path, PrimitiveType};
+use crate::ast::ast::{Attribute, Literal, Path, PrimitiveType};
 use crate::context::*;
 
 pub type StmtId = NodeId<Stmt>;
 pub type ExprId = NodeId<Expr>;
 pub type TypeId = NodeId<Type>;
 
+/// HIR Param with resolved DefId
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Param {
+    pub name: Symbol,
+    pub def_id: DefId,
+}
+
+/// HIR RecordField with attributes preserved from AST
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordField {
+    pub name: Symbol,
+    pub ty: TypeId,
+    pub attrs: Vec<Attribute>,
+}
+
 #[derive(Default, Debug)]
 pub struct Hir {
     pub stmts: Arena<Stmt>,
     pub exprs: Arena<Expr>,
     pub types: Arena<Type>,
+    pub root: Vec<StmtId>,
 }
 
 #[derive(Debug)]
@@ -25,7 +41,7 @@ pub enum StmtKind {
     /// An import declaration `open Module as alias`
     Import { module: Path, alias: Symbol },
     /// A value binding `let name = expr`
-    Let { name: Symbol, value: ExprId },
+    Let { name: Symbol, def_id: DefId, value: ExprId },
     /// A type definition `type name = type`
     Type { name: Symbol, ty: TypeId },
     /// An expression declaration `expr`
@@ -55,7 +71,10 @@ pub enum ExprKind {
     Function { params: Vec<Param>, body: ExprId },
     /// A function application `callee(arg1, arg2, ...)`
     Application { callee: ExprId, args: Vec<ExprId> },
-    // TODO: member access
+    /// Field access `expr.field`
+    FieldAccess { expr: ExprId, field: Symbol },
+    /// A block expression `{ stmt* }`
+    Block { stmts: Vec<StmtId> },
 }
 
 #[derive(Debug)]
@@ -72,8 +91,16 @@ pub enum TypeKind {
     Primitive(PrimitiveType),
     /// A type function type `(T1, T2, ...) -> T`
     Function(Vec<TypeId>, TypeId),
-    /// A list type `[T]`
-    List(TypeId),
-    /// A record type `{ field: T, field: T, ... }`
-    Record(Vec<(Symbol, TypeId)>),
+    /// An applied type (type constructor application)
+    ///
+    /// Represents generic types like `List<T>`, `Entity<Person>`.
+    /// See THIR TypeKind::App for full documentation.
+    App {
+        /// DefId of the type constructor
+        ctor: DefId,
+        /// Type arguments
+        args: Vec<TypeId>,
+    },
+    /// A record type `{ field: T, field: T, ... }` with attributes
+    Record(Vec<RecordField>),
 }

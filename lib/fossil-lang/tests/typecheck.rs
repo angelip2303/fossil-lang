@@ -1,12 +1,9 @@
+use fossil_lang::compiler::Compiler;
 use fossil_lang::error::CompileError;
-use fossil_lang::phases::TypedProgram;
+use fossil_lang::passes::ThirProgram;
 
-fn compile(src: &str) -> Result<TypedProgram, CompileError> {
-    use fossil_lang::compiler::Compiler;
-    use fossil_lang::module::ModuleRegistry;
-
-    let registry = ModuleRegistry::default();
-    let compiler = Compiler::new(&registry);
+fn compile(src: &str) -> Result<ThirProgram, CompileError> {
+    let compiler = Compiler::new();
     compiler.compile(src)
 }
 
@@ -80,7 +77,8 @@ fn nested_records() {
         {person = person, address = address}
     "#;
     let result = compile(src);
-    assert!(result.is_err());
+    // Now valid - nested records are supported
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -89,7 +87,8 @@ fn record_with_unit_field() {
         {person = (), address = "Elm Street"}
     "#;
     let result = compile(src);
-    assert!(result.is_err());
+    // Now valid - records can have unit fields
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -98,7 +97,8 @@ fn record_with_function_field() {
         {person = (), address = "Elm Street", greet = fn() -> "Hello"}
     "#;
     let result = compile(src);
-    assert!(result.is_err());
+    // Now valid - records can have function fields
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -206,7 +206,8 @@ fn list_of_unit() {
         [(), (), ()]
     "#;
     let result = compile(src);
-    assert!(result.is_err());
+    // Now valid - lists of unit are allowed
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -224,7 +225,8 @@ fn list_of_functions() {
         [fn (x) -> x, fn (x) -> x, fn (x) -> x]
     "#;
     let result = compile(src);
-    assert!(result.is_err());
+    // Now valid - lists of functions are supported
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -382,7 +384,8 @@ fn to_list_function_returns_list_of_lists() {
         to_list([1, 2, 3])
     "#;
     let result = compile(src);
-    assert!(result.is_err());
+    // Now valid - nested lists are supported
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -402,5 +405,6 @@ fn to_record_function_returns_nested_record() {
         to_record({x = 42})
     "#;
     let result = compile(src);
-    assert!(result.is_err());
+    // Now valid - nested records are supported
+    assert!(result.is_ok());
 }

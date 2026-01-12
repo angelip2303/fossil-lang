@@ -1,21 +1,23 @@
 use std::sync::Arc;
 
 use fossil_lang::compiler::Compiler;
-use fossil_lang::module::ModuleRegistry;
+use fossil_lang::passes::GlobalContext;
 use fossil_providers::csv::CsvProvider;
 
 pub fn main() {
     let src = r#"
-        type Person = data::Csv<"lib/fossil-providers/examples/csv/data.csv">
+        type Person = csv<"lib/fossil-providers/examples/csv/data.csv">
     "#;
 
-    let mut registry = ModuleRegistry::default();
+    // Create GlobalContext and register CSV provider (F# style)
+    let mut gcx = GlobalContext::new();
+    gcx.register_provider("csv", Arc::new(CsvProvider));
 
-    registry
-        .module("data")
-        .provider("Csv", Arc::new(CsvProvider))
-        .done();
+    // Create compiler with custom GlobalContext
+    let compiler = Compiler::with_context(gcx);
 
-    let compiler = Compiler::new(&registry);
-    let _ = compiler.compile(src);
+    match compiler.compile(src) {
+        Ok(_thir) => println!("✓ CSV provider example compiled successfully"),
+        Err(e) => eprintln!("✗ Compilation failed: {:?}", e),
+    }
 }

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::{Loc, ast, hir};
-use crate::context::DefId;
+use crate::ast::{ast, hir};
 use crate::error::CompileError;
 use crate::passes::HirProgram;
 use crate::passes::resolve::ResolvedAst;
@@ -12,8 +11,6 @@ pub struct HirLowering {
     hir: hir::Hir,
     expr_map: HashMap<ast::ExprId, hir::ExprId>,
     type_map: HashMap<ast::TypeId, hir::TypeId>,
-    /// Stack of local variable indices for lambda parameters
-    local_stack: Vec<HashMap<DefId, u32>>,
 }
 
 impl HirLowering {
@@ -23,17 +20,21 @@ impl HirLowering {
             hir: hir::Hir::default(),
             expr_map: HashMap::new(),
             type_map: HashMap::new(),
-            local_stack: vec![],
         }
     }
 
     /// Lower resolved AST to HIR
     pub fn lower(mut self) -> Result<HirProgram, CompileError> {
-        // Lower all statements
-        let stmt_ids: Vec<_> = self.resolved.ast.stmts.iter().map(|(id, _)| id).collect();
-        for stmt_id in stmt_ids {
-            self.lower_stmt(stmt_id)?;
+        // Lower root statements
+        let root_stmt_ids = self.resolved.ast.root.clone();
+        let mut hir_root_ids = Vec::new();
+
+        for stmt_id in root_stmt_ids {
+            let hir_stmt_id = self.lower_stmt(stmt_id)?;
+            hir_root_ids.push(hir_stmt_id);
         }
+
+        self.hir.root = hir_root_ids;
 
         Ok(HirProgram {
             hir: self.hir,
@@ -43,27 +44,49 @@ impl HirLowering {
 
     /// Lower a statement
     fn lower_stmt(&mut self, stmt_id: ast::StmtId) -> Result<hir::StmtId, CompileError> {
-        let stmt_kind = self.resolved.ast.stmts.get(stmt_id).kind.clone();
-        let loc = self.resolved.ast.stmts.get(stmt_id).loc.clone();
+        let stmt = self.resolved.ast.stmts.get(stmt_id);
+        let stmt_kind = stmt.kind.clone();
+        let loc = stmt.loc.clone();
 
-        let hir_kind = match stmt_kind {
-            ast::StmtKind::Import { module, alias } => hir::StmtKind::Import { module, alias },
+        let hir_kind = match &stmt_kind {
+            ast::StmtKind::Import { module, alias } => {
+                // If no alias is provided, use the module name
+                let alias = alias.unwrap_or_else(|| match module {
+                    ast::Path::Simple(name) => *name,
+                    ast::Path::Qualified(parts) => *parts.last().unwrap(),
+                });
+                hir::StmtKind::Import {
+                    module: module.clone(),
+                    alias
+                }
+            }
 
-            ast::StmtKind::Let { name, value } => {
-                let hir_value = self.lower_expr(value)?;
+            ast::StmtKind::Let { name, ty: _, value } => {
+                // Type annotation is ignored during lowering; type checking handles it
+                let hir_value = self.lower_expr(*value)?;
+
+                // Get the DefId for this let binding from resolution table using StmtId
+                let def_id = *self
+                    .resolved
+                    .resolutions
+                    .let_bindings
+                    .get(&stmt_id)
+                    .expect("Let binding should have DefId from name resolution");
+
                 hir::StmtKind::Let {
-                    name,
+                    name: *name,
+                    def_id,
                     value: hir_value,
                 }
             }
 
             ast::StmtKind::Type { name, ty } => {
-                let hir_ty = self.lower_type(ty)?;
-                hir::StmtKind::Type { name, ty: hir_ty }
+                let hir_ty = self.lower_type(*ty)?;
+                hir::StmtKind::Type { name: *name, ty: hir_ty }
             }
 
             ast::StmtKind::Expr(expr) => {
-                let hir_expr = self.lower_expr(expr)?;
+                let hir_expr = self.lower_expr(*expr)?;
                 hir::StmtKind::Expr(hir_expr)
             }
         };
@@ -90,7 +113,7 @@ impl HirLowering {
                 let def_id = self
                     .resolved
                     .resolutions
-                    .expr_to_def
+                    .exprs
                     .get(&expr_id)
                     .copied()
                     .expect("Name resolution should have resolved this identifier");
@@ -103,13 +126,13 @@ impl HirLowering {
             ast::ExprKind::Literal(lit) => hir::ExprKind::Literal(lit),
 
             ast::ExprKind::List(items) => {
-                let hir_items: Result<Vec<_>, _> =
+                let hir_items: Result<Vec<_>, CompileError> =
                     items.iter().map(|&id| self.lower_expr(id)).collect();
                 hir::ExprKind::List(hir_items?)
             }
 
             ast::ExprKind::Record(fields) => {
-                let hir_fields: Result<Vec<_>, _> = fields
+                let hir_fields: Result<Vec<_>, CompileError> = fields
                     .iter()
                     .map(|(name, expr)| Ok((*name, self.lower_expr(*expr)?)))
                     .collect();
@@ -117,35 +140,26 @@ impl HirLowering {
             }
 
             ast::ExprKind::Function { params, body } => {
-                // Create a new local variable scope
-                let mut locals = HashMap::new();
+                // Get the DefIds for the parameters from the resolution table
+                let param_def_ids = self
+                    .resolved
+                    .resolutions
+                    .function_params
+                    .get(&expr_id)
+                    .expect("Function should have parameter DefIds from resolve pass");
 
-                // Map parameters to local indices
+                // Create HIR params with DefIds
                 let hir_params: Vec<_> = params
                     .iter()
-                    .enumerate()
-                    .map(|(idx, param)| {
-                        // Get the DefId for this parameter from resolution
-                        // Parameters are treated as local let bindings
-                        let def_id = self
-                            .resolved
-                            .gcx
-                            .definitions
-                            .insert(crate::context::DefKind::Let { name: param.name });
-                        locals.insert(def_id, idx as u32);
-
-                        ast::Param { name: param.name }
+                    .zip(param_def_ids)
+                    .map(|(param, def_id)| hir::Param {
+                        name: param.name,
+                        def_id: *def_id,
                     })
                     .collect();
 
-                // Push the locals scope
-                self.local_stack.push(locals);
-
-                // Lower the body
+                // Lower the body (parameter references are already resolved)
                 let hir_body = self.lower_expr(body)?;
-
-                // Pop the locals scope
-                self.local_stack.pop();
 
                 hir::ExprKind::Function {
                     params: hir_params,
@@ -155,7 +169,7 @@ impl HirLowering {
 
             ast::ExprKind::Application { callee, args } => {
                 let hir_callee = self.lower_expr(callee)?;
-                let hir_args: Result<Vec<_>, _> =
+                let hir_args: Result<Vec<_>, CompileError> =
                     args.iter().map(|&id| self.lower_expr(id)).collect();
                 hir::ExprKind::Application {
                     callee: hir_callee,
@@ -164,12 +178,56 @@ impl HirLowering {
             }
 
             // Desugar pipe: a |> b  =>  b(a)
+            // If b is already a function call f(x, y), then a |> f(x, y)  =>  f(a, x, y)
             ast::ExprKind::Pipe { lhs, rhs } => {
                 let hir_arg = self.lower_expr(lhs)?;
-                let hir_func = self.lower_expr(rhs)?;
-                hir::ExprKind::Application {
-                    callee: hir_func,
-                    args: vec![hir_arg],
+
+                // Check if RHS is an Application node (clone to avoid borrow issues)
+                let rhs_expr = self.resolved.ast.exprs.get(rhs);
+                let rhs_kind = rhs_expr.kind.clone();
+
+                match rhs_kind {
+                    ast::ExprKind::Application { callee, args } => {
+                        // RHS is already a function call: prepend LHS as first argument
+                        let hir_callee = self.lower_expr(callee)?;
+                        let mut hir_args = vec![hir_arg];
+                        for arg in args {
+                            hir_args.push(self.lower_expr(arg)?);
+                        }
+                        hir::ExprKind::Application {
+                            callee: hir_callee,
+                            args: hir_args,
+                        }
+                    }
+                    _ => {
+                        // RHS is not a function call: simple pipe desugaring
+                        let hir_func = self.lower_expr(rhs)?;
+                        hir::ExprKind::Application {
+                            callee: hir_func,
+                            args: vec![hir_arg],
+                        }
+                    }
+                }
+            }
+
+            // Field access: pass through without desugaring
+            ast::ExprKind::FieldAccess { expr, field } => {
+                let hir_expr = self.lower_expr(expr)?;
+                hir::ExprKind::FieldAccess {
+                    expr: hir_expr,
+                    field,
+                }
+            }
+
+            ast::ExprKind::Block { stmts } => {
+                // Lower all statements
+                let hir_stmts: Result<Vec<_>, _> = stmts
+                    .iter()
+                    .map(|&stmt_id| self.lower_stmt(stmt_id))
+                    .collect();
+
+                hir::ExprKind::Block {
+                    stmts: hir_stmts?,
                 }
             }
         };
@@ -198,7 +256,7 @@ impl HirLowering {
                 let def_id = self
                     .resolved
                     .resolutions
-                    .type_to_def
+                    .types
                     .get(&type_id)
                     .copied()
                     .expect("Name resolution should have resolved this type");
@@ -211,12 +269,18 @@ impl HirLowering {
             ast::TypeKind::Primitive(prim) => hir::TypeKind::Primitive(prim),
 
             ast::TypeKind::Provider { .. } => {
-                // Providers should have been expanded by the provider expansion pass
-                panic!("Provider found during lowering - should have been expanded")
+                // Providers should have been expanded by the provider expansion pass (F# style)
+                // If we reach here, the expand pass didn't run correctly
+                return Err(CompileError::new(
+                    crate::error::CompileErrorKind::ProviderError(
+                        self.resolved.gcx.interner.intern("Provider type not expanded - this is a compiler bug")
+                    ),
+                    loc,
+                ))
             }
 
             ast::TypeKind::Function(params, ret) => {
-                let hir_params: Result<Vec<_>, _> =
+                let hir_params: Result<Vec<_>, CompileError> =
                     params.iter().map(|&id| self.lower_type(id)).collect();
                 let hir_ret = self.lower_type(ret)?;
                 hir::TypeKind::Function(hir_params?, hir_ret)
@@ -224,13 +288,64 @@ impl HirLowering {
 
             ast::TypeKind::List(inner) => {
                 let hir_inner = self.lower_type(inner)?;
-                hir::TypeKind::List(hir_inner)
+
+                // Convert List<T> to App { ctor: List, args: [T] }
+                let list_ctor = self.resolved.gcx.list_type_ctor
+                    .expect("List type constructor should be registered in GlobalContext");
+
+                hir::TypeKind::App {
+                    ctor: list_ctor,
+                    args: vec![hir_inner],
+                }
+            }
+
+            ast::TypeKind::App { ctor, args } => {
+                // Lower type constructor path to DefId
+                // For now, we only support simple paths (e.g., Entity, not module::Entity)
+                let ctor_def_id = match &ctor {
+                    ast::Path::Simple(sym) => {
+                        // Check registered type constructors
+                        self.resolved.gcx.type_constructors.iter()
+                            .find(|(_, info)| info.name == *sym)
+                            .map(|(def_id, _)| *def_id)
+                            .ok_or_else(|| {
+                                CompileError::new(
+                                    crate::error::CompileErrorKind::ProviderError(
+                                        self.resolved.gcx.interner.intern("Type constructor not found")
+                                    ),
+                                    loc.clone(),
+                                )
+                            })?
+                    }
+                    ast::Path::Qualified(_) => {
+                        // TODO: Support qualified paths for type constructors
+                        return Err(CompileError::new(
+                            crate::error::CompileErrorKind::ProviderError(
+                                self.resolved.gcx.interner.intern("Qualified type constructors not yet supported")
+                            ),
+                            loc,
+                        ));
+                    }
+                };
+
+                // Lower type arguments
+                let hir_args: Result<Vec<_>, CompileError> =
+                    args.iter().map(|&id| self.lower_type(id)).collect();
+
+                hir::TypeKind::App {
+                    ctor: ctor_def_id,
+                    args: hir_args?,
+                }
             }
 
             ast::TypeKind::Record(fields) => {
-                let hir_fields: Result<Vec<_>, _> = fields
+                let hir_fields: Result<Vec<_>, CompileError> = fields
                     .iter()
-                    .map(|(name, ty)| Ok((*name, self.lower_type(*ty)?)))
+                    .map(|field| Ok(hir::RecordField {
+                        name: field.name,
+                        ty: self.lower_type(field.ty)?,
+                        attrs: field.attrs.clone(), // Preserve attributes
+                    }))
                     .collect();
                 hir::TypeKind::Record(hir_fields?)
             }
@@ -244,3 +359,6 @@ impl HirLowering {
         Ok(hir_id)
     }
 }
+
+// Note: We lower statements by ID (StmtId → HIR StmtId), fetching from the AST arena.
+// This follows rustc's approach: AST has NodeIds, HIR has HirIds, and lowering maps between them.

@@ -118,7 +118,15 @@ impl<T: Debug> Debug for Arena<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Symbol(u32);
 
-#[derive(Debug)]
+impl Symbol {
+    /// Create a synthetic symbol for error messages
+    /// This should only be used in error handling where we don't have access to an interner
+    pub const fn synthetic() -> Self {
+        Symbol(0)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Interner {
     map: HashMap<String, Symbol>,
     strings: Vec<String>,
@@ -163,8 +171,10 @@ impl DefId {
     }
 }
 
+#[derive(Clone)]
 pub struct Def {
     id: DefId,
+    #[allow(dead_code)]
     parent: Option<DefId>,
     pub name: Symbol,
     pub kind: DefKind,
@@ -188,62 +198,114 @@ impl Def {
             kind,
         }
     }
+
+    pub fn id(&self) -> DefId {
+        self.id
+    }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Definitions {
     items: Vec<Def>,
 }
 
 impl Definitions {
+    pub fn get(&self, id: DefId) -> &Def {
+        &self.items[id.index() as usize]
+    }
+
+    pub fn get_by_symbol(&self, name: Symbol) -> Option<&Def> {
+        self.items.iter().find(|def| def.name == name)
+    }
+
     pub fn insert(&mut self, parent: Option<DefId>, name: Symbol, kind: DefKind) -> DefId {
         let id = DefId::new(self.items.len() as u32);
         self.items.push(Def::new(id, parent, name, kind));
         id
     }
 
-    pub fn get(&self, id: DefId) -> &Def {
-        &self.items[id.index() as usize]
+    pub fn len(&self) -> usize {
+        self.items.len()
     }
 
-    pub fn get_by_name(&self, name: Symbol) -> Option<&Def> {
-        self.items.iter().find(|def| def.name == name)
-    }
-
-    pub fn resolve(&self, path: impl Into<Path>) -> Option<DefId> {
-        let path = path.into();
-
+    pub fn resolve(&self, path: &Path) -> Option<DefId> {
         // if the path is empty, return None
         if path.is_empty() {
             return None;
         }
 
-        // try to find the item by name, return None otherwise
-        let mut item = match self.get_by_name(path.item()) {
-            Some(item) => item,
-            None => return None,
-        };
-
-        // if the path has a parent, resolve it recursively, return None otherwise
-        let parent = match path.parent() {
-            Some(parent) => parent,
-            None => {
-                return match item.parent {
-                    Some(parent) => Some(parent),
-                    None => Some(item.id),
-                };
-            }
-        };
-
-        Into::<Vec<Symbol>>::into(parent.rev())
-            .iter()
-            .all(|i: &Symbol| match item.parent {
-                Some(parent) => {
-                    item = self.get(parent);
-                    i == &item.name
+        // For simple paths, just look up the item symbol
+        match path {
+            Path::Simple(sym) => self.get_by_symbol(*sym).map(|def| def.id()),
+            Path::Qualified(parts) => {
+                // For qualified paths, resolve step by step through the hierarchy
+                // Example: Entity::with_id resolves as: Entity (module) -> with_id (function)
+                if parts.is_empty() {
+                    return None;
                 }
-                None => false,
-            })
-            .then(|| item.id)
+
+                // Start with the first part (module name)
+                let mut current_id = self.get_by_symbol(parts[0]).map(|def| def.id())?;
+
+                // Navigate through the rest of the path
+                for &part in &parts[1..] {
+                    // Find item with this symbol that has current_id as parent
+                    current_id = self.items.iter()
+                        .find(|def| def.name == part && def.parent == Some(current_id))
+                        .map(|def| def.id())?;
+                }
+
+                Some(current_id)
+            }
+        }
     }
 }
+
+/// Kind of a type (for kind checking)
+///
+/// In type theory, kinds classify types. The simplest kind is `Type` (denoted `*`),
+/// which represents concrete types like `Int`, `String`, `Person`, etc.
+///
+/// Future extensions will support higher-kinded types like `* -> *` for type
+/// constructors that take other types as arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// The kind of concrete types: `*`
+    ///
+    /// Examples: `Int`, `String`, `Person`, `Entity<Person>`, `List<Int>`
+    Type,
+}
+
+/// Metadata about a type constructor (generic type)
+///
+/// A type constructor is a type that takes type parameters. For example:
+/// - `List` has arity 1 and kind `* -> *` (takes one type, returns a type)
+/// - `Entity` has arity 1 and kind `* -> *`
+/// - `Map` would have arity 2 and kind `* -> * -> *`
+///
+/// This information is used during type checking to:
+/// 1. Validate that type applications have the correct number of arguments
+/// 2. Perform kind checking (future)
+/// 3. Generate meaningful error messages
+#[derive(Debug, Clone)]
+pub struct TypeConstructorInfo {
+    /// The DefId of this type constructor
+    pub def_id: DefId,
+    /// Number of type parameters this constructor expects
+    ///
+    /// Examples:
+    /// - `List` has arity 1: `List<T>`
+    /// - `Entity` has arity 1: `Entity<T>`
+    /// - `Map` would have arity 2: `Map<K, V>`
+    pub arity: usize,
+    /// Name of the type constructor (for error messages)
+    pub name: Symbol,
+    /// Kinds of the type parameters
+    ///
+    /// Currently all parameters have kind `Type`, but this will be extended
+    /// to support higher-kinded types in the future.
+    pub param_kinds: Vec<Kind>,
+}
+
+pub mod metadata;
+pub use self::metadata::*;

@@ -10,9 +10,11 @@ pub struct Ast {
     pub stmts: Arena<Stmt>,
     pub exprs: Arena<Expr>,
     pub types: Arena<Type>,
+    /// Root statement IDs of the program
+    pub root: Vec<StmtId>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Stmt {
     pub loc: Loc,
     pub kind: StmtKind,
@@ -22,9 +24,13 @@ pub struct Stmt {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StmtKind {
     /// An import declaration `open Module as alias`
-    Import { module: Path, alias: Symbol },
-    /// A value binding `let name = expr`
-    Let { name: Symbol, value: ExprId },
+    Import { module: Path, alias: Option<Symbol> },
+    /// A value binding `let name = expr` or `let name: Type = expr`
+    Let {
+        name: Symbol,
+        ty: Option<TypeId>,
+        value: ExprId,
+    },
     /// A type definition `type name = type`
     Type { name: Symbol, ty: TypeId },
     /// An expression declaration `expr`
@@ -56,7 +62,13 @@ pub enum ExprKind {
     Application { callee: ExprId, args: Vec<ExprId> },
     /// A pipe expression `lhs |> rhs`
     Pipe { lhs: ExprId, rhs: ExprId },
-    // TODO: member access
+    /// Field access `expr.field`
+    FieldAccess { expr: ExprId, field: Symbol },
+    /// A block expression `{ stmt* }`
+    /// Contains zero or more statements.
+    /// If the last statement is Stmt::Expr(e), the block returns e.
+    /// Otherwise, returns Unit.
+    Block { stmts: Vec<StmtId> },
 }
 
 #[derive(Debug)]
@@ -80,7 +92,10 @@ pub enum TypeKind {
     /// A list type `[T]`
     List(TypeId),
     /// A record type `{ field: T, field: T, ... }`
-    Record(Vec<(Symbol, TypeId)>),
+    Record(Vec<RecordField>),
+    /// An applied type (type constructor application) `Name<T1, T2, ...>`
+    /// For example: `Entity<Person>`, `List<Int>`, `Map<String, Int>`
+    App { ctor: Path, args: Vec<TypeId> },
 }
 
 /// A path to an identifier (either simple or qualified)
@@ -96,17 +111,17 @@ impl Path {
     }
 
     pub fn qualified(parts: Vec<Symbol>) -> Self {
-        if parts.len() == 1 {
-            Path::Simple(parts[0])
-        } else {
-            Path::Qualified(parts)
+        let slice = parts.as_slice();
+        match slice {
+            [sym] => Path::Simple(*sym),
+            _ => Path::Qualified(parts),
         }
     }
 
-    pub fn parent(&self) -> Option<Path> {
+    pub fn parent(&self) -> Option<Symbol> {
         match self {
             Path::Simple(_) => None,
-            Path::Qualified(parts) => Some(Path::Qualified(parts.split_last().unwrap().1.to_vec())),
+            Path::Qualified(parts) => parts.get(parts.len() - 2).copied(),
         }
     }
 
@@ -126,13 +141,6 @@ impl Path {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-
-    pub fn rev(&self) -> Path {
-        match self {
-            Path::Simple(sym) => Path::Simple(*sym),
-            Path::Qualified(parts) => Path::Qualified(parts.iter().rev().copied().collect()),
-        }
     }
 }
 
@@ -177,6 +185,22 @@ pub struct Param {
 pub enum PrimitiveType {
     Unit,
     Int,
+    Float,
     String,
     Bool,
+}
+
+/// Attribute annotation on record fields
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Attribute {
+    pub name: Symbol,
+    pub args: Vec<Literal>,
+}
+
+/// Record field with optional attributes
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordField {
+    pub name: Symbol,
+    pub ty: TypeId,
+    pub attrs: Vec<Attribute>,
 }

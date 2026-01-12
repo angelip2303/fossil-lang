@@ -40,3 +40,6 @@ tmp
 
 # docs-related files
 book
+
+# CLAUDE-related files
+.claude

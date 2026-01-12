@@ -23,6 +23,7 @@ rust-version = "1.88.0"
 [workspace.dependencies]
 # external dependencies
 polars = {version = "0.51.0", features = ["lazy", "json"]}
+tempfile = "3.13"
 
 # internal dependencies
 fossil-lang = { path = "./lib/fossil-lang" }
