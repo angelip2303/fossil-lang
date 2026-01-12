@@ -1,4 +1,0 @@
-<http://example.com/person/Alice> <https://example.com/name> "Alice" .
-<http://example.com/person/Bob> <https://example.com/name> "Bob" .
-<http://example.com/person/Alice> <https://example.com/age> "30"^^<http://www.w3.org/2001/XMLSchema#integer> .
-<http://example.com/person/Bob> <https://example.com/age> "25"^^<http://www.w3.org/2001/XMLSchema#integer> .

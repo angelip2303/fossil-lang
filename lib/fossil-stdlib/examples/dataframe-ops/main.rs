@@ -4,7 +4,7 @@ use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::executor::ThirExecutor;
 use std::sync::Arc;
 
-const PROGRAM: &str = "lib/fossil-stdlib/examples/end-to-end/end-to-end.fossil";
+const PROGRAM: &str = "lib/fossil-stdlib/examples/dataframe-ops/dataframe-ops.fossil";
 
 pub fn main() -> Result<(), CompileError> {
     let src = std::fs::read_to_string(PROGRAM).unwrap();

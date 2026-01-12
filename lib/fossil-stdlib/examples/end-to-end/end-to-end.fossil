@@ -16,4 +16,4 @@ let people = Person::load() |>
         Entity::with_id(res, String::concat("http://example.com/person/", person.name))
     })
 
-rdf::serialize(people, "results.ttl")
+rdf::serialize(people, "lib/fossil-stdlib/examples/end-to-end/results.ttl")

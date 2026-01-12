@@ -1,0 +1,20 @@
+<http://example.com/order_for_customer/5> <https://example.com/city> "San Francisco" ;
+	<https://example.com/name> "Bob" ;
+	<https://example.com/amount> 150 ;
+	<https://example.com/product> "Headphones" .
+<http://example.com/order_for_customer/4> <https://example.com/city> "Boston" ;
+	<https://example.com/name> "Charlie" ;
+	<https://example.com/amount> 300 ;
+	<https://example.com/product> "Monitor" .
+<http://example.com/order_for_customer/3> <https://example.com/city> "New York" ;
+	<https://example.com/name> "Alice" ;
+	<https://example.com/amount> 75 ;
+	<https://example.com/product> "Keyboard" .
+<http://example.com/order_for_customer/2> <https://example.com/city> "San Francisco" ;
+	<https://example.com/name> "Bob" ;
+	<https://example.com/amount> 25 ;
+	<https://example.com/product> "Mouse" .
+<http://example.com/order_for_customer/1> <https://example.com/city> "New York" ;
+	<https://example.com/name> "Alice" ;
+	<https://example.com/amount> 1200 ;
+	<https://example.com/product> "Laptop" .
