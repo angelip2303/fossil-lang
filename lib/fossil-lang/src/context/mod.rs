@@ -40,10 +40,7 @@ impl<T> Eq for NodeId<T> {}
 
 impl<T> Clone for NodeId<T> {
     fn clone(&self) -> Self {
-        Self {
-            idx: self.idx,
-            _marker: PhantomData,
-        }
+        *self
     }
 }
 
@@ -126,8 +123,7 @@ impl Symbol {
     }
 }
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Interner {
     map: HashMap<String, Symbol>,
     strings: Vec<String>,
@@ -149,7 +145,6 @@ impl Interner {
         &self.strings[sym.0 as usize]
     }
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DefId(u32);
@@ -217,6 +212,10 @@ impl Definitions {
         id
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
     pub fn len(&self) -> usize {
         self.items.len()
     }
@@ -243,7 +242,9 @@ impl Definitions {
                 // Navigate through the rest of the path
                 for &part in &parts[1..] {
                     // Find item with this symbol that has current_id as parent
-                    current_id = self.items.iter()
+                    current_id = self
+                        .items
+                        .iter()
                         .find(|def| def.name == part && def.parent == Some(current_id))
                         .map(|def| def.id())?;
                 }

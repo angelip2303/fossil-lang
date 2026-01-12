@@ -120,7 +120,6 @@ mod tests {
     #[test]
     fn test_field_metadata() {
         let mut interner = Interner::default();
-        let field_sym = interner.intern("name");
         let uri_sym = interner.intern("uri");
 
         let mut metadata = FieldMetadata::new();

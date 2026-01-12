@@ -3,9 +3,9 @@
 //! This module provides string manipulation functions needed for RDF pipelines,
 //! particularly for generating URIs from data values.
 
-use fossil_lang::ast::thir::{Polytype, Type, TypeKind, TypeVar, TypedHir};
 use fossil_lang::ast::Loc;
 use fossil_lang::ast::ast::PrimitiveType;
+use fossil_lang::ast::thir::{Polytype, Type, TypeKind, TypeVar, TypedHir};
 use fossil_lang::error::RuntimeError;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
@@ -60,16 +60,17 @@ impl FunctionImpl for StringConcatFunction {
         Polytype::mono(fn_ty)
     }
 
-    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
+    fn call(&self, args: Vec<Value>, _: &RuntimeContext) -> Result<Value, RuntimeError> {
         use fossil_lang::error::{CompileError, CompileErrorKind};
-        
 
         // Extract first string
         let s1 = match &args[0] {
             Value::String(s) => s,
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("String::concat expects two string arguments".to_string()),
+                    CompileErrorKind::Runtime(
+                        "String::concat expects two string arguments".to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }
@@ -80,7 +81,9 @@ impl FunctionImpl for StringConcatFunction {
             Value::String(s) => s,
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("String::concat expects two string arguments".to_string()),
+                    CompileErrorKind::Runtime(
+                        "String::concat expects two string arguments".to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }
@@ -142,9 +145,8 @@ impl FunctionImpl for ToStringFunction {
         Polytype::poly(vec![t_var], fn_ty)
     }
 
-    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
+    fn call(&self, args: Vec<Value>, _: &RuntimeContext) -> Result<Value, RuntimeError> {
         use fossil_lang::error::{CompileError, CompileErrorKind};
-        
 
         let value = &args[0];
 
@@ -155,7 +157,10 @@ impl FunctionImpl for ToStringFunction {
             Value::Unit => "()".to_string(),
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("to_string: unsupported value type (expected int, string, bool, or unit)".to_string()),
+                    CompileErrorKind::Runtime(
+                        "to_string: unsupported value type (expected int, string, bool, or unit)"
+                            .to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }

@@ -388,7 +388,6 @@ mod tests {
         use crate::context::DefKind;
 
         let mut gcx = GlobalContext::new();
-        let thir = TypedHir::default();
 
         let var_name = gcx.interner.intern("x");
 

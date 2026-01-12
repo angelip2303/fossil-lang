@@ -22,8 +22,8 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-use fossil_lang::ast::thir::{Polytype, Type, TypeKind, TypeVar, TypedHir};
 use fossil_lang::ast::Loc;
+use fossil_lang::ast::thir::{Polytype, Type, TypeKind, TypeVar, TypedHir};
 use fossil_lang::context::DefId;
 use fossil_lang::error::RuntimeError;
 use fossil_lang::passes::GlobalContext;
@@ -242,13 +242,10 @@ impl FunctionImpl for EntityWithIdFunction {
 
         // Extract RDF metadata if available
         let rdf_metadata = type_def_id.and_then(|def_id| {
-            ctx.gcx
-                .type_metadata
-                .get(&def_id)
-                .and_then(|tm| {
-                    let mut interner = ctx.gcx.interner.clone();
-                    RdfMetadata::from_type_metadata(tm, &mut interner)
-                })
+            ctx.gcx.type_metadata.get(&def_id).and_then(|tm| {
+                let mut interner = ctx.gcx.interner.clone();
+                RdfMetadata::from_type_metadata(tm, &mut interner)
+            })
         });
 
         // Create Entity extension
@@ -277,7 +274,7 @@ fn infer_type_def_id(value: &Value, ctx: &RuntimeContext) -> Option<DefId> {
 
     // If that's not set, try to find a type definition that has metadata
     // For records (LazyFrames), we can try to match structure
-    if let Value::LazyFrame(lf) = value {
+    if let Value::LazyFrame(_lf) = value {
         // If there's only one type with metadata, use that as a heuristic
         // This works for simple cases like our example
         if ctx.gcx.type_metadata.len() == 1 {
@@ -353,7 +350,10 @@ mod tests {
 
         let result = func
             .call(
-                vec![Value::Int(42), Value::String("http://example.com/42".into())],
+                vec![
+                    Value::Int(42),
+                    Value::String("http://example.com/42".into()),
+                ],
                 &ctx,
             )
             .unwrap();

@@ -117,10 +117,9 @@ impl BatchRdfSerializer {
         metadata: &RdfMetadata,
     ) -> Result<(), String> {
         // Process row by row (by subject) for better Turtle grouping
-        for row_idx in 0..batch.height() {
-            let subject_uri = subjects[row_idx].as_ref();
-            let subject =
-                NamedNode::new(subject_uri).map_err(|e| format!("Invalid subject URI: {}", e))?;
+        for (row_idx, subject_uri) in subjects.iter().enumerate().take(batch.height()) {
+            let subject = NamedNode::new(subject_uri.as_ref())
+                .map_err(|e| format!("Invalid subject URI: {}", e))?;
 
             // For each column (predicate) in this row
             for col_name in batch.get_column_names() {

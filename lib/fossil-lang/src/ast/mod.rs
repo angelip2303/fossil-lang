@@ -2,7 +2,6 @@ pub mod ast;
 pub mod folder;
 pub mod hir;
 pub mod thir;
-// pub mod visitor;
 
 pub type SourceId = usize;
 pub type Span = std::ops::Range<usize>;

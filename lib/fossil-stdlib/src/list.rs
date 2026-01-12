@@ -81,7 +81,6 @@ impl FunctionImpl for MapFunction {
     }
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
-        
         use fossil_lang::error::{CompileError, CompileErrorKind};
 
         // Extract LazyFrame
@@ -238,7 +237,6 @@ impl FunctionImpl for EachFunction {
     }
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
-        
         use fossil_lang::error::{CompileError, CompileErrorKind};
 
         // Extract LazyFrame
@@ -361,10 +359,7 @@ impl FunctionImpl for JoinFunction {
 
         let fn_ty = thir.types.alloc(Type {
             loc: Loc::generated(),
-            kind: TypeKind::Function(
-                vec![left_ty, right_ty, string_ty, string_ty],
-                return_ty,
-            ),
+            kind: TypeKind::Function(vec![left_ty, right_ty, string_ty, string_ty], return_ty),
         });
 
         Polytype::poly(vec![t_var, u_var, v_var], fn_ty)
@@ -377,7 +372,9 @@ impl FunctionImpl for JoinFunction {
             Value::LazyFrame(lf) => lf,
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("join expects LazyFrame as first argument".to_string()),
+                    CompileErrorKind::Runtime(
+                        "join expects LazyFrame as first argument".to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }
@@ -387,7 +384,9 @@ impl FunctionImpl for JoinFunction {
             Value::LazyFrame(lf) => lf,
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("join expects LazyFrame as second argument".to_string()),
+                    CompileErrorKind::Runtime(
+                        "join expects LazyFrame as second argument".to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }
@@ -397,7 +396,9 @@ impl FunctionImpl for JoinFunction {
             Value::String(s) => s.as_ref(),
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("join expects string as third argument (left column)".to_string()),
+                    CompileErrorKind::Runtime(
+                        "join expects string as third argument (left column)".to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }
@@ -407,7 +408,9 @@ impl FunctionImpl for JoinFunction {
             Value::String(s) => s.as_ref(),
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("join expects string as fourth argument (right column)".to_string()),
+                    CompileErrorKind::Runtime(
+                        "join expects string as fourth argument (right column)".to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }
@@ -465,7 +468,9 @@ impl FunctionImpl for UnionFunction {
             Value::LazyFrame(lf) => lf,
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("union expects LazyFrame as first argument".to_string()),
+                    CompileErrorKind::Runtime(
+                        "union expects LazyFrame as first argument".to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }
@@ -475,20 +480,22 @@ impl FunctionImpl for UnionFunction {
             Value::LazyFrame(lf) => lf,
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("union expects LazyFrame as second argument".to_string()),
+                    CompileErrorKind::Runtime(
+                        "union expects LazyFrame as second argument".to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }
         };
 
         // Vertical concatenation using concat_lf
-        let result = polars::prelude::concat(
-            vec![lf1.clone(), lf2.clone()],
-            UnionArgs::default(),
-        ).map_err(|e| CompileError::new(
-            CompileErrorKind::Runtime(format!("union failed: {}", e)),
-            Loc::generated(),
-        ))?;
+        let result = polars::prelude::concat(vec![lf1.clone(), lf2.clone()], UnionArgs::default())
+            .map_err(|e| {
+                CompileError::new(
+                    CompileErrorKind::Runtime(format!("union failed: {}", e)),
+                    Loc::generated(),
+                )
+            })?;
 
         Ok(Value::LazyFrame(result))
     }
@@ -549,7 +556,9 @@ impl FunctionImpl for SelectFunction {
             Value::LazyFrame(lf) => lf,
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("select expects LazyFrame as first argument".to_string()),
+                    CompileErrorKind::Runtime(
+                        "select expects LazyFrame as first argument".to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }
@@ -558,26 +567,32 @@ impl FunctionImpl for SelectFunction {
         // Extract column names from List (Series of strings)
         let columns = match &args[1] {
             Value::Series(series) => {
-                let string_series = series.str()
-                    .map_err(|e| CompileError::new(
+                let string_series = series.str().map_err(|e| {
+                    CompileError::new(
                         CompileErrorKind::Runtime(format!("select expects list of strings: {}", e)),
                         Loc::generated(),
-                    ))?;
+                    )
+                })?;
 
-                string_series.into_iter()
+                string_series
+                    .into_iter()
                     .filter_map(|opt| opt.map(|s| s.to_string()))
                     .collect::<Vec<_>>()
             }
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("select expects list of strings as second argument".to_string()),
+                    CompileErrorKind::Runtime(
+                        "select expects list of strings as second argument".to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }
         };
 
         // Select columns
-        let result = lf.clone().select(columns.iter().map(|s| col(s.as_str())).collect::<Vec<_>>());
+        let result = lf
+            .clone()
+            .select(columns.iter().map(|s| col(s.as_str())).collect::<Vec<_>>());
 
         Ok(Value::LazyFrame(result))
     }
@@ -639,7 +654,9 @@ impl FunctionImpl for SortFunction {
             Value::LazyFrame(lf) => lf,
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("sort expects LazyFrame as first argument".to_string()),
+                    CompileErrorKind::Runtime(
+                        "sort expects LazyFrame as first argument".to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }
@@ -649,7 +666,9 @@ impl FunctionImpl for SortFunction {
             Value::String(s) => s.as_ref(),
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("sort expects string as second argument (column name)".to_string()),
+                    CompileErrorKind::Runtime(
+                        "sort expects string as second argument (column name)".to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }
@@ -659,15 +678,16 @@ impl FunctionImpl for SortFunction {
             Value::Bool(b) => *b,
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("sort expects bool as third argument (descending)".to_string()),
+                    CompileErrorKind::Runtime(
+                        "sort expects bool as third argument (descending)".to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }
         };
 
         // Sort by column
-        let sort_options = SortMultipleOptions::default()
-            .with_order_descending(descending);
+        let sort_options = SortMultipleOptions::default().with_order_descending(descending);
 
         let result = lf.clone().sort([column], sort_options);
 
@@ -732,7 +752,6 @@ impl FunctionImpl for DistinctFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fossil_lang::passes::GlobalContext;
     use std::io::Write;
     use tempfile::NamedTempFile;
 

@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
-use fossil_lang::ast::ast::{Literal, Ast, Type as AstType, TypeKind as AstTypeKind};
-use fossil_lang::ast::thir::{TypedHir, Polytype, TypeVar, Type as ThirType, TypeKind as ThirTypeKind};
 use fossil_lang::ast::Loc;
+use fossil_lang::ast::ast::{Ast, Literal, Type as AstType, TypeKind as AstTypeKind};
+use fossil_lang::ast::thir::{
+    Polytype, Type as ThirType, TypeKind as ThirTypeKind, TypeVar, TypedHir,
+};
 use fossil_lang::context::Interner;
 use fossil_lang::error::{ProviderError, RuntimeError};
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
-use fossil_lang::traits::provider::{TypeProviderImpl, ProviderOutput, ModuleSpec, FunctionDef};
+use fossil_lang::traits::provider::{FunctionDef, ModuleSpec, ProviderOutput, TypeProviderImpl};
 use polars::prelude::*;
 
 use crate::utils::*;
@@ -40,15 +42,18 @@ impl Default for CsvOptions {
 }
 
 /// Parse CSV provider options from literal arguments
-fn parse_csv_options(args: &[Literal], interner: &mut Interner) -> Result<CsvOptions, ProviderError> {
+fn parse_csv_options(
+    args: &[Literal],
+    interner: &mut Interner,
+) -> Result<CsvOptions, ProviderError> {
     use fossil_lang::error::CompileErrorKind;
 
     if args.is_empty() {
         return Err(ProviderError::new(
             CompileErrorKind::ProviderError(
-                interner.intern("CSV provider requires at least a file path argument")
+                interner.intern("CSV provider requires at least a file path argument"),
             ),
-            Loc::generated()
+            Loc::generated(),
         ));
     }
 
@@ -62,9 +67,9 @@ fn parse_csv_options(args: &[Literal], interner: &mut Interner) -> Result<CsvOpt
         _ => {
             return Err(ProviderError::new(
                 CompileErrorKind::ProviderError(
-                    interner.intern("CSV provider path must be a string literal")
+                    interner.intern("CSV provider path must be a string literal"),
                 ),
-                Loc::generated()
+                Loc::generated(),
             ));
         }
     }
@@ -113,7 +118,8 @@ impl TypeProviderImpl for CsvProvider {
 
         // Set delimiter if different from default
         if options.delimiter != b',' {
-            csv_reader = csv_reader.map_parse_options(|opts| opts.with_separator(options.delimiter));
+            csv_reader =
+                csv_reader.map_parse_options(|opts| opts.with_separator(options.delimiter));
         }
 
         // Set quote char if specified
@@ -127,7 +133,7 @@ impl TypeProviderImpl for CsvProvider {
                 use fossil_lang::error::CompileErrorKind;
                 ProviderError::new(
                     CompileErrorKind::Runtime(format!("Failed to open CSV file: {}", e)),
-                    Loc::generated()
+                    Loc::generated(),
                 )
             })?
             .finish()
@@ -135,7 +141,7 @@ impl TypeProviderImpl for CsvProvider {
                 use fossil_lang::error::CompileErrorKind;
                 ProviderError::new(
                     CompileErrorKind::Runtime(format!("Failed to parse CSV file: {}", e)),
-                    Loc::generated()
+                    Loc::generated(),
                 )
             })?;
 
@@ -150,16 +156,13 @@ impl TypeProviderImpl for CsvProvider {
 
         // Generate module with load function
         let module_spec = ModuleSpec {
-            functions: vec![
-                FunctionDef {
-                    name: "load".to_string(),
-                    implementation: Arc::new(CsvLoadFunction {
-                        file_path: path_str.clone(),
-                        record_type: record_ty,
-                        options: options.clone(),
-                    }),
-                },
-            ],
+            functions: vec![FunctionDef {
+                name: "load".to_string(),
+                implementation: Arc::new(CsvLoadFunction {
+                    file_path: path_str.clone(),
+                    options: options.clone(),
+                }),
+            }],
             submodules: vec![],
         };
 
@@ -186,12 +189,15 @@ impl TypeProviderImpl for CsvProvider {
 /// ```
 pub struct CsvLoadFunction {
     file_path: String,
-    record_type: fossil_lang::ast::ast::TypeId,
     options: CsvOptions,
 }
 
 impl FunctionImpl for CsvLoadFunction {
-    fn signature(&self, thir: &mut TypedHir, next_type_var: &mut dyn FnMut() -> TypeVar) -> Polytype {
+    fn signature(
+        &self,
+        thir: &mut TypedHir,
+        next_type_var: &mut dyn FnMut() -> TypeVar,
+    ) -> Polytype {
         // Signature: () -> List<Record>
         // Since we can't resolve the record type here, we use a type variable
         // The typechecker will infer the actual record type based on usage
@@ -213,12 +219,12 @@ impl FunctionImpl for CsvLoadFunction {
     fn call(&self, _args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
         // Load CSV as LazyFrame for lazy evaluation using configured options
         // The LazyFrame will defer actual data loading until collect() is called
-        let mut csv_reader = CsvReadOptions::default()
-            .with_has_header(self.options.has_header);
+        let mut csv_reader = CsvReadOptions::default().with_has_header(self.options.has_header);
 
         // Apply custom delimiter if specified
         if self.options.delimiter != b',' {
-            csv_reader = csv_reader.map_parse_options(|opts| opts.with_separator(self.options.delimiter));
+            csv_reader =
+                csv_reader.map_parse_options(|opts| opts.with_separator(self.options.delimiter));
         }
 
         // Apply custom quote char if specified

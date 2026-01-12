@@ -6,9 +6,9 @@
 //! While the type provider generates type definitions from CSV schemas at
 //! compile-time, this module loads actual CSV data at runtime as LazyFrames.
 
-use fossil_lang::ast::thir::{Polytype, Type, TypeKind, TypeVar, TypedHir};
 use fossil_lang::ast::Loc;
 use fossil_lang::ast::ast::PrimitiveType;
+use fossil_lang::ast::thir::{Polytype, Type, TypeKind, TypeVar, TypedHir};
 use fossil_lang::error::RuntimeError;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
@@ -61,16 +61,17 @@ impl FunctionImpl for CsvLoadFunction {
         Polytype::mono(fn_ty)
     }
 
-    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
+    fn call(&self, args: Vec<Value>, _: &RuntimeContext) -> Result<Value, RuntimeError> {
         use fossil_lang::error::{CompileError, CompileErrorKind};
-        
 
         // Extract file path
         let path = match &args[0] {
             Value::String(s) => s,
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("csv::load expects a string path as first argument".to_string()),
+                    CompileErrorKind::Runtime(
+                        "csv::load expects a string path as first argument".to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }
@@ -84,14 +85,14 @@ impl FunctionImpl for CsvLoadFunction {
             .map_err(|e| {
                 CompileError::new(
                     CompileErrorKind::Runtime(format!("Failed to open CSV file: {}", e)),
-                    Loc::generated()
+                    Loc::generated(),
                 )
             })?
             .finish()
             .map_err(|e| {
                 CompileError::new(
                     CompileErrorKind::Runtime(format!("Failed to parse CSV file: {}", e)),
-                    Loc::generated()
+                    Loc::generated(),
                 )
             })?;
 
@@ -129,7 +130,7 @@ mod tests {
             Value::LazyFrame(lf) => {
                 let df = lf.collect().unwrap();
                 assert_eq!(df.height(), 2); // 2 rows
-                assert_eq!(df.width(), 3);  // 3 columns
+                assert_eq!(df.width(), 3); // 3 columns
             }
             _ => panic!("Expected LazyFrame"),
         }

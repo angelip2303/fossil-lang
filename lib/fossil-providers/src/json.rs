@@ -4,14 +4,16 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 
-use fossil_lang::ast::ast::{Literal, Ast, TypeKind, Type};
-use fossil_lang::ast::thir::{TypedHir, Polytype, TypeVar, Type as ThirType, TypeKind as ThirTypeKind};
 use fossil_lang::ast::Loc;
+use fossil_lang::ast::ast::{Ast, Literal, Type, TypeKind};
+use fossil_lang::ast::thir::{
+    Polytype, Type as ThirType, TypeKind as ThirTypeKind, TypeVar, TypedHir,
+};
 use fossil_lang::context::Interner;
 use fossil_lang::error::{ProviderError, RuntimeError};
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
-use fossil_lang::traits::provider::{TypeProviderImpl, ProviderOutput, ModuleSpec, FunctionDef};
+use fossil_lang::traits::provider::{FunctionDef, ModuleSpec, ProviderOutput, TypeProviderImpl};
 use polars::prelude::*;
 
 use crate::utils::*;
@@ -49,15 +51,12 @@ impl TypeProviderImpl for JsonProvider {
 
         // Generate module with load function
         let module_spec = ModuleSpec {
-            functions: vec![
-                FunctionDef {
-                    name: "load".to_string(),
-                    implementation: Arc::new(JsonLoadFunction {
-                        file_path: path_str,
-                        record_type: record_ty,
-                    }),
-                },
-            ],
+            functions: vec![FunctionDef {
+                name: "load".to_string(),
+                implementation: Arc::new(JsonLoadFunction {
+                    file_path: path_str,
+                }),
+            }],
             submodules: vec![],
         };
 
@@ -81,11 +80,14 @@ impl TypeProviderImpl for JsonProvider {
 /// ```
 pub struct JsonLoadFunction {
     file_path: String,
-    record_type: fossil_lang::ast::ast::TypeId,
 }
 
 impl FunctionImpl for JsonLoadFunction {
-    fn signature(&self, thir: &mut TypedHir, next_type_var: &mut dyn FnMut() -> TypeVar) -> Polytype {
+    fn signature(
+        &self,
+        thir: &mut TypedHir,
+        next_type_var: &mut dyn FnMut() -> TypeVar,
+    ) -> Polytype {
         // Return a type variable that will be inferred
         let t_var = next_type_var();
         let result_ty = thir.types.alloc(ThirType {
@@ -104,7 +106,7 @@ impl FunctionImpl for JsonLoadFunction {
         let file = File::open(path).map_err(|e| {
             CompileError::new(
                 CompileErrorKind::Runtime(format!("Failed to open JSON file: {}", e)),
-                Loc::generated()
+                Loc::generated(),
             )
         })?;
         let reader = BufReader::new(file);
@@ -115,7 +117,7 @@ impl FunctionImpl for JsonLoadFunction {
             .map_err(|e| {
                 CompileError::new(
                     CompileErrorKind::Runtime(format!("Failed to parse JSON file: {}", e)),
-                    Loc::generated()
+                    Loc::generated(),
                 )
             })?;
 
