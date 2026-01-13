@@ -1,10 +1,14 @@
-use fossil_lang::compiler::Compiler;
+use fossil_lang::compiler::{Compiler, CompilerInput};
 use fossil_lang::error::CompileError;
 use fossil_lang::passes::ThirProgram;
 
 fn compile(src: &str) -> Result<ThirProgram, CompileError> {
     let compiler = Compiler::new();
-    compiler.compile(src)
+    let input = CompilerInput::String {
+        src: src.to_string(),
+        name: "test".to_string(),
+    };
+    compiler.compile(input)
 }
 
 #[test]

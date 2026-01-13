@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::ast::ast::Path;
@@ -170,7 +171,13 @@ pub struct Def {
 
 #[derive(Clone)]
 pub enum DefKind {
-    Mod,
+    /// A module definition
+    /// - file_path: The source file for this module (None for inline/builtin modules)
+    /// - is_inline: Whether this is an inline module definition (vs file-based)
+    Mod {
+        file_path: Option<PathBuf>,
+        is_inline: bool,
+    },
     Let,
     Type,
     Func(Option<Arc<dyn FunctionImpl>>),
@@ -239,7 +246,7 @@ impl Definitions {
                 // Start with the first part (module name)
                 let mut current_id = self.get_by_symbol(parts[0]).map(|def| def.id())?;
 
-                // Navigate through the rest of the path
+                // Navigate through the rest of the path (supports arbitrary depth now)
                 for &part in &parts[1..] {
                     // Find item with this symbol that has current_id as parent
                     current_id = self
@@ -251,8 +258,38 @@ impl Definitions {
 
                 Some(current_id)
             }
+            Path::Relative { .. } => {
+                // Relative path resolution requires context (current module)
+                // This will be implemented in the resolver pass (Step 1.4)
+                // For now, return None
+                None
+            }
         }
     }
+
+    pub fn get_children(&self, parent_id: DefId) -> Vec<&Def> {
+        self.items
+            .iter()
+            .filter(|def| def.parent == Some(parent_id))
+            .collect()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Def> {
+        self.items.iter()
+    }
+}
+
+/// Metadata about a module for tracking file-based organization
+#[derive(Clone, Debug)]
+pub struct ModuleInfo {
+    /// The DefId of this module
+    pub def_id: DefId,
+    /// Parent module (None for root modules)
+    pub parent: Option<DefId>,
+    /// Source file path for this module
+    pub file_path: PathBuf,
+    /// Child module DefIds
+    pub children: Vec<DefId>,
 }
 
 /// Kind of a type (for kind checking)

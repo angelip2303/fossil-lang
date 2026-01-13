@@ -3,13 +3,18 @@
 use crate::ast::Loc;
 use crate::ast::ast::*;
 use crate::context::*;
-use crate::error::{CompileError, CompileErrorKind};
+use crate::error::{CompileError, CompileErrorKind, CompileErrors};
 use crate::passes::GlobalContext;
 
 use super::scope::ScopeStack;
 use super::table::{ResolutionTable, ResolvedAst};
 
 /// Name resolver - builds symbol tables and resolves all names
+///
+/// # Module Context for Relative Paths
+/// For relative path resolution (e.g., `./utils`, `../common`), the current module
+/// must be set using `set_module_context()`. This is typically done when resolving
+/// multi-module projects where each module has its own context.
 pub struct NameResolver {
     gcx: GlobalContext,
     ast: Ast,
@@ -33,13 +38,43 @@ impl NameResolver {
         resolver
     }
 
-    pub fn resolve(mut self) -> Result<ResolvedAst, CompileError> {
-        self.collect_declarations()?;
+    /// Set the current module context for relative path resolution
+    ///
+    /// This should be called before resolving a module that may contain
+    /// relative imports (e.g., `./utils`, `../common`).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut resolver = NameResolver::new(ast, gcx);
+    /// resolver.set_module_context(module_def_id);
+    /// resolver.resolve()?;
+    /// ```
+    pub fn set_module_context(&mut self, module_id: DefId) {
+        self.scopes.set_current_module(module_id);
+    }
 
-        // Resolve root statements (block statements are resolved when their block is resolved)
+    pub fn resolve(mut self) -> Result<ResolvedAst, CompileErrors> {
+        let mut errors = CompileErrors::new();
+
+        // Phase 1: Collect declarations
+        if let Err(mut decl_errors) = self.collect_declarations() {
+            // Merge declaration errors
+            errors.0.append(&mut decl_errors.0);
+            // If collection fails, we can't proceed with resolution
+            return Err(errors);
+        }
+
+        // Phase 2: Resolve root statements (block statements are resolved when their block is resolved)
         let stmt_ids = self.ast.root.clone();
         for stmt_id in stmt_ids {
-            self.resolve_stmt(stmt_id)?;
+            if let Err(e) = self.resolve_stmt(stmt_id) {
+                errors.push(e);
+            }
+        }
+
+        // Return errors if any occurred
+        if !errors.is_empty() {
+            return Err(errors);
         }
 
         Ok(ResolvedAst {
@@ -49,9 +84,10 @@ impl NameResolver {
         })
     }
 
-    fn collect_declarations(&mut self) -> Result<(), CompileError> {
+    fn collect_declarations(&mut self) -> Result<(), CompileErrors> {
         // Collect declarations from root statements only
         let stmt_ids = self.ast.root.clone();
+        let mut errors = CompileErrors::new();
 
         for stmt_id in stmt_ids {
             let stmt = self.ast.stmts.get(stmt_id);
@@ -71,34 +107,38 @@ impl NameResolver {
                     let expr = self.ast.exprs.get(*value);
                     if matches!(expr.kind, ExprKind::Function { .. }) {
                         if self.scopes.current_mut().values.contains_key(name) {
-                            return Err(CompileError::new(
+                            errors.push(CompileError::new(
                                 CompileErrorKind::AlreadyDefined(*name),
                                 loc,
                             ));
+                        } else {
+                            let def_id = self.gcx.definitions.insert(None, *name, DefKind::Let);
+                            self.scopes.current_mut().values.insert(*name, def_id);
                         }
-
-                        let def_id = self.gcx.definitions.insert(None, *name, DefKind::Let);
-                        self.scopes.current_mut().values.insert(*name, def_id);
                     }
                 }
 
                 StmtKind::Type { name, .. } => {
                     if self.scopes.current_mut().types.contains_key(name) {
-                        return Err(CompileError::new(
+                        errors.push(CompileError::new(
                             CompileErrorKind::AlreadyDefined(*name),
                             loc,
                         ));
+                    } else {
+                        let def_id = self.gcx.definitions.insert(None, *name, DefKind::Type);
+                        self.scopes.current_mut().types.insert(*name, def_id);
                     }
-
-                    let def_id = self.gcx.definitions.insert(None, *name, DefKind::Type);
-                    self.scopes.current_mut().types.insert(*name, def_id);
                 }
 
                 StmtKind::Expr(_) => {}
             }
         }
 
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     /// Pass 2: Resolve names in statements
@@ -308,6 +348,12 @@ impl NameResolver {
                     .resolve(&path)
                     .ok_or_else(|| CompileError::new(CompileErrorKind::UndefinedPath { path }, loc))
             }
+
+            Path::Relative { dots, components } => {
+                // Resolve relative to current module
+                let base_module = self.navigate_up(*dots, loc.clone())?;
+                self.resolve_from_module(base_module, components, loc, /* is_type */ false)
+            }
         }
     }
 
@@ -339,6 +385,12 @@ impl NameResolver {
                     .definitions
                     .resolve(&path)
                     .ok_or_else(|| CompileError::new(CompileErrorKind::UndefinedType(path), loc))
+            }
+
+            Path::Relative { dots, components } => {
+                // Resolve relative to current module
+                let base_module = self.navigate_up(*dots, loc.clone())?;
+                self.resolve_from_module(base_module, components, loc, /* is_type */ true)
             }
         }
     }
@@ -387,5 +439,124 @@ impl NameResolver {
             }
             _ => None,
         }
+    }
+
+    /// Navigate up 'dots' levels in the module hierarchy
+    ///
+    /// # Arguments
+    /// - `dots`: Number of levels to go up (0 = current module, 1 = parent, 2 = grandparent, etc.)
+    /// - `loc`: Location for error reporting
+    ///
+    /// # Returns
+    /// DefId of the target module after navigating up
+    fn navigate_up(&self, dots: u8, loc: Loc) -> Result<DefId, CompileError> {
+        // Get current module from scope
+        let mut current = self.scopes.current_module().ok_or_else(|| {
+            CompileError::new(
+                CompileErrorKind::Runtime("No current module context for relative import".into()),
+                loc.clone(),
+            )
+        })?;
+
+        // Navigate up 'dots' times
+        for _ in 0..dots {
+            let def = self.gcx.definitions.get(current);
+
+            // Get parent module
+            if let crate::context::DefKind::Mod { .. } = &def.kind {
+                // Need to check the parent field
+                // Since parent is private, we need to iterate through definitions
+                // to find the module that contains this one
+                let parent_id = self.gcx.definitions.iter()
+                    .find(|parent_def| {
+                        // Check if any of parent's children is current
+                        self.gcx.definitions.get_children(parent_def.id())
+                            .iter()
+                            .any(|child| child.id() == current)
+                    })
+                    .map(|p| p.id());
+
+                current = parent_id.ok_or_else(|| {
+                    CompileError::new(
+                        CompileErrorKind::Runtime(
+                            "Relative import goes above project root".into()
+                        ),
+                        loc.clone(),
+                    )
+                })?;
+            } else {
+                return Err(CompileError::new(
+                    CompileErrorKind::Runtime("Not a module".into()),
+                    loc,
+                ));
+            }
+        }
+
+        Ok(current)
+    }
+
+    /// Resolve a path from a specific module
+    ///
+    /// # Arguments
+    /// - `module_id`: The module to resolve from
+    /// - `components`: The path components to resolve
+    /// - `loc`: Location for error reporting
+    /// - `is_type`: Whether this is a type path (vs value path)
+    fn resolve_from_module(
+        &self,
+        module_id: DefId,
+        components: &[Symbol],
+        loc: Loc,
+        is_type: bool,
+    ) -> Result<DefId, CompileError> {
+        if components.is_empty() {
+            return Ok(module_id);
+        }
+
+        // Start from the base module
+        let mut current = module_id;
+
+        // Navigate through each component
+        for (i, &component) in components.iter().enumerate() {
+            // Look for this component as a child of current
+            let found = self.gcx.definitions.iter()
+                .find(|def| {
+                    def.name == component &&
+                    self.gcx.definitions.get_children(current)
+                        .iter()
+                        .any(|child| child.id() == def.id())
+                });
+
+            if let Some(def) = found {
+                current = def.id();
+
+                // If this is not the last component, it must be a module
+                if i < components.len() - 1 {
+                    match &def.kind {
+                        crate::context::DefKind::Mod { .. } => {
+                            // Continue to next component
+                        }
+                        _ => {
+                            return Err(CompileError::new(
+                                CompileErrorKind::NotAModule(
+                                    Path::qualified(components[..=i].to_vec())
+                                ),
+                                loc,
+                            ));
+                        }
+                    }
+                }
+            } else {
+                // Component not found
+                let path = Path::qualified(components.to_vec());
+                return Err(if is_type {
+                    CompileError::new(CompileErrorKind::UndefinedType(path), loc)
+                } else {
+                    CompileError::new(CompileErrorKind::UndefinedPath { path }, loc)
+                });
+            }
+        }
+
+        Ok(current)
     }
 }

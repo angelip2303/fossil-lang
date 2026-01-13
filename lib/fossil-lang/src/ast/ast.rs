@@ -98,11 +98,21 @@ pub enum TypeKind {
     App { ctor: Path, args: Vec<TypeId> },
 }
 
-/// A path to an identifier (either simple or qualified)
+/// A path to an identifier (either simple, qualified, or relative)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Path {
+    /// A simple, unqualified identifier: `foo`
     Simple(Symbol),
+    /// A qualified path with multiple components: `std::list::map`
     Qualified(Vec<Symbol>),
+    /// A relative path starting with ./ or ../
+    /// - dots = 0 means ./ (current directory)
+    /// - dots = 1 means ../ (parent directory)
+    /// - dots = 2 means ../../ (grandparent directory), etc.
+    Relative {
+        dots: u8,
+        components: Vec<Symbol>,
+    },
 }
 
 impl Path {
@@ -122,13 +132,28 @@ impl Path {
         match self {
             Path::Simple(_) => None,
             Path::Qualified(parts) => parts.get(parts.len() - 2).copied(),
+            Path::Relative { components, .. } => {
+                components.get(components.len().saturating_sub(2)).copied()
+            }
         }
     }
 
     pub fn item(&self) -> Symbol {
         match self {
             Path::Simple(sym) => *sym,
-            Path::Qualified(parts) => *parts.last().unwrap(),
+            Path::Qualified(parts) => {
+                // SAFETY: Qualified paths are validated to be non-empty at construction
+                // via Path::qualified() which converts single-element paths to Simple.
+                *parts
+                    .last()
+                    .expect("BUG: Qualified path with zero parts")
+            }
+            Path::Relative { components, .. } => {
+                // Relative paths must have at least one component
+                *components
+                    .last()
+                    .expect("BUG: Relative path with zero components")
+            }
         }
     }
 
@@ -136,11 +161,16 @@ impl Path {
         match self {
             Path::Simple(_) => 1,
             Path::Qualified(parts) => parts.len(),
+            Path::Relative { components, .. } => components.len(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        match self {
+            Path::Simple(_) => false,
+            Path::Qualified(parts) => parts.is_empty(),
+            Path::Relative { components, .. } => components.is_empty(),
+        }
     }
 }
 
@@ -149,6 +179,7 @@ impl From<Path> for Vec<Symbol> {
         match path {
             Path::Simple(sym) => vec![sym],
             Path::Qualified(parts) => parts,
+            Path::Relative { components, .. } => components,
         }
     }
 }

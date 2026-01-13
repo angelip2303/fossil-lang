@@ -43,6 +43,75 @@ pub struct CompileError {
     pub context: Option<String>,
 }
 
+/// Collection of compilation errors
+///
+/// This type is used to accumulate multiple errors during compilation
+/// instead of failing on the first error. This provides a better user
+/// experience by showing all errors at once.
+///
+/// # Example
+/// ```rust,ignore
+/// let mut errors = CompileErrors::new();
+/// for item in items {
+///     match process(item) {
+///         Ok(result) => results.push(result),
+///         Err(e) => errors.push(e),
+///     }
+/// }
+/// errors.into_result(results)
+/// ```
+#[derive(Debug)]
+pub struct CompileErrors(pub Vec<CompileError>);
+
+impl CompileErrors {
+    /// Create a new empty error collection
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Add an error to the collection
+    pub fn push(&mut self, error: CompileError) {
+        self.0.push(error);
+    }
+
+    /// Check if there are any errors
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Convert to a Result, returning Ok if no errors, Err otherwise
+    ///
+    /// This is a convenience method for converting an error accumulation
+    /// into a Result type.
+    pub fn into_result<T>(self, ok: T) -> Result<T, Self> {
+        if self.is_empty() {
+            Ok(ok)
+        } else {
+            Err(self)
+        }
+    }
+
+    /// Generate Ariadne reports for all errors
+    ///
+    /// Returns a vector of reports that can be printed or written to show
+    /// all accumulated errors to the user.
+    pub fn reports(&self) -> Vec<Report<'_, Loc>> {
+        self.0.iter().map(|e| e.report()).collect()
+    }
+}
+
+impl Default for CompileErrors {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl From<CompileError> for CompileErrors {
+    fn from(err: CompileError) -> Self {
+        Self(vec![err])
+    }
+}
+
 /// The specific kind of compilation error
 ///
 /// Each variant represents a different category of error that can occur

@@ -14,12 +14,16 @@
 //!
 //! See docs/nesting_limits.md for detailed analysis.
 
-use fossil_lang::compiler::Compiler;
+use fossil_lang::compiler::{Compiler, CompilerInput};
 
 fn compile(src: &str) -> Result<(), String> {
     let compiler = Compiler::new();
+    let input = CompilerInput::String {
+        src: src.to_string(),
+        name: "test".to_string(),
+    };
     compiler
-        .compile(src)
+        .compile(input)
         .map(|_| ())
         .map_err(|e| format!("{:?}", e))
 }

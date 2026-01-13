@@ -1,9 +1,13 @@
-use fossil_lang::compiler::Compiler;
+use fossil_lang::compiler::{Compiler, CompilerInput};
 use fossil_lang::error::CompileError;
 
 fn compile(src: &str) -> Result<(), CompileError> {
     let compiler = Compiler::new();
-    compiler.compile(src).map(|_| ())
+    let input = CompilerInput::String {
+        src: src.to_string(),
+        name: "test".to_string(),
+    };
+    compiler.compile(input).map(|_| ())
 }
 
 #[test]

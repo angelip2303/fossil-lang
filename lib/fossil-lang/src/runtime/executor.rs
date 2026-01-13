@@ -29,8 +29,14 @@ impl ThirExecutor {
     /// # Example
     ///
     /// ```ignore
+    /// use fossil_lang::compiler::{Compiler, CompilerInput};
+    ///
     /// let compiler = Compiler::new();
-    /// let thir = compiler.compile(source)?;
+    /// let input = CompilerInput::String {
+    ///     src: source.to_string(),
+    ///     name: "example".to_string()
+    /// };
+    /// let thir = compiler.compile(input)?;
     /// let results = ThirExecutor::execute(thir)?;
     /// ```
     pub fn execute(program: ThirProgram) -> Result<Vec<Value>, RuntimeError> {
@@ -85,13 +91,17 @@ impl ThirExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::Compiler;
+    use crate::compiler::{Compiler, CompilerInput};
 
     #[test]
     fn test_execute_simple_literal() {
         let src = "42";
         let compiler = Compiler::new();
-        let thir = compiler.compile(src).unwrap();
+        let input = CompilerInput::String {
+            src: src.to_string(),
+            name: "test".to_string(),
+        };
+        let thir = compiler.compile(input).unwrap();
 
         let results = ThirExecutor::execute(thir).unwrap();
         assert_eq!(results.len(), 1);
@@ -107,7 +117,11 @@ mod tests {
         "#;
 
         let compiler = Compiler::new();
-        let thir = compiler.compile(src).unwrap();
+        let input = CompilerInput::String {
+            src: src.to_string(),
+            name: "test".to_string(),
+        };
+        let thir = compiler.compile(input).unwrap();
 
         let results = ThirExecutor::execute(thir).unwrap();
         assert_eq!(results.len(), 3); // x = 10, y = 20, x

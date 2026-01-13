@@ -1,6 +1,6 @@
 use crate::ast::ast::*;
 use crate::context::{DefKind, Symbol};
-use crate::error::{CompileError, CompileErrorKind};
+use crate::error::{CompileError, CompileErrorKind, CompileErrors};
 use crate::passes::GlobalContext;
 use crate::traits::provider::ModuleSpec;
 
@@ -18,7 +18,7 @@ impl ProviderExpander {
     ///
     /// Type providers execute during compilation and generate AST types
     /// and optional modules (F# style).
-    pub fn expand(mut self) -> Result<(Ast, GlobalContext), CompileError> {
+    pub fn expand(mut self) -> Result<(Ast, GlobalContext), CompileErrors> {
         // Collect all type alias statements with provider invocations
         let type_stmts: Vec<StmtId> = self
             .ast
@@ -38,8 +38,16 @@ impl ProviderExpander {
             .collect();
 
         // Expand each provider (F# style: execute provider, get generated type + module)
+        let mut errors = CompileErrors::new();
         for stmt_id in type_stmts {
-            self.expand_provider_stmt(stmt_id)?;
+            if let Err(e) = self.expand_provider_stmt(stmt_id) {
+                errors.push(e);
+            }
+        }
+
+        // Return errors if any occurred
+        if !errors.is_empty() {
+            return Err(errors);
         }
 
         Ok((self.ast, self.gcx))
@@ -125,7 +133,10 @@ impl ProviderExpander {
         let module_def_id = self.gcx.definitions.insert(
             None,
             module_name,
-            DefKind::Mod,
+            DefKind::Mod {
+                file_path: None,
+                is_inline: true,
+            },
         );
 
         // Register functions as children of this module
@@ -146,7 +157,10 @@ impl ProviderExpander {
             let submod_def_id = self.gcx.definitions.insert(
                 Some(module_def_id),
                 submod_sym,
-                DefKind::Mod,
+                DefKind::Mod {
+                    file_path: None,
+                    is_inline: true,
+                },
             );
 
             // Register its functions with parent=submod_def_id

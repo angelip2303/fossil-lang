@@ -46,7 +46,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{hir, thir};
-use crate::error::CompileError;
+use crate::error::{CompileError, CompileErrors};
 use crate::passes::{GlobalContext, HirProgram, ThirProgram};
 
 // Sub-modules
@@ -168,14 +168,22 @@ impl TypeChecker {
     ///
     /// # Errors
     /// Returns an error if type checking fails (type mismatch, undefined variable, etc.)
-    pub fn check(mut self) -> Result<ThirProgram, CompileError> {
+    pub fn check(mut self) -> Result<ThirProgram, CompileErrors> {
         // Process root statements (block statements are checked when their block is checked)
         let root_ids = self.source.root.clone();
         let mut thir_root = Vec::new();
+        let mut errors = CompileErrors::new();
 
         for stmt_id in root_ids {
-            let thir_stmt_id = self.check_stmt(stmt_id)?;
-            thir_root.push(thir_stmt_id);
+            match self.check_stmt(stmt_id) {
+                Ok(thir_stmt_id) => thir_root.push(thir_stmt_id),
+                Err(e) => errors.push(e),
+            }
+        }
+
+        // Return errors if any occurred
+        if !errors.is_empty() {
+            return Err(errors);
         }
 
         self.target.root = thir_root;

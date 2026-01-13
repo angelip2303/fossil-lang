@@ -43,3 +43,13 @@ book
 
 # CLAUDE-related files
 .claude
+
+# RDF files
+*.ttl
+*.rdf
+*.nt
+*.owl
+*.ttl.gz
+*.rdf.gz
+*.nt.gz
+*.owl.gz

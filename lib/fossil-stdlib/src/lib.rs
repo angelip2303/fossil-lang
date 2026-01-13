@@ -1,5 +1,3 @@
-// TODO: Fix builtin.rs - has incorrect imports
-// pub mod builtin;
 pub mod csv;
 pub mod entity;
 pub mod list;
@@ -11,13 +9,8 @@ pub use csv::CsvLoadFunction;
 
 // DataFrame iteration and transformation
 pub use list::{
-    EachFunction,
-    MapFunction,
-    JoinFunction,
+    DistinctFunction, EachFunction, JoinFunction, MapFunction, SelectFunction, SortFunction,
     UnionFunction,
-    SelectFunction,
-    SortFunction,
-    DistinctFunction,
 };
 
 // Entity extension system
@@ -56,12 +49,6 @@ pub fn init(gcx: &mut GlobalContext) {
 
     // Register Entity functions
     gcx.register_function("Entity", "with_id", EntityWithIdFunction);
-
-    // NOTE: csv::load is NOT registered here because the CSV type provider
-    // generates type-specific load functions (e.g., Person::load()) with
-    // the file path captured at compile-time. Registering a generic csv::load
-    // here would conflict with those provider-generated functions.
-    // gcx.register_function("csv", "load", CsvLoadFunction);
 
     // Register string operations
     gcx.register_function("String", "concat", StringConcatFunction);

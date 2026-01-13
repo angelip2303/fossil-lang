@@ -1,4 +1,4 @@
-use fossil_lang::compiler::Compiler;
+use fossil_lang::compiler::{Compiler, CompilerInput};
 use fossil_lang::passes::GlobalContext;
 
 #[test]
@@ -15,7 +15,11 @@ fn test_parse_attributes_in_record() {
 
     let gcx = GlobalContext::new();
     let compiler = Compiler::with_context(gcx);
-    let result = compiler.compile(src);
+    let input = CompilerInput::String {
+        src: src.to_string(),
+        name: "test".to_string(),
+    };
+    let result = compiler.compile(input);
 
     match result {
         Ok(_) => println!("✓ Attributes parsed successfully"),
@@ -37,7 +41,11 @@ fn test_attribute_without_args() {
 
     let gcx = GlobalContext::new();
     let compiler = Compiler::with_context(gcx);
-    let result = compiler.compile(src);
+    let input = CompilerInput::String {
+        src: src.to_string(),
+        name: "test".to_string(),
+    };
+    let result = compiler.compile(input);
 
     match result {
         Ok(_) => println!("✓ Attributes without args parsed successfully"),
@@ -57,7 +65,11 @@ fn test_multiple_attributes_on_field() {
 
     let gcx = GlobalContext::new();
     let compiler = Compiler::with_context(gcx);
-    let result = compiler.compile(src);
+    let input = CompilerInput::String {
+        src: src.to_string(),
+        name: "test".to_string(),
+    };
+    let result = compiler.compile(input);
 
     match result {
         Ok(_) => println!("✓ Multiple attributes on single field parsed successfully"),
@@ -76,7 +88,11 @@ fn test_record_without_attributes() {
 
     let gcx = GlobalContext::new();
     let compiler = Compiler::with_context(gcx);
-    let result = compiler.compile(src);
+    let input = CompilerInput::String {
+        src: src.to_string(),
+        name: "test".to_string(),
+    };
+    let result = compiler.compile(input);
 
     match result {
         Ok(_) => println!("✓ Record without attributes parsed successfully"),

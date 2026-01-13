@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{ast, hir};
-use crate::error::CompileError;
+use crate::error::{CompileError, CompileErrors};
 use crate::passes::HirProgram;
 use crate::passes::resolve::ResolvedAst;
 
@@ -24,14 +24,22 @@ impl HirLowering {
     }
 
     /// Lower resolved AST to HIR
-    pub fn lower(mut self) -> Result<HirProgram, CompileError> {
-        // Lower root statements
+    pub fn lower(mut self) -> Result<HirProgram, CompileErrors> {
+        // Lower root statements, accumulating errors
         let root_stmt_ids = self.resolved.ast.root.clone();
         let mut hir_root_ids = Vec::new();
+        let mut errors = CompileErrors::new();
 
         for stmt_id in root_stmt_ids {
-            let hir_stmt_id = self.lower_stmt(stmt_id)?;
-            hir_root_ids.push(hir_stmt_id);
+            match self.lower_stmt(stmt_id) {
+                Ok(hir_stmt_id) => hir_root_ids.push(hir_stmt_id),
+                Err(e) => errors.push(e),
+            }
+        }
+
+        // If errors occurred, return them
+        if !errors.is_empty() {
+            return Err(errors);
         }
 
         self.hir.root = hir_root_ids;
@@ -53,7 +61,12 @@ impl HirLowering {
                 // If no alias is provided, use the module name
                 let alias = alias.unwrap_or_else(|| match module {
                     ast::Path::Simple(name) => *name,
-                    ast::Path::Qualified(parts) => *parts.last().unwrap(),
+                    ast::Path::Qualified(parts) => *parts
+                        .last()
+                        .expect("BUG: Qualified path with zero parts"),
+                    ast::Path::Relative { components, .. } => *components
+                        .last()
+                        .expect("BUG: Relative path with zero components"),
                 });
                 hir::StmtKind::Import {
                     module: module.clone(),
@@ -322,6 +335,15 @@ impl HirLowering {
                         return Err(CompileError::new(
                             crate::error::CompileErrorKind::ProviderError(
                                 self.resolved.gcx.interner.intern("Qualified type constructors not yet supported")
+                            ),
+                            loc,
+                        ));
+                    }
+                    ast::Path::Relative { .. } => {
+                        // TODO: Support relative paths for type constructors
+                        return Err(CompileError::new(
+                            crate::error::CompileErrorKind::ProviderError(
+                                self.resolved.gcx.interner.intern("Relative path type constructors not yet supported")
                             ),
                             loc,
                         ));
