@@ -2,10 +2,9 @@
 members = [
     "cli",
     "lib/fossil-lang",
+    "lib/fossil-lsp",
     "lib/fossil-providers",
     "lib/fossil-stdlib",
-    "editors/fossil-lsp",
-    "editors/zed-fossil"
 ]
 exclude = [
     "editors/tree-sitter-fossil"
@@ -32,6 +31,7 @@ tempfile = "3.13"
 
 # internal dependencies
 fossil-lang = { path = "./lib/fossil-lang" }
+fossil-lsp = { path = "./lib/fossil-lsp" }
 fossil-providers = { path = "./lib/fossil-providers" }
 fossil-stdlib = { path = "./lib/fossil-stdlib" }
 

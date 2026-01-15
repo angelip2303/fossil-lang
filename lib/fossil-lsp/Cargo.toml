@@ -1,0 +1,23 @@
+[package]
+name = "fossil-lsp"
+version = "0.1.0"
+edition = "2024"
+description = "Language Server Protocol implementation for the Fossil language"
+license = "MIT"
+repository = "https://github.com/angelip2303/fossil-lang"
+
+[[bin]]
+name = "fossil-lsp"
+path = "src/main.rs"
+
+[dependencies]
+fossil-lang = { path = "../../lib/fossil-lang" }
+fossil-providers = { path = "../../lib/fossil-providers" }
+fossil-stdlib = { path = "../../lib/fossil-stdlib" }
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dashmap = "6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
