@@ -3,7 +3,7 @@
 use crate::ast::Loc;
 use crate::ast::ast::*;
 use crate::context::*;
-use crate::error::{CompileError, CompileErrorKind, CompileErrors};
+use crate::error::{CompileError, CompileErrorKind, CompileErrors, ErrorSuggestion};
 use crate::passes::GlobalContext;
 
 use super::scope::ScopeStack;
@@ -185,12 +185,16 @@ impl NameResolver {
                 self.resolve_type(*ty)?;
 
                 // Extract type metadata (attributes) and store in GlobalContext
-                let def_id = self.scopes.lookup_type(*name)
-                    .expect("Type definition should exist in scope");
+                let type_def_id = self.scopes.lookup_type(*name)
+                    .expect("SAFETY: Type definition was just added to scope in collect_declarations(). \
+                             The lookup cannot fail immediately after successful declaration collection.");
 
-                if let Some(metadata) = self.extract_type_metadata(def_id, *ty) {
-                    self.gcx.type_metadata.insert(def_id, std::sync::Arc::new(metadata));
+                if let Some(metadata) = self.extract_type_metadata(type_def_id, *ty) {
+                    self.gcx.type_metadata.insert(type_def_id, std::sync::Arc::new(metadata));
                 }
+
+                // Generate constructor function for record types
+                self.generate_record_constructor(*name, type_def_id, *ty)?;
 
                 Ok(())
             }
@@ -331,13 +335,37 @@ impl NameResolver {
                     return Ok(def_id);
                 }
 
-                Err(
-                    CompileError::new(CompileErrorKind::UndefinedVariable { name }, loc)
-                        .with_context(format!(
-                            "Variable '{}' is not defined in the current scope",
-                            self.gcx.interner.resolve(name)
-                        )),
-                )
+                // Variable not found - create error with suggestions
+                let name_str = self.gcx.interner.resolve(name);
+                let mut error = CompileError::new(CompileErrorKind::UndefinedVariable { name }, loc)
+                    .with_context(format!(
+                        "Variable '{}' is not defined in the current scope",
+                        name_str
+                    ));
+
+                // Collect available variable names in scope
+                let available_names: Vec<String> = self
+                    .scopes
+                    .current()
+                    .values
+                    .keys()
+                    .map(|sym| self.gcx.interner.resolve(*sym).to_string())
+                    .collect();
+
+                // Find similar names using edit distance
+                if let Some((suggestion, confidence)) =
+                    crate::suggestions::find_similar(name_str, &available_names)
+                {
+                    error = error.with_suggestion(ErrorSuggestion::DidYouMean {
+                        wrong: name_str.to_string(),
+                        suggestion,
+                        confidence,
+                    });
+                }
+
+                // TODO: Check if available in an unimported module (future enhancement)
+
+                Err(error)
             }
 
             Path::Qualified(parts) => {
@@ -369,13 +397,38 @@ impl NameResolver {
                     return Ok(def_id);
                 }
 
-                Err(
-                    CompileError::new(CompileErrorKind::UndefinedType(Path::Simple(name)), loc)
-                        .with_context(format!(
-                            "Type '{}' is not defined in the current scope",
-                            self.gcx.interner.resolve(name)
-                        )),
+                // Type not found - create error with suggestions
+                let name_str = self.gcx.interner.resolve(name);
+                let mut error = CompileError::new(
+                    CompileErrorKind::UndefinedType(Path::Simple(name)),
+                    loc,
                 )
+                .with_context(format!(
+                    "Type '{}' is not defined in the current scope",
+                    name_str
+                ));
+
+                // Collect available type names in scope
+                let available_types: Vec<String> = self
+                    .scopes
+                    .current()
+                    .types
+                    .keys()
+                    .map(|sym| self.gcx.interner.resolve(*sym).to_string())
+                    .collect();
+
+                // Find similar type names using edit distance
+                if let Some((suggestion, confidence)) =
+                    crate::suggestions::find_similar(name_str, &available_types)
+                {
+                    error = error.with_suggestion(ErrorSuggestion::DidYouMean {
+                        wrong: name_str.to_string(),
+                        suggestion,
+                        confidence,
+                    });
+                }
+
+                Err(error)
             }
 
             Path::Qualified(parts) => {
@@ -439,6 +492,60 @@ impl NameResolver {
             }
             _ => None,
         }
+    }
+
+    /// Generate a constructor function for record types
+    ///
+    /// For record types like `type Person = { name: string, age: int }`,
+    /// this generates a constructor function `Person(name, age)` that creates
+    /// record instances.
+    ///
+    /// # Arguments
+    /// * `type_name` - The name of the type (e.g., "Person")
+    /// * `type_def_id` - The DefId of the type definition
+    /// * `type_id` - The TypeId of the type definition
+    ///
+    /// # Returns
+    /// Ok if constructor was generated (or type is not a record), Err if there's a conflict
+    fn generate_record_constructor(
+        &mut self,
+        type_name: Symbol,
+        type_def_id: DefId,
+        type_id: TypeId,
+    ) -> Result<(), CompileError> {
+        let ty = self.ast.types.get(type_id);
+
+        // Only generate constructors for record types
+        if let TypeKind::Record(fields) = &ty.kind {
+            // Check if constructor name already exists in value scope
+            if self.scopes.current().values.contains_key(&type_name) {
+                // Constructor name conflicts with existing value binding
+                // This is OK - we'll skip constructor generation
+                // The type can still be constructed with record literals
+                return Ok(());
+            }
+
+            // Register constructor function with placeholder implementation
+            // Phase 3.2 will provide the actual runtime implementation
+            let constructor_def_id = self.gcx.definitions.insert(
+                None,
+                type_name,
+                DefKind::Func(None), // Will be filled in Phase 3.2
+            );
+
+            // Add constructor to value scope (not type scope)
+            self.scopes.current_mut().values.insert(type_name, constructor_def_id);
+
+            // Store metadata linking constructor to its type
+            // This will be used during type checking and code generation
+            self.resolutions.record_constructors.insert(constructor_def_id, type_def_id);
+
+            // Store field information for runtime constructor
+            let field_names: Vec<Symbol> = fields.iter().map(|f| f.name).collect();
+            self.resolutions.constructor_fields.insert(constructor_def_id, field_names);
+        }
+
+        Ok(())
     }
 
     /// Navigate up 'dots' levels in the module hierarchy

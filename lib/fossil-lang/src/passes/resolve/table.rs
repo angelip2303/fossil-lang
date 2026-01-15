@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use crate::ast::ast::{Ast, ExprId, StmtId, TypeId};
-use crate::context::DefId;
+use crate::context::{DefId, Symbol};
 use crate::passes::GlobalContext;
 
 /// Result of name resolution
@@ -24,4 +24,8 @@ pub struct ResolutionTable {
     pub function_params: HashMap<ExprId, Vec<DefId>>,
     /// Maps Let statement ID to the DefId it creates
     pub let_bindings: HashMap<StmtId, DefId>,
+    /// Maps record constructor DefId to the type DefId it constructs
+    pub record_constructors: HashMap<DefId, DefId>,
+    /// Maps record constructor DefId to its field names (in order)
+    pub constructor_fields: HashMap<DefId, Vec<Symbol>>,
 }

@@ -412,3 +412,72 @@ fn to_record_function_returns_nested_record() {
     // Now valid - nested records are supported
     assert!(result.is_ok());
 }
+
+#[test]
+fn type_annotation_mismatch_has_correct_loc() {
+    // Test that type annotation errors have correct source location
+    let src = r#"let y: int = "this is a string""#;
+
+    let compiler = Compiler::new();
+    let result = compiler.compile_with_diagnostics(src);
+
+    assert!(!result.errors.is_empty(), "Should have type error");
+
+    let err = &result.errors[0];
+    println!("Error: {}", err.message_with_interner(&result.gcx.interner));
+    println!("Loc: span {}..{}", err.loc.span.start, err.loc.span.end);
+
+    // The error should NOT be at position 0..0 (Loc::generated())
+    // It should be somewhere in the source (0..32 is the full source length)
+    assert!(
+        err.loc.span.start > 0 || err.loc.span.end > 0,
+        "Error location should not be 0..0, got {}..{}",
+        err.loc.span.start,
+        err.loc.span.end
+    );
+}
+
+#[test]
+fn type_annotation_mismatch_multiline_has_correct_loc() {
+    use fossil_lang::passes::parse::Parser;
+
+    // Test with multiline source (more realistic)
+    let src = r#"
+let x = 1
+let y: int = "this is a string"
+let z = 3
+"#;
+
+    // First, let's check the AST spans directly after parsing
+    let parsed = Parser::parse(src, 0).expect("Should parse");
+    println!("\n=== AST Statement Spans ===");
+    for (i, stmt_id) in parsed.ast.root.iter().enumerate() {
+        let stmt = parsed.ast.stmts.get(*stmt_id);
+        let slice = &src[stmt.loc.span.start..stmt.loc.span.end.min(src.len())];
+        println!("Stmt {}: span {}..{} = {:?}", i, stmt.loc.span.start, stmt.loc.span.end, slice);
+    }
+
+    let compiler = Compiler::new();
+    let result = compiler.compile_with_diagnostics(src);
+
+    assert!(!result.errors.is_empty(), "Should have type error");
+
+    let err = &result.errors[0];
+    println!("\n=== Error Info ===");
+    println!("Source:\n{}", src);
+    println!("Error: {}", err.message_with_interner(&result.gcx.interner));
+    println!("Loc: span {}..{}", err.loc.span.start, err.loc.span.end);
+
+    // Print the slice of source at the error location
+    let error_slice = &src[err.loc.span.start..err.loc.span.end.min(src.len())];
+    println!("Error slice: {:?}", error_slice);
+
+    // The error should be on line 2 (0-indexed), not line 0
+    // Line 0 is empty, line 1 is "let x = 1", line 2 is the error line
+    // The span should be > 10 (after the first line)
+    assert!(
+        err.loc.span.start > 10,
+        "Error should not be on the first line, span starts at {}",
+        err.loc.span.start
+    );
+}

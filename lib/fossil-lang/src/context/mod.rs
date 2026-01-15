@@ -277,6 +277,23 @@ impl Definitions {
     pub fn iter(&self) -> impl Iterator<Item = &Def> {
         self.items.iter()
     }
+
+    /// Update a function definition's implementation
+    ///
+    /// This is used to install runtime implementations for auto-generated functions
+    /// like record constructors.
+    ///
+    /// # Panics
+    /// Panics if the DefId is not a function or doesn't exist
+    pub fn update_function(&mut self, id: DefId, func: Option<Arc<dyn FunctionImpl>>) {
+        let def = &mut self.items[id.index() as usize];
+        match &mut def.kind {
+            DefKind::Func(impl_slot) => {
+                *impl_slot = func;
+            }
+            _ => panic!("Attempted to update non-function definition as function"),
+        }
+    }
 }
 
 /// Metadata about a module for tracking file-based organization

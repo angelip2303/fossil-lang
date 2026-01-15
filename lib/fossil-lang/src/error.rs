@@ -24,8 +24,38 @@ use ariadne::{Label, Report, ReportKind};
 
 use crate::{
     ast::{Loc, ast::Path, thir::TypeId},
-    context::Symbol,
+    context::{Interner, Symbol},
 };
+
+/// Format a Symbol using the interner to get the actual name
+fn format_symbol(sym: Symbol, interner: &Interner) -> String {
+    interner.resolve(sym).to_string()
+}
+
+/// Format a Path using the interner to get readable names
+fn format_path(path: &Path, interner: &Interner) -> String {
+    match path {
+        Path::Simple(sym) => interner.resolve(*sym).to_string(),
+        Path::Qualified(parts) => parts
+            .iter()
+            .map(|s| interner.resolve(*s))
+            .collect::<Vec<_>>()
+            .join("::"),
+        Path::Relative { dots, components } => {
+            let prefix = if *dots == 0 {
+                "./".to_string()
+            } else {
+                "../".repeat(*dots as usize)
+            };
+            let path_str = components
+                .iter()
+                .map(|s| interner.resolve(*s))
+                .collect::<Vec<_>>()
+                .join("::");
+            format!("{}{}", prefix, path_str)
+        }
+    }
+}
 
 /// A compilation error with location and optional context
 ///
@@ -33,6 +63,7 @@ use crate::{
 /// - The specific error kind
 /// - Source location information for reporting
 /// - Optional contextual message to help users
+/// - Actionable suggestions for fixing the error
 #[derive(Debug)]
 pub struct CompileError {
     /// The specific kind of error that occurred
@@ -41,6 +72,8 @@ pub struct CompileError {
     pub loc: Loc,
     /// Optional context message to help users understand the error
     pub context: Option<String>,
+    /// Suggestions for fixing the error
+    pub suggestions: Vec<ErrorSuggestion>,
 }
 
 /// Collection of compilation errors
@@ -109,6 +142,95 @@ impl Default for CompileErrors {
 impl From<CompileError> for CompileErrors {
     fn from(err: CompileError) -> Self {
         Self(vec![err])
+    }
+}
+
+/// Suggestion for fixing a compilation error
+///
+/// Provides actionable suggestions to help users fix errors, similar to
+/// Rust and Elm compiler error messages.
+#[derive(Debug, Clone)]
+pub enum ErrorSuggestion {
+    /// "Did you mean this similar name?"
+    ///
+    /// Suggests a name that's similar to the undefined/misspelled identifier.
+    /// The confidence score (0.0-1.0) indicates how likely this is the intended name.
+    DidYouMean {
+        wrong: String,
+        suggestion: String,
+        confidence: f32,
+    },
+
+    /// "Consider importing this module"
+    ///
+    /// Suggests importing a module that contains the referenced name.
+    ConsiderImporting {
+        module: String,
+        path: String, // e.g., "open Data.List"
+    },
+
+    /// "Add a type annotation"
+    ///
+    /// Suggests adding an explicit type annotation to help the type checker.
+    AddTypeAnnotation {
+        name: String,
+        suggested_type: String,
+    },
+
+    /// "Fix a common mistake"
+    ///
+    /// Suggests correcting a known common mistake or typo.
+    FixTypo {
+        wrong: String,
+        correct: String,
+        explanation: String,
+    },
+
+    /// General help text
+    ///
+    /// Provides general guidance for fixing the error.
+    Help(String),
+}
+
+impl ErrorSuggestion {
+    /// Format the suggestion as a human-readable string
+    pub fn format(&self) -> String {
+        match self {
+            Self::DidYouMean {
+                wrong,
+                suggestion,
+                confidence,
+            } => {
+                if *confidence > 0.8 {
+                    format!("Did you mean '{}'?", suggestion)
+                } else {
+                    format!(
+                        "Did you mean '{}' (similar to '{}')?",
+                        suggestion, wrong
+                    )
+                }
+            }
+            Self::ConsiderImporting { module, path } => {
+                format!("Consider importing: {}\n  hint: add `{}`", module, path)
+            }
+            Self::AddTypeAnnotation {
+                name,
+                suggested_type,
+            } => {
+                format!(
+                    "Add type annotation: let {}: {} = ...",
+                    name, suggested_type
+                )
+            }
+            Self::FixTypo {
+                wrong,
+                correct,
+                explanation,
+            } => {
+                format!("Replace '{}' with '{}': {}", wrong, correct, explanation)
+            }
+            Self::Help(msg) => msg.clone(),
+        }
     }
 }
 
@@ -193,6 +315,19 @@ pub enum CompileErrorKind {
 
     /// Runtime error with message string (avoids needing Symbol/Interner in runtime code)
     Runtime(String),
+
+    /// Internal compiler error - indicates a bug in the compiler itself
+    ///
+    /// These errors should never occur in correct compiler code.
+    /// If users encounter this error, they should file a bug report.
+    ///
+    /// # Fields
+    /// * `phase` - The compiler phase where the error occurred (e.g., "lowering", "type checking")
+    /// * `message` - Description of what went wrong
+    InternalCompilerError {
+        phase: &'static str,
+        message: String,
+    },
 }
 
 /// A type variable used in error messages
@@ -226,7 +361,26 @@ impl CompileError {
             kind,
             loc,
             context: None,
+            suggestions: Vec::new(),
         }
+    }
+
+    /// Add a suggestion to this error
+    ///
+    /// Suggestions help users fix errors by providing actionable advice.
+    /// Multiple suggestions can be added to a single error.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// error.with_suggestion(ErrorSuggestion::DidYouMean {
+    ///     wrong: "lenght".to_string(),
+    ///     suggestion: "length".to_string(),
+    ///     confidence: 0.9,
+    /// })
+    /// ```
+    pub fn with_suggestion(mut self, suggestion: ErrorSuggestion) -> Self {
+        self.suggestions.push(suggestion);
+        self
     }
 
     /// Add contextual information to this error
@@ -243,9 +397,39 @@ impl CompileError {
         self
     }
 
-    /// Get a human-readable error message
+    /// Create an internal compiler error
+    ///
+    /// This is a convenience method for creating InternalCompilerError instances.
+    /// These errors indicate bugs in the compiler itself, not user code errors.
+    ///
+    /// # Arguments
+    /// * `phase` - The compiler phase where the error occurred (e.g., "lowering", "type checking")
+    /// * `message` - Description of what went wrong
+    /// * `loc` - Source location (often Loc::generated() for internal errors)
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// CompileError::internal(
+    ///     "lowering",
+    ///     "Let binding missing DefId after name resolution",
+    ///     loc
+    /// )
+    /// ```
+    pub fn internal(phase: &'static str, message: impl Into<String>, loc: Loc) -> Self {
+        Self::new(
+            CompileErrorKind::InternalCompilerError {
+                phase,
+                message: message.into(),
+            },
+            loc,
+        )
+    }
+
+    /// Get a human-readable error message (uses debug formatting for symbols)
     ///
     /// Returns a user-friendly description of the error based on its kind.
+    /// Note: This method uses debug formatting for symbols. For proper symbol resolution,
+    /// use `message_with_interner` instead.
     pub fn message(&self) -> String {
         use CompileErrorKind::*;
         match &self.kind {
@@ -271,6 +455,80 @@ impl CompileError {
             InvalidRecordField(field, _) => format!("Invalid record field '{:?}'", field),
             ProviderError(_) => "Provider error".to_string(),
             Runtime(msg) => msg.clone(),
+            InternalCompilerError { phase, message } => {
+                format!("Internal compiler error in {}: {}", phase, message)
+            }
+        }
+    }
+
+    /// Get a human-readable error message with proper symbol resolution
+    ///
+    /// Returns a user-friendly description of the error with symbols resolved
+    /// to their actual names using the provided interner.
+    pub fn message_with_interner(&self, interner: &Interner) -> String {
+        use CompileErrorKind::*;
+
+        // For errors with context, prefer the context as it contains pre-formatted details
+        match &self.kind {
+            Parse(msg) => format!("Parse error: {}", format_symbol(*msg, interner)),
+            TypeMismatch { .. } => {
+                // Context contains the formatted type names from the type checker
+                if let Some(ctx) = &self.context {
+                    ctx.clone()
+                } else {
+                    "Type mismatch".to_string()
+                }
+            }
+            UndefinedVariable { name } => {
+                format!("Undefined variable '{}'", format_symbol(*name, interner))
+            }
+            UndefinedPath { path } => {
+                format!("Undefined path '{}'", format_path(path, interner))
+            }
+            ArityMismatch { expected, actual } => {
+                format!("Arity mismatch: expected {} arguments, got {}", expected, actual)
+            }
+            AlreadyDefined(name) => {
+                format!("Name '{}' is already defined", format_symbol(*name, interner))
+            }
+            UndefinedType(path) => {
+                format!("Undefined type '{}'", format_path(path, interner))
+            }
+            UndefinedModule(path) => {
+                format!("Undefined module '{}'", format_path(path, interner))
+            }
+            UndefinedProvider(path) => {
+                format!("Undefined provider '{}'", format_path(path, interner))
+            }
+            NotAModule(path) => {
+                format!("'{}' is not a module or provider", format_path(path, interner))
+            }
+            NotAFunction(name) => {
+                format!("'{}' is not a function", format_symbol(*name, interner))
+            }
+            NotAProvider(path) => {
+                format!("'{}' is not a provider", format_path(path, interner))
+            }
+            InvalidBinding => "Invalid binding".to_string(),
+            RecordSizeMismatch => "Record size mismatch".to_string(),
+            RecordFieldMismatch => "Record field mismatch".to_string(),
+            InfiniteType(var) => format!("Infinite type detected: {}", var),
+            InvalidListElement(_) => "Invalid list element type".to_string(),
+            InvalidRecordField(field, _) => {
+                format!("Invalid record field '{}'", format_symbol(*field, interner))
+            }
+            ProviderError(_) => {
+                // Context contains the actual provider error message
+                if let Some(ctx) = &self.context {
+                    ctx.clone()
+                } else {
+                    "Provider error".to_string()
+                }
+            }
+            Runtime(msg) => msg.clone(),
+            InternalCompilerError { phase, message } => {
+                format!("Internal compiler error in {}: {}", phase, message)
+            }
         }
     }
 
@@ -294,6 +552,42 @@ impl CompileError {
         }
 
         report = report.with_label(label);
+
+        // Add suggestions as notes
+        for suggestion in &self.suggestions {
+            report = report.with_note(suggestion.format());
+        }
+
+        // Add help text based on error kind
+        match &self.kind {
+            CompileErrorKind::UndefinedVariable { .. } => {
+                if self.suggestions.is_empty() {
+                    report = report.with_help(
+                        "Variables must be defined before use. Check spelling and scope."
+                    );
+                }
+            }
+            CompileErrorKind::TypeMismatch { .. } => {
+                if self.suggestions.is_empty() {
+                    report = report.with_help(
+                        "Type mismatches can be fixed with explicit type annotations."
+                    );
+                }
+            }
+            CompileErrorKind::ArityMismatch { .. } => {
+                report = report.with_help(
+                    "Check the function definition to see the expected number of arguments."
+                );
+            }
+            CompileErrorKind::InternalCompilerError { phase, .. } => {
+                report = report.with_help(format!(
+                    "This is a bug in the {} phase of the compiler. Please file a bug report.",
+                    phase
+                ));
+            }
+            _ => {}
+        }
+
         report.finish()
     }
 }
@@ -325,5 +619,132 @@ impl From<std::io::Error> for CompileError {
             crate::ast::Loc::generated(),
         )
         .with_context(format!("IO error: {}", err))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_with_suggestion() {
+        let error = CompileError::new(
+            CompileErrorKind::UndefinedVariable {
+                name: Symbol::synthetic(),
+            },
+            Loc::generated(),
+        )
+        .with_suggestion(ErrorSuggestion::DidYouMean {
+            wrong: "lenght".to_string(),
+            suggestion: "length".to_string(),
+            confidence: 0.9,
+        });
+
+        assert_eq!(error.suggestions.len(), 1);
+    }
+
+    #[test]
+    fn test_error_with_multiple_suggestions() {
+        let error = CompileError::new(
+            CompileErrorKind::UndefinedVariable {
+                name: Symbol::synthetic(),
+            },
+            Loc::generated(),
+        )
+        .with_suggestion(ErrorSuggestion::DidYouMean {
+            wrong: "lenght".to_string(),
+            suggestion: "length".to_string(),
+            confidence: 0.9,
+        })
+        .with_suggestion(ErrorSuggestion::Help(
+            "Check variable names in current scope".to_string(),
+        ));
+
+        assert_eq!(error.suggestions.len(), 2);
+    }
+
+    #[test]
+    fn test_suggestion_format_high_confidence() {
+        let suggestion = ErrorSuggestion::DidYouMean {
+            wrong: "lenght".to_string(),
+            suggestion: "length".to_string(),
+            confidence: 0.9,
+        };
+
+        let formatted = suggestion.format();
+        assert_eq!(formatted, "Did you mean 'length'?");
+    }
+
+    #[test]
+    fn test_suggestion_format_low_confidence() {
+        let suggestion = ErrorSuggestion::DidYouMean {
+            wrong: "foo".to_string(),
+            suggestion: "bar".to_string(),
+            confidence: 0.5,
+        };
+
+        let formatted = suggestion.format();
+        assert!(formatted.contains("Did you mean 'bar'"));
+        assert!(formatted.contains("similar to 'foo'"));
+    }
+
+    #[test]
+    fn test_compile_errors_accumulation() {
+        let mut errors = CompileErrors::new();
+        assert!(errors.is_empty());
+
+        errors.push(CompileError::new(
+            CompileErrorKind::UndefinedVariable {
+                name: Symbol::synthetic(),
+            },
+            Loc::generated(),
+        ));
+
+        errors.push(CompileError::new(
+            CompileErrorKind::Parse(Symbol::synthetic()),
+            Loc::generated(),
+        ));
+
+        assert!(!errors.is_empty());
+        assert_eq!(errors.0.len(), 2);
+    }
+
+    #[test]
+    fn test_compile_errors_into_result_ok() {
+        let errors = CompileErrors::new();
+        let result = errors.into_result(42);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn test_compile_errors_into_result_err() {
+        let mut errors = CompileErrors::new();
+        errors.push(CompileError::new(
+            CompileErrorKind::UndefinedVariable {
+                name: Symbol::synthetic(),
+            },
+            Loc::generated(),
+        ));
+
+        let result: Result<i32, CompileErrors> = errors.into_result(42);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_internal_compiler_error_helper() {
+        let error = CompileError::internal(
+            "type_checking",
+            "Unexpected None value",
+            Loc::generated(),
+        );
+
+        match error.kind {
+            CompileErrorKind::InternalCompilerError { phase, message } => {
+                assert_eq!(phase, "type_checking");
+                assert_eq!(message, "Unexpected None value");
+            }
+            _ => panic!("Expected InternalCompilerError variant"),
+        }
     }
 }

@@ -67,15 +67,17 @@ fn parse_stmt_impl<'a, I>(
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
+    // Use .then() instead of .ignore_then() to preserve full span
     let import_stmt = just(Token::Open)
-        .ignore_then(parse_path(ctx))
+        .then(parse_path(ctx))
         .then(just(Token::As).ignore_then(parse_symbol(ctx)).or_not())
-        .map_with(|(module, alias), e| {
+        .map_with(|((_, module), alias), e| {
             ctx.alloc_stmt(StmtKind::Import { module, alias }, ctx.to_loc(e.span()))
         });
 
+    // Use .then() instead of .ignore_then() to preserve full span
     let let_stmt = just(Token::Let)
-        .ignore_then(parse_symbol(ctx))
+        .then(parse_symbol(ctx))
         .then(
             just(Token::Colon)
                 .ignore_then(parse_type(ctx))
@@ -83,15 +85,16 @@ where
         )
         .then_ignore(just(Token::Eq))
         .then(expr.clone())
-        .map_with(|((name, ty), value), e| {
+        .map_with(|(((_, name), ty), value), e| {
             ctx.alloc_stmt(StmtKind::Let { name, ty, value }, ctx.to_loc(e.span()))
         });
 
+    // Use .then() instead of .ignore_then() to preserve full span
     let type_stmt = just(Token::Type)
-        .ignore_then(parse_symbol(ctx))
+        .then(parse_symbol(ctx))
         .then_ignore(just(Token::Eq))
         .then(parse_type(ctx))
-        .map_with(|(name, ty), e| {
+        .map_with(|((_, name), ty), e| {
             ctx.alloc_stmt(StmtKind::Type { name, ty }, ctx.to_loc(e.span()))
         });
 

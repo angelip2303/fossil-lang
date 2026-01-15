@@ -5,4 +5,5 @@ pub mod error;
 pub mod parser;
 pub mod passes;
 pub mod runtime;
+pub mod suggestions;
 pub mod traits;

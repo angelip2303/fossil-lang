@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use crate::error::CompileError;
 use crate::passes::{
+    GlobalContext,
     ThirProgram,
     ImportResolver,
     ModuleLoader,
@@ -16,6 +17,48 @@ use crate::passes::{
     lower::HirLowering,
     typecheck::TypeChecker,
 };
+
+/// Result of compilation with access to the GlobalContext
+///
+/// This struct provides both the compilation result (success or errors)
+/// and access to the GlobalContext, which contains the interner needed
+/// for formatting error messages with resolved symbol names.
+///
+/// # Example
+/// ```rust,ignore
+/// let compiler = Compiler::new();
+/// let result = compiler.compile_with_context(input);
+///
+/// if let Some(ref program) = result.program {
+///     // Use the compiled program
+/// }
+///
+/// for error in &result.errors {
+///     // Format errors with proper symbol names
+///     let message = error.message_with_interner(&result.gcx.interner);
+///     println!("{}", message);
+/// }
+/// ```
+pub struct CompilationResult {
+    /// The compiled program (if compilation succeeded)
+    pub program: Option<ThirProgram>,
+    /// Compilation errors (empty if successful)
+    pub errors: Vec<CompileError>,
+    /// The GlobalContext containing the interner for symbol resolution
+    pub gcx: GlobalContext,
+}
+
+impl CompilationResult {
+    /// Check if compilation was successful
+    pub fn is_ok(&self) -> bool {
+        self.errors.is_empty() && self.program.is_some()
+    }
+
+    /// Check if compilation failed
+    pub fn is_err(&self) -> bool {
+        !self.errors.is_empty()
+    }
+}
 
 /// Compiler input options
 ///
@@ -276,6 +319,124 @@ impl Compiler {
             })?;
 
         Ok(thir)
+    }
+
+    /// Compile source string and return result with GlobalContext
+    ///
+    /// This method is designed for IDE/LSP integration where you need access
+    /// to the GlobalContext (and its interner) even when compilation fails,
+    /// in order to format error messages with proper symbol names.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let compiler = Compiler::new();
+    /// let result = compiler.compile_with_diagnostics(src);
+    ///
+    /// for error in &result.errors {
+    ///     let message = error.message_with_interner(&result.gcx.interner);
+    ///     println!("{}", message);
+    /// }
+    /// ```
+    pub fn compile_with_diagnostics(&self, src: &str) -> CompilationResult {
+        // Phase 1: Parse source -> AST
+        let parsed = if let Some(ref custom_gcx) = self.gcx {
+            match Parser::parse_with_context(src, self.source_id, custom_gcx.clone()) {
+                Ok(p) => p,
+                Err(errors) => {
+                    return CompilationResult {
+                        program: None,
+                        errors: errors.0,
+                        gcx: custom_gcx.clone(),
+                    };
+                }
+            }
+        } else {
+            match Parser::parse(src, self.source_id) {
+                Ok(p) => p,
+                Err(errors) => {
+                    return CompilationResult {
+                        program: None,
+                        errors: errors.0,
+                        gcx: GlobalContext::default(),
+                    };
+                }
+            }
+        };
+
+        let gcx_after_parse = parsed.gcx.clone();
+
+        // Phase 2: Import Resolution
+        let (ast, gcx) = match ImportResolver::new(parsed.ast, parsed.gcx).resolve() {
+            Ok(result) => result,
+            Err(errors) => {
+                return CompilationResult {
+                    program: None,
+                    errors: errors.0,
+                    gcx: gcx_after_parse,
+                };
+            }
+        };
+
+        // Phase 3: Expand type providers
+        let expanded = match ProviderExpander::new((ast, gcx)).expand() {
+            Ok(result) => result,
+            Err(errors) => {
+                return CompilationResult {
+                    program: None,
+                    errors: errors.0,
+                    gcx: gcx_after_parse,
+                };
+            }
+        };
+
+        let gcx_after_expand = expanded.1.clone();
+
+        // Phase 4: Name Resolution
+        let resolved = match NameResolver::new(expanded.0, expanded.1).resolve() {
+            Ok(result) => result,
+            Err(errors) => {
+                return CompilationResult {
+                    program: None,
+                    errors: errors.0,
+                    gcx: gcx_after_expand,
+                };
+            }
+        };
+
+        let gcx_after_resolve = resolved.gcx.clone();
+
+        // Phase 5: Lower AST -> HIR
+        let hir = match HirLowering::new(resolved).lower() {
+            Ok(result) => result,
+            Err(errors) => {
+                return CompilationResult {
+                    program: None,
+                    errors: errors.0,
+                    gcx: gcx_after_resolve,
+                };
+            }
+        };
+
+        let gcx_after_lower = hir.gcx.clone();
+
+        // Phase 6: Type Check HIR -> THIR
+        match TypeChecker::new(hir).check() {
+            Ok(thir) => {
+                let gcx = thir.gcx.clone();
+                CompilationResult {
+                    program: Some(thir),
+                    errors: Vec::new(),
+                    gcx,
+                }
+            }
+            Err(errors) => {
+                CompilationResult {
+                    program: None,
+                    errors: errors.0,
+                    gcx: gcx_after_lower,
+                }
+            }
+        }
     }
 }
 

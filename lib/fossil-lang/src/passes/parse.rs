@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use chumsky::prelude::*;
+use chumsky::input::IterInput;
 use chumsky::Parser as ChumskyParser;
 use logos::Logos;
 
@@ -23,14 +24,18 @@ impl Parser {
         mut gcx: GlobalContext,
     ) -> Result<ParsedProgram, CompileErrors> {
 
-        // Tokenize with Logos - collect tokens into a vec for Stream
+        // Tokenize with Logos - collect tokens WITH their original byte spans
         let lexer = Token::lexer(src);
-        let tokens: Vec<Token> = lexer
-            .map(|token_result| {
-                match token_result {
+        let len = src.len();
+        let tokens: Vec<(Token, SimpleSpan)> = lexer
+            .spanned()
+            .map(|(token_result, span)| {
+                let token = match token_result {
                     Ok(t) => t,
                     Err(_) => Token::Let, // placeholder for errors
-                }
+                };
+                // Convert std::ops::Range to chumsky::span::SimpleSpan
+                (token, SimpleSpan::from(span))
             })
             .collect();
 
@@ -49,11 +54,12 @@ impl Parser {
         let ctx_for_parser = ctx.clone();
         let parser = parse_stmt(&ctx_for_parser).repeated().collect::<Vec<_>>();
 
-        // Create Chumsky stream from tokens
-        // Stream::from_iter() automatically handles span tracking with SimpleSpan
-        let stream = chumsky::input::Stream::from_iter(tokens);
+        // Create input with proper byte spans from tokens
+        // Using IterInput which preserves the original source positions from the lexer
+        let eoi = SimpleSpan::from(len..len);
+        let input = IterInput::new(tokens.into_iter(), eoi);
 
-        match parser.parse(stream).into_result() {
+        match parser.parse(input).into_result() {
             Ok(root_stmts) => {
                 // Extract AST and interner from Rc<RefCell<>>
                 // We can't unwrap the Rc due to borrow checker limitations,

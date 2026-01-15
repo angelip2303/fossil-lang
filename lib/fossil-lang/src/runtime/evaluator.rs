@@ -10,7 +10,7 @@ use polars::prelude::*;
 
 use crate::ast::Loc;
 use crate::ast::thir::{ExprId, ExprKind, StmtId, TypedHir};
-use crate::context::Symbol;
+use crate::context::{DefId, Symbol};
 use crate::error::RuntimeError;
 use crate::passes::GlobalContext;
 use crate::runtime::value::Value;
@@ -18,6 +18,79 @@ use crate::traits::function::RuntimeContext;
 
 // Re-export Environment for convenience
 pub use crate::runtime::value::Environment as ThirEnvironment;
+
+/// Maximum call stack depth to prevent stack overflow
+const MAX_CALL_DEPTH: usize = 1000;
+
+/// Stack frame representing a function call
+#[derive(Debug, Clone)]
+pub struct StackFrame {
+    pub function_name: String,
+    pub call_site: Loc,
+    pub def_id: Option<DefId>,
+}
+
+/// Call stack for tracking function execution
+#[derive(Debug, Clone, Default)]
+pub struct CallStack {
+    frames: Vec<StackFrame>,
+}
+
+impl CallStack {
+    /// Create a new empty call stack
+    pub fn new() -> Self {
+        Self {
+            frames: Vec::new(),
+        }
+    }
+
+    /// Push a new stack frame
+    pub fn push(&mut self, frame: StackFrame) {
+        self.frames.push(frame);
+    }
+
+    /// Pop the topmost stack frame
+    pub fn pop(&mut self) -> Option<StackFrame> {
+        self.frames.pop()
+    }
+
+    /// Get all frames (most recent last)
+    pub fn frames(&self) -> &[StackFrame] {
+        &self.frames
+    }
+
+    /// Check if the stack is empty
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    /// Get current depth
+    pub fn depth(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Format call stack for error messages
+    pub fn format(&self, _interner: &crate::context::Interner) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+
+        let mut output = String::from("Call stack (most recent call last):\n");
+
+        for (i, frame) in self.frames.iter().enumerate() {
+            output.push_str(&format!(
+                "  #{}: {} at source {} ({}..{})\n",
+                i,
+                frame.function_name,
+                frame.call_site.source,
+                frame.call_site.span.start,
+                frame.call_site.span.end
+            ));
+        }
+
+        output
+    }
+}
 
 /// THIR Expression Evaluator
 ///
@@ -32,12 +105,20 @@ pub struct ThirEvaluator<'a> {
 
     /// Current environment for variable bindings
     env: ThirEnvironment,
+
+    /// Call stack for error reporting and recursion tracking
+    call_stack: CallStack,
 }
 
 impl<'a> ThirEvaluator<'a> {
     /// Create a new evaluator with the given context and environment
     pub fn new(thir: &'a TypedHir, gcx: &'a GlobalContext, env: ThirEnvironment) -> Self {
-        Self { thir, gcx, env }
+        Self {
+            thir,
+            gcx,
+            env,
+            call_stack: CallStack::new(),
+        }
     }
 
     /// Evaluate an expression and return its value
@@ -210,8 +291,25 @@ impl<'a> ThirEvaluator<'a> {
         }
     }
 
+    /// Check if we've exceeded the maximum recursion depth
+    fn check_recursion_depth(&self) -> Result<(), RuntimeError> {
+        if self.call_stack.depth() >= MAX_CALL_DEPTH {
+            Err(self.make_error_with_stack(format!(
+                "Stack overflow: maximum recursion depth ({}) exceeded",
+                MAX_CALL_DEPTH
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Evaluate a function application
     fn eval_application(&mut self, callee: ExprId, args: &[ExprId]) -> Result<Value, RuntimeError> {
+        // Check recursion depth before proceeding
+        self.check_recursion_depth()?;
+
+        let callee_expr = self.thir.exprs.get(callee);
+        let callee_loc = callee_expr.loc.clone();
         let callee_val = self.eval(callee)?;
 
         // Evaluate arguments
@@ -222,6 +320,25 @@ impl<'a> ThirEvaluator<'a> {
 
         match callee_val {
             Value::Closure { params, body, env } => {
+                // Get function name for stack trace
+                let function_name = if let ExprKind::Identifier(def_id) = callee_expr.kind {
+                    let def = self.gcx.definitions.get(def_id);
+                    self.gcx.interner.resolve(def.name).to_string()
+                } else {
+                    "<anonymous>".to_string()
+                };
+
+                // Push stack frame
+                self.call_stack.push(StackFrame {
+                    function_name,
+                    call_site: callee_loc,
+                    def_id: if let ExprKind::Identifier(def_id) = callee_expr.kind {
+                        Some(def_id)
+                    } else {
+                        None
+                    },
+                });
+
                 // Execute closure with new environment
                 let mut closure_env = (*env).clone();
 
@@ -232,13 +349,27 @@ impl<'a> ThirEvaluator<'a> {
 
                 // Evaluate body with closure environment
                 let saved_env = std::mem::replace(&mut self.env, closure_env);
-                let result = self.eval(body)?;
+                let result = self.eval(body);
                 self.env = saved_env;
 
-                Ok(result)
+                // Pop stack frame
+                self.call_stack.pop();
+
+                result
             }
 
-            Value::BuiltinFunction(_def_id, func) => {
+            Value::BuiltinFunction(def_id, func) => {
+                // Get function name for stack trace
+                let def = self.gcx.definitions.get(def_id);
+                let function_name = self.gcx.interner.resolve(def.name).to_string();
+
+                // Push stack frame for builtin
+                self.call_stack.push(StackFrame {
+                    function_name,
+                    call_site: callee_loc,
+                    def_id: Some(def_id),
+                });
+
                 // Call builtin function with type context
                 let mut ctx = RuntimeContext::new(self.gcx, self.thir);
 
@@ -254,7 +385,12 @@ impl<'a> ThirEvaluator<'a> {
                     }
                 }
 
-                func.call(arg_values, &ctx)
+                let result = func.call(arg_values, &ctx);
+
+                // Pop stack frame
+                self.call_stack.pop();
+
+                result
             }
 
             _ => Err(self.make_error("Attempt to call non-function value")),
@@ -351,8 +487,24 @@ impl<'a> ThirEvaluator<'a> {
 
     /// Helper to create runtime errors
     fn make_error(&self, msg: impl Into<String>) -> RuntimeError {
+        self.make_error_with_stack(msg)
+    }
+
+    /// Create a runtime error with the current call stack
+    fn make_error_with_stack(&self, msg: impl Into<String>) -> RuntimeError {
         use crate::error::{CompileError, CompileErrorKind};
-        CompileError::new(CompileErrorKind::Runtime(msg.into()), Loc::generated())
+
+        let mut error = CompileError::new(
+            CompileErrorKind::Runtime(msg.into()),
+            Loc::generated(),
+        );
+
+        // Add call stack if not empty
+        if !self.call_stack.is_empty() {
+            error = error.with_context(self.call_stack.format(&self.gcx.interner));
+        }
+
+        error
     }
 }
 
@@ -411,5 +563,111 @@ mod tests {
         let mut eval = ThirEvaluator::new(&thir_mut, &gcx, env);
         let result = eval.eval(expr_id).unwrap();
         assert!(matches!(result, Value::Int(100)));
+    }
+
+    #[test]
+    fn test_call_stack_operations() {
+        let mut stack = CallStack::new();
+        assert!(stack.is_empty());
+        assert_eq!(stack.depth(), 0);
+
+        stack.push(StackFrame {
+            function_name: "foo".to_string(),
+            call_site: Loc::generated(),
+            def_id: None,
+        });
+
+        assert!(!stack.is_empty());
+        assert_eq!(stack.depth(), 1);
+
+        stack.push(StackFrame {
+            function_name: "bar".to_string(),
+            call_site: Loc::generated(),
+            def_id: None,
+        });
+
+        assert_eq!(stack.depth(), 2);
+
+        let frame = stack.pop();
+        assert!(frame.is_some());
+        assert_eq!(frame.unwrap().function_name, "bar");
+        assert_eq!(stack.depth(), 1);
+    }
+
+    #[test]
+    fn test_call_stack_format() {
+        let mut stack = CallStack::new();
+        let gcx = GlobalContext::new();
+
+        stack.push(StackFrame {
+            function_name: "main".to_string(),
+            call_site: Loc::generated(),
+            def_id: None,
+        });
+
+        stack.push(StackFrame {
+            function_name: "helper".to_string(),
+            call_site: Loc::generated(),
+            def_id: None,
+        });
+
+        let formatted = stack.format(&gcx.interner);
+        assert!(formatted.contains("Call stack"));
+        assert!(formatted.contains("main"));
+        assert!(formatted.contains("helper"));
+    }
+
+    #[test]
+    fn test_recursion_depth_check() {
+        let gcx = GlobalContext::new();
+        let thir = TypedHir::default();
+        let env = ThirEnvironment::new();
+        let mut eval = ThirEvaluator::new(&thir, &gcx, env);
+
+        // Manually fill stack to near limit
+        for i in 0..MAX_CALL_DEPTH {
+            eval.call_stack.push(StackFrame {
+                function_name: format!("func_{}", i),
+                call_site: Loc::generated(),
+                def_id: None,
+            });
+        }
+
+        // Should fail recursion check
+        let result = eval.check_recursion_depth();
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.message().contains("Stack overflow"));
+        assert!(error.message().contains("maximum recursion depth"));
+    }
+
+    #[test]
+    fn test_make_error_with_stack() {
+        let gcx = GlobalContext::new();
+        let thir = TypedHir::default();
+        let env = ThirEnvironment::new();
+        let mut eval = ThirEvaluator::new(&thir, &gcx, env);
+
+        // Add some stack frames
+        eval.call_stack.push(StackFrame {
+            function_name: "outer".to_string(),
+            call_site: Loc::generated(),
+            def_id: None,
+        });
+
+        eval.call_stack.push(StackFrame {
+            function_name: "inner".to_string(),
+            call_site: Loc::generated(),
+            def_id: None,
+        });
+
+        let error = eval.make_error("Test error");
+        assert!(error.context.is_some());
+
+        let context = error.context.as_ref().unwrap();
+        assert!(context.contains("Call stack"));
+        assert!(context.contains("outer"));
+        assert!(context.contains("inner"));
     }
 }

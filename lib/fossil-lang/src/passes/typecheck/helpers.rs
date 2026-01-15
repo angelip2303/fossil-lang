@@ -41,7 +41,8 @@ impl TypeChecker {
     /// `App { ctor: List, args: [elem_ty] }`
     pub fn list_type(&mut self, elem_ty: thir::TypeId, loc: Loc) -> thir::TypeId {
         let list_ctor = self.gcx.list_type_ctor
-            .expect("List type constructor should be registered in GlobalContext");
+            .expect("SAFETY: List type constructor is registered in GlobalContext::new() as a builtin type. \
+                     It is guaranteed to be present in all GlobalContext instances.");
 
         self.target.types.alloc(thir::Type {
             loc,
@@ -71,5 +72,57 @@ impl TypeChecker {
             loc,
             kind: thir::TypeKind::Function(params, ret),
         })
+    }
+
+    /// Format a type in a human-readable way for error messages
+    pub fn format_type(&self, ty_id: thir::TypeId) -> String {
+        let ty = self.target.types.get(ty_id);
+        match &ty.kind {
+            thir::TypeKind::Primitive(p) => format!("{:?}", p),
+            thir::TypeKind::Var(v) => format!("'{}", v.0),
+            thir::TypeKind::Named(def_id) => {
+                let def = self.gcx.definitions.get(*def_id);
+                self.gcx.interner.resolve(def.name).to_string()
+            }
+            thir::TypeKind::App { ctor, args } => {
+                let ctor_def = self.gcx.definitions.get(*ctor);
+                let ctor_name = self.gcx.interner.resolve(ctor_def.name);
+                if args.is_empty() {
+                    ctor_name.to_string()
+                } else {
+                    let arg_strs: Vec<_> = args.iter()
+                        .map(|arg| self.format_type(*arg))
+                        .collect();
+                    format!("{}<{}>", ctor_name, arg_strs.join(", "))
+                }
+            }
+            thir::TypeKind::Function(params, ret) => {
+                let param_strs: Vec<_> = params.iter()
+                    .map(|p| self.format_type(*p))
+                    .collect();
+                format!("fn({}) -> {}", param_strs.join(", "), self.format_type(*ret))
+            }
+            thir::TypeKind::Record(row) => {
+                format!("{{{}}}", self.format_row(row))
+            }
+        }
+    }
+
+    /// Format a record row for error messages
+    fn format_row(&self, row: &thir::RecordRow) -> String {
+        match row {
+            thir::RecordRow::Empty => String::new(),
+            thir::RecordRow::Var(v) => format!("...'r{}", v.0),
+            thir::RecordRow::Extend { field, ty, rest } => {
+                let field_name = self.gcx.interner.resolve(*field);
+                let ty_str = self.format_type(*ty);
+                let rest_str = self.format_row(rest);
+                if rest_str.is_empty() {
+                    format!("{}: {}", field_name, ty_str)
+                } else {
+                    format!("{}: {}, {}", field_name, ty_str, rest_str)
+                }
+            }
+        }
     }
 }

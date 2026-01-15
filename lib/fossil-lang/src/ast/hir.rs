@@ -40,8 +40,14 @@ pub struct Stmt {
 pub enum StmtKind {
     /// An import declaration `open Module as alias`
     Import { module: Path, alias: Symbol },
-    /// A value binding `let name = expr`
-    Let { name: Symbol, def_id: DefId, value: ExprId },
+    /// A value binding `let name: ty = expr` with optional type annotation
+    Let {
+        name: Symbol,
+        def_id: DefId,
+        /// Optional type annotation (e.g., `let x: int = ...`)
+        ty: Option<TypeId>,
+        value: ExprId,
+    },
     /// A type definition `type name = type`
     Type { name: Symbol, ty: TypeId },
     /// An expression declaration `expr`

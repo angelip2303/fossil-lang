@@ -6,6 +6,7 @@ use crate::ast::thir;
 use crate::ast::*;
 use crate::context::{DefId, Definitions, Interner, Kind, TypeConstructorInfo, TypeMetadata};
 use crate::passes::resolve::scope::Scope;
+use crate::passes::resolve::table::ResolutionTable;
 use crate::traits::function::FunctionImpl;
 
 pub mod expand;
@@ -557,6 +558,7 @@ pub struct ParsedProgram {
 pub struct HirProgram {
     pub hir: hir::Hir,
     pub gcx: GlobalContext,
+    pub resolutions: ResolutionTable,
 }
 
 pub struct ThirProgram {

@@ -3,7 +3,12 @@ members = [
     "cli",
     "lib/fossil-lang",
     "lib/fossil-providers",
-    "lib/fossil-stdlib"
+    "lib/fossil-stdlib",
+    "editors/fossil-lsp",
+    "editors/zed-fossil"
+]
+exclude = [
+    "editors/tree-sitter-fossil"
 ]
 resolver = "2"
 

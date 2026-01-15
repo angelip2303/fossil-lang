@@ -47,6 +47,7 @@ impl HirLowering {
         Ok(HirProgram {
             hir: self.hir,
             gcx: self.resolved.gcx,
+            resolutions: self.resolved.resolutions,
         })
     }
 
@@ -63,10 +64,12 @@ impl HirLowering {
                     ast::Path::Simple(name) => *name,
                     ast::Path::Qualified(parts) => *parts
                         .last()
-                        .expect("BUG: Qualified path with zero parts"),
+                        .expect("SAFETY: Qualified paths are validated to be non-empty during parsing. \
+                                 A Qualified path with zero parts cannot be constructed."),
                     ast::Path::Relative { components, .. } => *components
                         .last()
-                        .expect("BUG: Relative path with zero components"),
+                        .expect("SAFETY: Relative paths are validated to have at least one component during parsing. \
+                                 A Relative path with zero components cannot be constructed."),
                 });
                 hir::StmtKind::Import {
                     module: module.clone(),
@@ -74,9 +77,15 @@ impl HirLowering {
                 }
             }
 
-            ast::StmtKind::Let { name, ty: _, value } => {
-                // Type annotation is ignored during lowering; type checking handles it
+            ast::StmtKind::Let { name, ty, value } => {
                 let hir_value = self.lower_expr(*value)?;
+
+                // Lower the type annotation if present
+                let hir_ty = if let Some(ty_id) = ty {
+                    Some(self.lower_type(*ty_id)?)
+                } else {
+                    None
+                };
 
                 // Get the DefId for this let binding from resolution table using StmtId
                 let def_id = *self
@@ -84,11 +93,13 @@ impl HirLowering {
                     .resolutions
                     .let_bindings
                     .get(&stmt_id)
-                    .expect("Let binding should have DefId from name resolution");
+                    .expect("SAFETY: Name resolution pass must run before lowering and populate let_bindings table. \
+                             All Let statements are guaranteed to have a DefId entry after name resolution completes successfully.");
 
                 hir::StmtKind::Let {
                     name: *name,
                     def_id,
+                    ty: hir_ty,
                     value: hir_value,
                 }
             }
@@ -129,7 +140,8 @@ impl HirLowering {
                     .exprs
                     .get(&expr_id)
                     .copied()
-                    .expect("Name resolution should have resolved this identifier");
+                    .expect("SAFETY: Name resolution pass must run before lowering and populate exprs table. \
+                             All Identifier expressions are guaranteed to have a DefId entry after name resolution completes successfully.");
 
                 hir::ExprKind::Identifier(def_id)
             }
@@ -159,7 +171,8 @@ impl HirLowering {
                     .resolutions
                     .function_params
                     .get(&expr_id)
-                    .expect("Function should have parameter DefIds from resolve pass");
+                    .expect("SAFETY: Name resolution pass must run before lowering and populate function_params table. \
+                             All Function expressions are guaranteed to have parameter DefId entries after name resolution completes successfully.");
 
                 // Create HIR params with DefIds
                 let hir_params: Vec<_> = params
@@ -272,7 +285,8 @@ impl HirLowering {
                     .types
                     .get(&type_id)
                     .copied()
-                    .expect("Name resolution should have resolved this type");
+                    .expect("SAFETY: Name resolution pass must run before lowering and populate types table. \
+                             All Named type references are guaranteed to have a DefId entry after name resolution completes successfully.");
 
                 hir::TypeKind::Named(def_id)
             }
@@ -304,7 +318,8 @@ impl HirLowering {
 
                 // Convert List<T> to App { ctor: List, args: [T] }
                 let list_ctor = self.resolved.gcx.list_type_ctor
-                    .expect("List type constructor should be registered in GlobalContext");
+                    .expect("SAFETY: List type constructor is registered in GlobalContext::new() as a builtin type. \
+                             It is guaranteed to be present in all GlobalContext instances.");
 
                 hir::TypeKind::App {
                     ctor: list_ctor,

@@ -18,12 +18,7 @@ let orders_for_customers = List::join(customers, orders, "id", "customer_id")
 
 orders_for_customers
     |> List::map(fn (e) -> {
-        let res: OrderForCustomer = {
-            product = e.product,
-            amount = e.amount,
-            name = e.name,
-            city = e.city,
-        }
+        let res = OrderForCustomer(e.product, e.amount, e.name, e.city)
         let id = String::concat("http://example.com/order_for_customer/", String::to_string(e.order_id))
         Entity::with_id(res, id)
     })

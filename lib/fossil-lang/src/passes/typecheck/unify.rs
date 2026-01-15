@@ -5,7 +5,7 @@
 
 use crate::ast::{Loc, thir};
 use crate::context::Symbol;
-use crate::error::{CompileError, CompileErrorKind};
+use crate::error::{CompileError, CompileErrorKind, ErrorSuggestion};
 
 use super::{TypeChecker, subst::Subst};
 
@@ -42,6 +42,9 @@ impl TypeChecker {
             ) => {
                 // Type constructors must match
                 if c1 != c2 {
+                    let expected_str = self.format_type(ty1_id);
+                    let actual_str = self.format_type(ty2_id);
+
                     return Err(CompileError::new(
                         CompileErrorKind::TypeMismatch {
                             expected: ty1_id,
@@ -49,7 +52,10 @@ impl TypeChecker {
                         },
                         loc,
                     )
-                    .with_context("Different type constructors cannot be unified"));
+                    .with_context(format!(
+                        "Cannot unify `{}` with `{}` - different type constructors",
+                        expected_str, actual_str
+                    )));
                 }
 
                 // Arity must match
@@ -123,14 +129,25 @@ impl TypeChecker {
             }
 
             // Type mismatch
-            _ => Err(CompileError::new(
-                CompileErrorKind::TypeMismatch {
-                    expected: ty1_id,
-                    actual: ty2_id,
-                },
-                loc,
-            )
-            .with_context("Cannot unify these types - they have incompatible kinds")),
+            _ => {
+                let expected_str = self.format_type(ty1_id);
+                let actual_str = self.format_type(ty2_id);
+
+                Err(CompileError::new(
+                    CompileErrorKind::TypeMismatch {
+                        expected: ty1_id,
+                        actual: ty2_id,
+                    },
+                    loc,
+                )
+                .with_context(format!(
+                    "Expected type `{}`, but found `{}`",
+                    expected_str, actual_str
+                ))
+                .with_suggestion(ErrorSuggestion::Help(
+                    "Types must match exactly. Consider adding explicit type annotations.".to_string()
+                )))
+            }
         }
     }
 

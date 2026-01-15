@@ -45,6 +45,13 @@ impl ScopeStack {
         self.scopes.last_mut().unwrap()
     }
 
+    /// Get the current (innermost) scope immutably
+    pub fn current(&self) -> &Scope {
+        self.scopes
+            .last()
+            .expect("SAFETY: ScopeStack always has at least one scope (initialized in new())")
+    }
+
     /// Get the current scope depth (for debugging)
     pub fn depth(&self) -> usize {
         self.scopes.len()
