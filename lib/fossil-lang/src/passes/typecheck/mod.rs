@@ -237,8 +237,8 @@ impl TypeChecker {
         for stmt_id in &self.source.root {
             let stmt = self.source.stmts.get(*stmt_id);
 
-            if let StmtKind::Type { name, ty } = &stmt.kind {
-                if *name == type_name {
+            if let StmtKind::Type { name, ty } = &stmt.kind
+                && *name == type_name {
                     // Found the type definition, check if it's a record
                     let ty_data = self.source.types.get(*ty);
 
@@ -262,7 +262,6 @@ impl TypeChecker {
                         return Some(thir_field_types);
                     }
                 }
-            }
         }
 
         None
@@ -447,8 +446,8 @@ impl TypeChecker {
         for stmt_id in &self.target.root {
             let stmt = self.target.stmts.get(*stmt_id);
 
-            if let thir::StmtKind::Type { name, ty } = &stmt.kind {
-                if *name == type_name {
+            if let thir::StmtKind::Type { name, ty } = &stmt.kind
+                && *name == type_name {
                     // Found the type definition, check if it's a record
                     let ty_data = self.target.types.get(*ty);
 
@@ -458,7 +457,6 @@ impl TypeChecker {
                         return Some(field_types);
                     }
                 }
-            }
         }
 
         None

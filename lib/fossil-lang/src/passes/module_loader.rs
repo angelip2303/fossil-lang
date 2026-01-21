@@ -266,11 +266,10 @@ impl ModuleLoader {
 
     /// Add a child module
     pub fn add_module_child(&mut self, parent_id: DefId, child_id: DefId) {
-        if let Some(info) = self.modules.get_mut(&parent_id) {
-            if !info.children.contains(&child_id) {
+        if let Some(info) = self.modules.get_mut(&parent_id)
+            && !info.children.contains(&child_id) {
                 info.children.push(child_id);
             }
-        }
     }
 }
 

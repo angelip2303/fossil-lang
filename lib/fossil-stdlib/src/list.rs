@@ -120,13 +120,12 @@ impl FunctionImpl for MapFunction {
         })?;
 
         // Try streaming approach (works for Entity transformations)
-        if sample_df.height() > 0 {
-            if let Some(lazy_stream) =
+        if sample_df.height() > 0
+            && let Some(lazy_stream) =
                 try_create_lazy_streaming_batch(lf.clone(), &sample_df, transform_fn, ctx)?
             {
                 return Ok(lazy_stream);
             }
-        }
 
         // Fallback for non-Entity transformations (e.g., map to strings)
         let df = lf.clone().collect().map_err(|e| {

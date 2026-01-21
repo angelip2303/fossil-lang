@@ -24,25 +24,23 @@ impl TypeChecker {
         for stmt_id in &self.target.root {
             let stmt = self.target.stmts.get(*stmt_id);
 
-            if let thir::StmtKind::Type { name, ty } = &stmt.kind {
-                if *name == type_name {
+            if let thir::StmtKind::Type { name, ty } = &stmt.kind
+                && *name == type_name {
                     return Some(*ty);
                 }
-            }
         }
 
         // If not in THIR yet, search in source HIR and convert on-demand
         for stmt_id in &self.source.root.clone() {
             let stmt = self.source.stmts.get(*stmt_id);
 
-            if let hir::StmtKind::Type { name, ty } = &stmt.kind {
-                if *name == type_name {
+            if let hir::StmtKind::Type { name, ty } = &stmt.kind
+                && *name == type_name {
                     // Convert the type from HIR to THIR
                     if let Ok(thir_ty) = self.fold_type_to_thir(*ty) {
                         return Some(thir_ty);
                     }
                 }
-            }
         }
 
         None

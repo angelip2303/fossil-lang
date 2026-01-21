@@ -162,14 +162,13 @@ fn get_constructor_field_names(
     // Find the type definition in THIR
     for stmt_id in &thir.root {
         let stmt = thir.stmts.get(*stmt_id);
-        if let fossil_lang::ast::thir::StmtKind::Type { name, ty } = &stmt.kind {
-            if *name == type_name {
+        if let fossil_lang::ast::thir::StmtKind::Type { name, ty } = &stmt.kind
+            && *name == type_name {
                 let ty_data = thir.types.get(*ty);
                 if let TypeKind::Record(row) = &ty_data.kind {
                     return Some(collect_field_names(gcx, row));
                 }
             }
-        }
     }
 
     None

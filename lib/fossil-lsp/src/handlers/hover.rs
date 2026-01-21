@@ -42,11 +42,10 @@ pub async fn handle_hover(
     };
 
     // Check if we're hovering over punctuation - skip if so
-    if let Some(ch) = doc.text.chars().nth(offset) {
-        if PUNCTUATION.contains(&ch) || ch.is_whitespace() {
+    if let Some(ch) = doc.text.chars().nth(offset)
+        && (PUNCTUATION.contains(&ch) || ch.is_whitespace()) {
             return Ok(None);
         }
-    }
 
     // Try to find a let binding at this offset (for variable hover)
     if let Some((name, ty_id)) = find_let_binding_at_offset(&thir_program.thir, offset, &thir_program.gcx) {
@@ -147,8 +146,8 @@ pub async fn handle_hover(
     }
 
     // Check if this is a Function and cursor is on a parameter
-    if let ExprKind::Function { params, .. } = &expr.kind {
-        if let Some((param_name, param_type)) = find_param_at_offset(
+    if let ExprKind::Function { params, .. } = &expr.kind
+        && let Some((param_name, param_type)) = find_param_at_offset(
             &thir_program.thir,
             &thir_program.gcx,
             params,
@@ -167,7 +166,6 @@ pub async fn handle_hover(
                 range: None,
             }));
         }
-    }
 
     let content = format_expr_hover(&thir_program.thir, &thir_program.gcx, expr_id, expr.ty);
 
@@ -256,11 +254,10 @@ fn find_let_binding_at_offset(thir: &TypedHir, offset: usize, gcx: &GlobalContex
 
     // Then search inside block expressions
     for (_, expr) in thir.exprs.iter() {
-        if let ExprKind::Block { stmts } = &expr.kind {
-            if let Some(result) = find_let_in_stmts(stmts, thir, offset, gcx) {
+        if let ExprKind::Block { stmts } = &expr.kind
+            && let Some(result) = find_let_in_stmts(stmts, thir, offset, gcx) {
                 return Some(result);
             }
-        }
     }
 
     None
@@ -277,8 +274,8 @@ fn find_let_in_stmts(
         let stmt = thir.stmts.get(*stmt_id);
 
         // Check if offset is within this statement's span
-        if stmt.loc.span.start <= offset && offset <= stmt.loc.span.end {
-            if let StmtKind::Let { name, value } = &stmt.kind {
+        if stmt.loc.span.start <= offset && offset <= stmt.loc.span.end
+            && let StmtKind::Let { name, value } = &stmt.kind {
                 // Get the name's position - check if cursor is on the name part
                 let name_str = gcx.interner.resolve(*name);
                 let stmt_text_start = stmt.loc.span.start;
@@ -292,7 +289,6 @@ fn find_let_in_stmts(
                     return Some((name_str.to_string(), value_expr.ty));
                 }
             }
-        }
     }
     None
 }
@@ -377,8 +373,8 @@ fn find_type_stmt_at_offset(thir: &TypedHir, offset: usize, gcx: &GlobalContext,
         let stmt = thir.stmts.get(*stmt_id);
 
         // Check if offset is within this statement's span
-        if stmt.loc.span.start <= offset && offset <= stmt.loc.span.end {
-            if let StmtKind::Type { name, ty } = &stmt.kind {
+        if stmt.loc.span.start <= offset && offset <= stmt.loc.span.end
+            && let StmtKind::Type { name, ty } = &stmt.kind {
                 let name_str = gcx.interner.resolve(*name).to_string();
 
                 // Check if cursor is specifically on the type name, not on the RHS
@@ -401,7 +397,6 @@ fn find_type_stmt_at_offset(thir: &TypedHir, offset: usize, gcx: &GlobalContext,
                     }
                 }
             }
-        }
     }
     None
 }
@@ -688,12 +683,12 @@ fn format_record_with_metadata_and_namer(
         let field_type_str = format_type_smart(thir, gcx, *field_ty, namer, 1);
 
         // Check if this field has a URI attribute
-        if let Some(metadata) = &type_metadata {
-            if let Some(field_meta) = metadata.get_field(*field_sym) {
+        if let Some(metadata) = &type_metadata
+            && let Some(field_meta) = metadata.get_field(*field_sym) {
                 // Look for "uri" attribute
                 let uri_sym = gcx.interner.lookup("uri");
-                if let Some(uri_sym) = uri_sym {
-                    if let Some(uri_attr) = field_meta.get_attribute(uri_sym) {
+                if let Some(uri_sym) = uri_sym
+                    && let Some(uri_attr) = field_meta.get_attribute(uri_sym) {
                         // Get the first argument as the URI string
                         if let Some(fossil_lang::ast::ast::Literal::String(uri_str_sym)) =
                             uri_attr.args.first()
@@ -702,9 +697,7 @@ fn format_record_with_metadata_and_namer(
                             result.push_str(&format!("    #[uri(\"{}\")]\n", uri_str));
                         }
                     }
-                }
             }
-        }
 
         result.push_str(&format!("    {}: {}", field_name, field_type_str));
 

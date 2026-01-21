@@ -32,9 +32,9 @@ impl FossilLanguageServer {
 impl LanguageServer for FossilLanguageServer {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         // Extract workspace root for resolving relative paths in providers
-        if let Some(root_uri) = params.root_uri {
-            if let Ok(path) = root_uri.to_file_path() {
-                if let Ok(mut workspace) = self.workspace_root.write() {
+        if let Some(root_uri) = params.root_uri
+            && let Ok(path) = root_uri.to_file_path()
+                && let Ok(mut workspace) = self.workspace_root.write() {
                     *workspace = Some(path.clone());
                     tracing::info!("Workspace root set to: {:?}", path);
                     // Change working directory to workspace root
@@ -42,8 +42,6 @@ impl LanguageServer for FossilLanguageServer {
                         tracing::warn!("Failed to change working directory to {:?}: {}", path, e);
                     }
                 }
-            }
-        }
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {

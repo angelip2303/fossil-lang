@@ -93,14 +93,13 @@ fn collect_semantic_tokens(
                         let search_start = expr.loc.span.start;
                         let search_end = value_expr.loc.span.start.min(doc_text.len());
 
-                        if let Some(search_text) = doc_text.get(search_start..search_end) {
-                            if let Some(name_pos) = search_text.rfind(arg_name) {
+                        if let Some(search_text) = doc_text.get(search_start..search_end)
+                            && let Some(name_pos) = search_text.rfind(arg_name) {
                                 let abs_pos = search_start + name_pos;
                                 if let Some((line, col)) = offset_to_line_col(doc_text, abs_pos) {
                                     raw_tokens.push((line, col, arg_name.len() as u32, 0)); // PARAMETER
                                 }
                             }
-                        }
                     }
                 }
             }
@@ -114,15 +113,14 @@ fn collect_semantic_tokens(
             let type_name = gcx.interner.resolve(*name);
 
             // Find "type TypeName" in the statement
-            if let Some(stmt_text) = doc_text.get(stmt.loc.span.start..stmt.loc.span.end.min(doc_text.len())) {
-                if let Some(type_keyword_pos) = stmt_text.find("type ") {
+            if let Some(stmt_text) = doc_text.get(stmt.loc.span.start..stmt.loc.span.end.min(doc_text.len()))
+                && let Some(type_keyword_pos) = stmt_text.find("type ") {
                     let name_start_in_stmt = type_keyword_pos + 5;
                     let abs_pos = stmt.loc.span.start + name_start_in_stmt;
                     if let Some((line, col)) = offset_to_line_col(doc_text, abs_pos) {
                         raw_tokens.push((line, col, type_name.len() as u32, 1)); // TYPE
                     }
                 }
-            }
         }
     }
 

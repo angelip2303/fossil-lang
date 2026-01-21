@@ -409,7 +409,7 @@ impl ImportResolverWithLoader {
         // Initialize dependency list for this module
         self.import_graph
             .entry(module_def_id)
-            .or_insert_with(Vec::new);
+            .or_default();
 
         // Process each import in this module
         for stmt_id in &ast.root {
@@ -423,7 +423,7 @@ impl ImportResolverWithLoader {
                 // Track dependency
                 self.import_graph
                     .entry(module_def_id)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(imported_def_id);
 
                 // If this is a new module (not cached), recursively process its imports

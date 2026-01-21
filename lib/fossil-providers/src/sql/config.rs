@@ -129,11 +129,10 @@ pub fn parse_sql_config(
                 if let Literal::Integer(n) = value {
                     config.batch_size = *n as usize;
                 }
-            } else if *name == timeout_sym {
-                if let Literal::Integer(n) = value {
+            } else if *name == timeout_sym
+                && let Literal::Integer(n) = value {
                     config.connect_timeout = *n as u64;
                 }
-            }
         }
     }
 

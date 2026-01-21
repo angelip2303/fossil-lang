@@ -257,8 +257,8 @@ fn find_expected_type_at_offset(
                     let callee_expr = thir.exprs.get(*callee);
                     let callee_ty = thir.types.get(callee_expr.ty);
 
-                    if let TypeKind::Function(param_types, _) = &callee_ty.kind {
-                        if arg_idx < param_types.len() {
+                    if let TypeKind::Function(param_types, _) = &callee_ty.kind
+                        && arg_idx < param_types.len() {
                             let param_ty = thir.types.get(param_types[arg_idx]);
                             // If the parameter is a FieldSelector, return the record type
                             if let TypeKind::FieldSelector { record_ty, .. } = &param_ty.kind {
@@ -267,7 +267,6 @@ fn find_expected_type_at_offset(
                                 return Some(record_type.kind.clone());
                             }
                         }
-                    }
                 }
             }
         }
@@ -449,8 +448,8 @@ fn find_list_element_type(
 
     for stmt_id in &thir.root {
         let stmt = thir.stmts.get(*stmt_id);
-        if let fossil_lang::ast::thir::StmtKind::Let { name: binding_name, value } = &stmt.kind {
-            if *binding_name == symbol {
+        if let fossil_lang::ast::thir::StmtKind::Let { name: binding_name, value } = &stmt.kind
+            && *binding_name == symbol {
                 let value_expr = thir.exprs.get(*value);
                 let value_ty = thir.types.get(value_expr.ty);
 
@@ -463,7 +462,6 @@ fn find_list_element_type(
                     }
                 }
             }
-        }
     }
 
     None
@@ -574,8 +572,8 @@ fn complete_field_access(
 /// Find the type of an identifier by searching let bindings and function parameters
 /// The offset parameter is used to check scope - only return types for identifiers
 /// that are in scope at that position.
-fn find_identifier_type<'a>(
-    thir: &'a TypedHir,
+fn find_identifier_type(
+    thir: &TypedHir,
     gcx: &GlobalContext,
     name: &str,
     offset: usize,
@@ -649,13 +647,12 @@ fn collect_fields_from_type(
             // Search for the type definition in THIR statements
             for stmt_id in &thir.root {
                 let stmt = thir.stmts.get(*stmt_id);
-                if let fossil_lang::ast::thir::StmtKind::Type { name, ty } = &stmt.kind {
-                    if *name == type_name {
+                if let fossil_lang::ast::thir::StmtKind::Type { name, ty } = &stmt.kind
+                    && *name == type_name {
                         let ty_data = thir.types.get(*ty);
                         eprintln!("[COMPLETION] Found type definition, underlying type: {:?}", ty_data.kind);
                         return collect_fields_from_type(thir, gcx, &ty_data.kind);
                     }
-                }
             }
             eprintln!("[COMPLETION] Could not find type definition for '{}'", type_name_str);
             vec![]
@@ -854,7 +851,7 @@ fn find_identifier_before(source: &str, offset: usize) -> Option<String> {
     let mut end = before.len();
 
     // Skip whitespace
-    while end > 0 && before.chars().nth(end - 1).map_or(false, |c| c.is_whitespace()) {
+    while end > 0 && before.chars().nth(end - 1).is_some_and(|c| c.is_whitespace()) {
         end -= 1;
     }
 

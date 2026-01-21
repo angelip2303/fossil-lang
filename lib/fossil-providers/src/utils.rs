@@ -15,13 +15,11 @@ pub fn extract_path_arg_from_provider(
     // First, try named arg "path"
     let path_sym = interner.intern("path");
     for arg in args {
-        if let ProviderArgument::Named { name, value } = arg {
-            if *name == path_sym {
-                if let Literal::String(s) = value {
+        if let ProviderArgument::Named { name, value } = arg
+            && *name == path_sym
+                && let Literal::String(s) = value {
                     return Ok(interner.resolve(*s).to_string());
                 }
-            }
-        }
     }
 
     // Then try first positional arg

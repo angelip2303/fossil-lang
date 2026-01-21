@@ -68,8 +68,8 @@ impl OutputDestination {
         match source {
             DataSource::Local(path) => {
                 // Create parent directories if needed
-                if let Some(parent) = path.parent() {
-                    if !parent.exists() {
+                if let Some(parent) = path.parent()
+                    && !parent.exists() {
                         std::fs::create_dir_all(parent).map_err(|e| {
                             CompileError::new(
                                 CompileErrorKind::Runtime(format!("Failed to create directory: {}", e)),
@@ -77,7 +77,6 @@ impl OutputDestination {
                             )
                         })?;
                     }
-                }
 
                 let file = std::fs::File::create(&path).map_err(|e| {
                     CompileError::new(
@@ -233,13 +232,11 @@ impl FunctionImpl for RdfSerializeFunction {
         };
 
         // Main path: LazyStreamingEntityBatch (from List::map with Entity)
-        if let Value::Extension { type_id, metadata, .. } = &entities_value {
-            if *type_id == LAZY_ENTITY_STREAM_TYPE_ID {
-                if let Some(batch) = metadata.as_any().downcast_ref::<LazyStreamingEntityBatch>() {
+        if let Value::Extension { type_id, metadata, .. } = &entities_value
+            && *type_id == LAZY_ENTITY_STREAM_TYPE_ID
+                && let Some(batch) = metadata.as_any().downcast_ref::<LazyStreamingEntityBatch>() {
                     return serialize_lazy_streaming_batch(batch, filename.as_ref(), ctx);
                 }
-            }
-        }
 
         // Fallback: List of Entity values (for small lists from non-streaming path)
         if let Value::List(entities) = &entities_value {
@@ -358,8 +355,8 @@ fn serialize_entities_streaming(
             }
         };
 
-        if predicate_cache.is_none() {
-            if let Some(ref meta) = rdf_metadata {
+        if predicate_cache.is_none()
+            && let Some(ref meta) = rdf_metadata {
                 let cache: Vec<_> = df
                     .get_column_names()
                     .iter()
@@ -371,7 +368,6 @@ fn serialize_entities_streaming(
                     .collect();
                 predicate_cache = Some(cache);
             }
-        }
 
         let subject = entity_meta.id.as_ref();
         let predicates = predicate_cache.as_ref().ok_or_else(|| {
@@ -685,49 +681,49 @@ impl<'a> TypedColumn<'a> {
         match self {
             TypedColumn::String(ca) => {
                 if let Some(v) = ca.get(idx) {
-                    write!(writer, "<{}> <{}> \"{}\" .\n", subject, predicate, escape_rdf_string(v))
+                    writeln!(writer, "<{}> <{}> \"{}\" .", subject, predicate, escape_rdf_string(v))
                 } else {
                     Ok(())
                 }
             }
             TypedColumn::Int64(ca) => {
                 if let Some(v) = ca.get(idx) {
-                    write!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n", subject, predicate, v)
+                    writeln!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .", subject, predicate, v)
                 } else {
                     Ok(())
                 }
             }
             TypedColumn::Int32(ca) => {
                 if let Some(v) = ca.get(idx) {
-                    write!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n", subject, predicate, v)
+                    writeln!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .", subject, predicate, v)
                 } else {
                     Ok(())
                 }
             }
             TypedColumn::UInt64(ca) => {
                 if let Some(v) = ca.get(idx) {
-                    write!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n", subject, predicate, v)
+                    writeln!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .", subject, predicate, v)
                 } else {
                     Ok(())
                 }
             }
             TypedColumn::UInt32(ca) => {
                 if let Some(v) = ca.get(idx) {
-                    write!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n", subject, predicate, v)
+                    writeln!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .", subject, predicate, v)
                 } else {
                     Ok(())
                 }
             }
             TypedColumn::Float64(ca) => {
                 if let Some(v) = ca.get(idx) {
-                    write!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#double> .\n", subject, predicate, v)
+                    writeln!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#double> .", subject, predicate, v)
                 } else {
                     Ok(())
                 }
             }
             TypedColumn::Boolean(ca) => {
                 if let Some(v) = ca.get(idx) {
-                    write!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#boolean> .\n", subject, predicate, v)
+                    writeln!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#boolean> .", subject, predicate, v)
                 } else {
                     Ok(())
                 }

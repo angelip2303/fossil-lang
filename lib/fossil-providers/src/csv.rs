@@ -81,11 +81,10 @@ fn parse_csv_options(
                         options.delimiter = delim_str.as_bytes()[0];
                     }
                 }
-            } else if *name == has_header_sym {
-                if let Literal::Boolean(b) = value {
+            } else if *name == has_header_sym
+                && let Literal::Boolean(b) = value {
                     options.has_header = *b;
                 }
-            }
         }
     }
 

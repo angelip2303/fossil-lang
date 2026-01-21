@@ -205,11 +205,10 @@ impl WritableSource for DataSource {
         match self {
             DataSource::Local(path) => {
                 // Create parent directories if needed
-                if let Some(parent) = path.parent() {
-                    if !parent.exists() {
+                if let Some(parent) = path.parent()
+                    && !parent.exists() {
                         std::fs::create_dir_all(parent)?;
                     }
-                }
                 let mut file = std::fs::File::create(path)?;
                 file.write_all(data)?;
                 Ok(())

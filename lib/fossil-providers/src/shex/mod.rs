@@ -152,11 +152,10 @@ fn parse_shex_args(
                 if let Literal::String(s) = value {
                     path = Some(interner.resolve(*s).to_string());
                 }
-            } else if *name == shape_sym {
-                if let Literal::String(s) = value {
+            } else if *name == shape_sym
+                && let Literal::String(s) = value {
                     shape = Some(interner.resolve(*s).to_string());
                 }
-            }
         }
     }
 
