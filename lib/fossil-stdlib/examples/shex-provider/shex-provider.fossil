@@ -1,10 +1,11 @@
 type PersonData = csv!("lib/fossil-stdlib/examples/shex-provider/people.csv")
 type Person = shex!("lib/fossil-stdlib/examples/shex-provider/person.shex", shape: "PersonShape")
 
-let people = PersonData::load() |>
-    List::map(fn (row) -> {
-        let person = Person(row.name, row.age, row.name)
-        Entity::with_id(person, "http://example.com/person/${row.name}")
-    })
+let csv_to_rdf = fn(row) -> {
+    Person(row.name, row.age, row.name)
+        |> Entity::with_id("http://example.com/person/${row.name}")
+}
 
-Rdf::serialize(people, "lib/fossil-stdlib/examples/shex-provider/results.ttl")
+PersonData::load()
+|> List::map(csv_to_rdf)
+|> Rdf::serialize("lib/fossil-stdlib/examples/shex-provider/results.ttl")

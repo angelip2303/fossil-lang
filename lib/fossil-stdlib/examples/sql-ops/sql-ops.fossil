@@ -1,4 +1,4 @@
-type Customer = sql!("sqlite:/Users/angel.ip/dev/kanzo/ikigai-core/lib/fossil-stdlib/examples/sql-ops/shop.db", "customers")
+type Customer = sql!("sqlite:lib/fossil-stdlib/examples/sql-ops/shop.db", "customers")
 type Product = sql!("sqlite:lib/fossil-stdlib/examples/sql-ops/shop.db", "products")
 type Order = sql!("sqlite:lib/fossil-stdlib/examples/sql-ops/shop.db", "orders")
 type Electronics = sql!("sqlite:lib/fossil-stdlib/examples/sql-ops/shop.db", "SELECT * FROM products WHERE category = 'Electronics'")

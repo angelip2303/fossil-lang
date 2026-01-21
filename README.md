@@ -2,6 +2,8 @@
 
 ## Sigue habiendo algun bug con el autocompletado de FieldSelectors, además, los field selectors no parece que resuelvan tipos correctamente
 
+## Cuando ocurre un error de tipo en un atributo se muestra todo el record como erroneo, y no solo el atributo que falla
+
 ## En el caso de que se esté usando named arguments en una función, no hay coloreado de sintaxis correcta, y el hover parece no esar funcionando super bien
 
 ## Al hacer hover en un string interpolation, muestra string, aunque no sea string el campo concreto
