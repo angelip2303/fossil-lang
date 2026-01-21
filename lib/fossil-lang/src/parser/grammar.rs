@@ -13,8 +13,8 @@ use chumsky::prelude::*;
 use logos::Logos;
 
 use crate::ast::ast::{
-    Argument, Ast, Attribute, Expr, ExprId, ExprKind, Literal, Param, Path, PrimitiveType,
-    ProviderArgument, RecordField, Stmt, StmtId, StmtKind, Type, TypeId, TypeKind,
+    Argument, Ast, Attribute, AttributeArg, Expr, ExprId, ExprKind, Literal, Param, Path,
+    PrimitiveType, ProviderArgument, RecordField, Stmt, StmtId, StmtKind, Type, TypeId, TypeKind,
 };
 use crate::ast::{Loc, SourceId};
 use crate::context::{Interner, Symbol};
@@ -484,17 +484,28 @@ fn parse_interpolation_segments(s: &str) -> Option<(Vec<&str>, Vec<&str>)> {
     Some((parts, exprs))
 }
 
-/// Parse attribute: #[name("arg1", "arg2")]
+/// Parse attribute: #[name(key = value, key2 = value2)]
+///
+/// Examples:
+/// - `#[rdf(uri = "http://example.com")]`
+/// - `#[rdf(uri = "http://example.com", required = true)]`
 fn parse_attribute<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Attribute, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
+    // Parse a single named argument: key = value
+    let named_arg = parse_symbol(ctx)
+        .then_ignore(just(Token::Eq))
+        .then(parse_literal(ctx))
+        .map(|(key, value)| AttributeArg { key, value });
+
     just(Token::Hash)
         .ignore_then(just(Token::LBracket))
         .ignore_then(parse_symbol(ctx))
         .then(
-            parse_literal(ctx)
+            named_arg
                 .separated_by(just(Token::Comma))
+                .allow_trailing()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LParen), just(Token::RParen))
                 .or_not(),

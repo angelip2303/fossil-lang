@@ -5,13 +5,12 @@
 
 use std::collections::HashMap;
 
-use fossil_lang::ast::ast::Literal;
 use fossil_lang::context::{Interner, Symbol, TypeMetadata};
 
 /// RDF metadata extracted from a record type's attributes
 ///
 /// Contains a mapping from field names to their RDF predicate URIs,
-/// extracted from #[uri("...")] attributes.
+/// extracted from `#[rdf(uri = "...")]` attributes.
 #[derive(Debug, Clone)]
 pub struct RdfMetadata {
     /// Mapping from field name to predicate URI
@@ -28,9 +27,8 @@ impl RdfMetadata {
 
     /// Extract RDF metadata from TypeMetadata captured during resolution
     ///
-    /// This is the new path that uses compile-time captured metadata instead of
-    /// parsing the AST at runtime. Looks for #[uri("...")] attributes in the
-    /// TypeMetadata and builds a mapping from field names to predicate URIs.
+    /// Looks for `#[rdf(uri = "...")]` attributes in the TypeMetadata
+    /// and builds a mapping from field names to predicate URIs.
     ///
     /// # Arguments
     ///
@@ -40,27 +38,28 @@ impl RdfMetadata {
     /// # Returns
     ///
     /// `Some(RdfMetadata)` if the type has any URI attributes, `None` otherwise
-    pub fn from_type_metadata(
-        type_metadata: &TypeMetadata,
-        interner: &Interner,
-    ) -> Option<Self> {
+    pub fn from_type_metadata(type_metadata: &TypeMetadata, interner: &Interner) -> Option<Self> {
+        use fossil_lang::context::TypedAttribute;
+
         if type_metadata.is_empty() {
             return None;
         }
 
-        // Use lookup to find "uri" symbol without requiring mutable access
-        // If "uri" hasn't been interned, there can't be any URI attributes
-        let uri_symbol = interner.lookup("uri")?;
+        // Look up "rdf" symbol
+        // If it hasn't been interned, there can't be any rdf attributes
+        let rdf_symbol = interner.lookup("rdf")?;
 
         let mut metadata = RdfMetadata::new();
 
         for (field_name, field_metadata) in &type_metadata.field_metadata {
-            // Look for #[uri("...")] attribute
-            if let Some(attr_data) = field_metadata.get_attribute(uri_symbol) {
-                // Extract the URI string from the first argument
-                if let Some(Literal::String(uri_sym)) = attr_data.args.first() {
-                    let uri = interner.resolve(*uri_sym).to_string();
-                    metadata.predicates.insert(*field_name, uri);
+            // Look for #[rdf(...)] attribute
+            if let Some(attr_data) = field_metadata.get_attribute(rdf_symbol) {
+                // Use the new TypedAttribute API for convenient access
+                let typed = TypedAttribute::new(attr_data, interner);
+
+                // Extract the URI string from the "uri" argument
+                if let Some(uri) = typed.string("uri") {
+                    metadata.predicates.insert(*field_name, uri.to_string());
                 }
             }
         }
@@ -92,30 +91,34 @@ impl Default for RdfMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fossil_lang::ast::ast::Literal;
     use fossil_lang::context::{AttributeData, DefId, FieldMetadata};
 
     #[test]
     fn test_from_type_metadata() {
         let mut interner = Interner::default();
 
-        // Create TypeMetadata with URI attributes
+        // Create TypeMetadata with #[rdf(uri = "...")] attributes
         let def_id = DefId::new(0);
         let mut type_metadata = TypeMetadata::new(def_id);
 
         let uri_str = interner.intern("http://xmlns.com/foaf/0.1/name");
-        let uri_attr = interner.intern("uri");
+        let rdf_attr = interner.intern("rdf");
+        let uri_key = interner.intern("uri");
         let name_field = interner.intern("name");
         let age_field = interner.intern("age");
 
-        // Add field with URI attribute
+        // Add field with #[rdf(uri = "...")] attribute
         let mut name_meta = FieldMetadata::new();
+        let mut args = HashMap::new();
+        args.insert(uri_key, Literal::String(uri_str));
         name_meta.attributes.push(AttributeData {
-            name: uri_attr,
-            args: vec![Literal::String(uri_str)],
+            name: rdf_attr,
+            args,
         });
         type_metadata.field_metadata.insert(name_field, name_meta);
 
-        // Add field without URI attribute
+        // Add field without RDF attribute
         type_metadata
             .field_metadata
             .insert(age_field, FieldMetadata::new());

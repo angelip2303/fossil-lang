@@ -5,6 +5,7 @@ use crate::ast::ast::*;
 use crate::context::*;
 use crate::error::{CompileError, CompileErrorKind, CompileErrors, ErrorSuggestion};
 use crate::passes::GlobalContext;
+use crate::suggestions;
 
 use super::scope::ScopeStack;
 use super::table::{ResolutionTable, ResolvedAst};
@@ -67,9 +68,7 @@ impl NameResolver {
         // Phase 2: Resolve root statements (block statements are resolved when their block is resolved)
         let stmt_ids = self.ast.root.clone();
         for stmt_id in stmt_ids {
-            if let Err(e) = self.resolve_stmt(stmt_id) {
-                errors.push(e);
-            }
+            self.resolve_stmt(stmt_id, &mut errors);
         }
 
         // Return errors if any occurred
@@ -147,7 +146,7 @@ impl NameResolver {
     }
 
     /// Pass 2: Resolve names in statements
-    fn resolve_stmt(&mut self, stmt_id: StmtId) -> Result<(), CompileError> {
+    fn resolve_stmt(&mut self, stmt_id: StmtId, errors: &mut CompileErrors) {
         let stmt = self.ast.stmts.get(stmt_id);
         let stmt_kind = stmt.kind.clone();
         let _loc = stmt.loc.clone();
@@ -155,17 +154,20 @@ impl NameResolver {
         match &stmt_kind {
             StmtKind::Import { .. } => {
                 // Already processed in collect_declarations
-                Ok(())
             }
 
             StmtKind::Let { name, ty, value } => {
                 // Resolve type annotation if present
                 if let Some(type_id) = ty {
-                    self.resolve_type(*type_id)?;
+                    if let Err(e) = self.resolve_type(*type_id) {
+                        errors.push(e);
+                    }
                 }
 
                 // Resolve the value expression
-                self.resolve_expr(*value)?;
+                if let Err(e) = self.resolve_expr(*value) {
+                    errors.push(e);
+                }
 
                 // Get or create the DefId for this let binding
                 let def_id =
@@ -181,30 +183,34 @@ impl NameResolver {
 
                 // Track stmt_id -> def_id mapping for lowering
                 self.resolutions.let_bindings.insert(stmt_id, def_id);
-
-                Ok(())
             }
 
             StmtKind::Type { name, ty } => {
                 // Already registered in collect_declarations, just resolve the type
-                self.resolve_type(*ty)?;
+                if let Err(e) = self.resolve_type(*ty) {
+                    errors.push(e);
+                }
 
                 // Extract type metadata (attributes) and store in GlobalContext
                 let type_def_id = self.scopes.lookup_type(*name)
                     .expect("SAFETY: Type definition was just added to scope in collect_declarations(). \
                              The lookup cannot fail immediately after successful declaration collection.");
 
-                if let Some(metadata) = self.extract_type_metadata(type_def_id, *ty) {
+                if let Some(metadata) = self.extract_type_metadata(type_def_id, *ty, errors) {
                     self.gcx.type_metadata.insert(type_def_id, std::sync::Arc::new(metadata));
                 }
 
                 // Generate constructor function for record types
-                self.generate_record_constructor(*name, type_def_id, *ty)?;
-
-                Ok(())
+                if let Err(e) = self.generate_record_constructor(*name, type_def_id, *ty) {
+                    errors.push(e);
+                }
             }
 
-            StmtKind::Expr(expr) => self.resolve_expr(*expr),
+            StmtKind::Expr(expr) => {
+                if let Err(e) = self.resolve_expr(*expr) {
+                    errors.push(e);
+                }
+            }
         }
     }
 
@@ -278,12 +284,19 @@ impl NameResolver {
                 self.scopes.push();
 
                 // Resolve all statements in the block
+                // Collect errors to return the first one encountered
+                let mut block_errors = CompileErrors::new();
                 for stmt_id in stmts {
-                    self.resolve_stmt(stmt_id)?;
+                    self.resolve_stmt(stmt_id, &mut block_errors);
                 }
 
                 // Pop block scope
                 self.scopes.pop();
+
+                // Return first error if any
+                if !block_errors.is_empty() {
+                    return Err(block_errors.0.into_iter().next().unwrap());
+                }
             }
 
             ExprKind::Unit | ExprKind::Literal(_) | ExprKind::Placeholder => {}
@@ -476,11 +489,17 @@ impl NameResolver {
     ///
     /// * `def_id` - The DefId of the type being defined
     /// * `type_id` - The AST TypeId to extract metadata from
+    /// * `errors` - Mutable reference to collect validation errors
     ///
     /// # Returns
     ///
     /// `Some(TypeMetadata)` if the type has any field metadata, `None` otherwise
-    fn extract_type_metadata(&self, def_id: DefId, type_id: TypeId) -> Option<TypeMetadata> {
+    fn extract_type_metadata(
+        &self,
+        def_id: DefId,
+        type_id: TypeId,
+        errors: &mut CompileErrors,
+    ) -> Option<TypeMetadata> {
         let ty = self.ast.types.get(type_id);
 
         match &ty.kind {
@@ -492,9 +511,19 @@ impl NameResolver {
                         let mut field_meta = FieldMetadata::new();
 
                         for attr in &field.attrs {
+                            // Validate the attribute against its schema
+                            self.validate_attribute(attr, AttributeTarget::Field, &ty.loc, errors);
+
+                            // Convert Vec<AttributeArg> to HashMap<Symbol, Literal>
+                            let args = attr
+                                .args
+                                .iter()
+                                .map(|arg| (arg.key, arg.value.clone()))
+                                .collect();
+
                             field_meta.attributes.push(AttributeData {
                                 name: attr.name,
-                                args: attr.args.clone(),
+                                args,
                             });
                         }
 
@@ -509,6 +538,160 @@ impl NameResolver {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// Validate a single attribute against its schema
+    ///
+    /// Checks:
+    /// 1. Attribute name is registered
+    /// 2. Attribute target is valid
+    /// 3. All required arguments are present
+    /// 4. All argument types are correct
+    /// 5. No unknown arguments
+    fn validate_attribute(
+        &self,
+        attr: &Attribute,
+        target: AttributeTarget,
+        loc: &Loc,
+        errors: &mut CompileErrors,
+    ) {
+        // Look up the attribute schema
+        let schema = match self.gcx.attribute_registry.get(attr.name) {
+            Some(s) => s,
+            None => {
+                // Unknown attribute - create error with suggestion
+                let attr_name = self.gcx.interner.resolve(attr.name);
+                let mut error = CompileError::new(
+                    CompileErrorKind::UnknownAttribute(attr.name),
+                    loc.clone(),
+                )
+                .with_context(format!("Attribute '#[{}]' is not recognized", attr_name));
+
+                // Find similar attribute names for suggestion
+                let known_attrs = self.gcx.attribute_registry.all_names();
+                if let Some((suggestion, confidence)) =
+                    suggestions::find_similar(attr_name, &known_attrs)
+                {
+                    error = error.with_suggestion(ErrorSuggestion::DidYouMean {
+                        wrong: attr_name.to_string(),
+                        suggestion,
+                        confidence,
+                    });
+                }
+
+                errors.push(error);
+                return;
+            }
+        };
+
+        // Check if attribute can be applied to this target
+        if !schema.target.allows(target) {
+            errors.push(
+                CompileError::new(
+                    CompileErrorKind::InvalidAttributeTarget {
+                        attr: attr.name,
+                        actual_target: target.name(),
+                        expected_target: schema.target.name(),
+                    },
+                    loc.clone(),
+                )
+                .with_context(format!(
+                    "Attribute '#[{}]' can only be applied to {} definitions",
+                    schema.name,
+                    schema.target.name()
+                )),
+            );
+        }
+
+        // Collect provided argument names
+        let provided_args: std::collections::HashSet<Symbol> =
+            attr.args.iter().map(|arg| arg.key).collect();
+
+        // Check for missing required arguments
+        for required_arg in schema.required_args() {
+            let required_sym = self.gcx.interner.lookup(required_arg);
+            let is_provided = required_sym.map_or(false, |sym| provided_args.contains(&sym));
+
+            if !is_provided {
+                errors.push(
+                    CompileError::new(
+                        CompileErrorKind::MissingAttributeArg {
+                            attr: attr.name,
+                            arg: required_arg,
+                        },
+                        loc.clone(),
+                    )
+                    .with_context(format!(
+                        "Attribute '#[{}]' requires argument '{}'",
+                        schema.name, required_arg
+                    )),
+                );
+            }
+        }
+
+        // Validate each provided argument
+        for arg in &attr.args {
+            let arg_name = self.gcx.interner.resolve(arg.key);
+
+            match schema.get_arg(arg_name) {
+                Some(spec) => {
+                    // Check type
+                    if !spec.ty.matches(&arg.value) {
+                        let actual_type = match &arg.value {
+                            Literal::String(_) => "string",
+                            Literal::Integer(_) => "int",
+                            Literal::Boolean(_) => "bool",
+                        };
+
+                        errors.push(
+                            CompileError::new(
+                                CompileErrorKind::AttributeArgTypeMismatch {
+                                    attr: attr.name,
+                                    arg: arg.key,
+                                    expected: spec.ty.name(),
+                                    actual: actual_type,
+                                },
+                                loc.clone(),
+                            )
+                            .with_context(format!(
+                                "Argument '{}' expects {} value, got {}",
+                                arg_name,
+                                spec.ty.name(),
+                                actual_type
+                            )),
+                        );
+                    }
+                }
+                None => {
+                    // Unknown argument - create error with suggestion
+                    let mut error = CompileError::new(
+                        CompileErrorKind::UnknownAttributeArg {
+                            attr: attr.name,
+                            arg: arg.key,
+                        },
+                        loc.clone(),
+                    )
+                    .with_context(format!(
+                        "Unknown argument '{}' for attribute '#[{}]'",
+                        arg_name, schema.name
+                    ));
+
+                    // Find similar argument names for suggestion
+                    let known_args = schema.arg_names();
+                    if let Some((suggestion, confidence)) =
+                        suggestions::find_similar(arg_name, &known_args)
+                    {
+                        error = error.with_suggestion(ErrorSuggestion::DidYouMean {
+                            wrong: arg_name.to_string(),
+                            suggestion,
+                            confidence,
+                        });
+                    }
+
+                    errors.push(error);
+                }
+            }
         }
     }
 

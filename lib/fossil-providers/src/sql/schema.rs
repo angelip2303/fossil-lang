@@ -52,24 +52,80 @@ pub async fn infer_schema(config: &SqlConfig) -> Result<SqlSchema, SqlError> {
 async fn infer_table_schema(
     pool: &ConnectionPool,
     table_name: &str,
-    _db_type: DatabaseType,
+    db_type: DatabaseType,
 ) -> Result<SqlSchema, SqlError> {
-    // Use a LIMIT 0 query to get column info without fetching data
-    let query = format!("SELECT * FROM {} LIMIT 0", table_name);
+    // For SQLite, use PRAGMA table_info
+    if db_type == DatabaseType::SQLite {
+        return infer_sqlite_table_schema(pool, table_name).await;
+    }
+
+    // For other databases, use a LIMIT 1 query to get column info
+    let query = format!("SELECT * FROM {} LIMIT 1", table_name);
     infer_query_schema(pool, &query).await
 }
 
-/// Infer schema from a query using LIMIT 0
-async fn infer_query_schema(pool: &ConnectionPool, query: &str) -> Result<SqlSchema, SqlError> {
-    // Wrap query in a subquery with LIMIT 0 to get schema without data
-    let schema_query = format!("SELECT * FROM ({}) AS _schema_query LIMIT 0", query);
+/// Infer schema from SQLite table using PRAGMA
+async fn infer_sqlite_table_schema(
+    pool: &ConnectionPool,
+    table_name: &str,
+) -> Result<SqlSchema, SqlError> {
+    let pragma_query = format!("PRAGMA table_info({})", table_name);
+    eprintln!("[SQL Schema] SQLite PRAGMA query: {}", pragma_query);
 
-    let row_opt: Option<AnyRow> = sqlx::query(&schema_query)
+    let rows: Vec<AnyRow> = sqlx::query(&pragma_query)
+        .fetch_all(&pool.pool)
+        .await
+        .map_err(|e| SqlError::QueryError(e.to_string()))?;
+
+    eprintln!("[SQL Schema] PRAGMA returned {} rows", rows.len());
+
+    if rows.is_empty() {
+        return Err(SqlError::SchemaInferenceError(format!(
+            "Table '{}' not found or has no columns",
+            table_name
+        )));
+    }
+
+    let columns: Vec<ColumnInfo> = rows
+        .iter()
+        .map(|row| {
+            // PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
+            let name: String = row.try_get(1).unwrap_or_default();
+            let sql_type: String = row.try_get(2).unwrap_or_default();
+            let polars_dtype = sql_type_to_polars(&sql_type);
+            eprintln!("[SQL Schema] Column: {} ({})", name, sql_type);
+            ColumnInfo {
+                name,
+                sql_type,
+                polars_dtype,
+            }
+        })
+        .collect();
+
+    Ok(SqlSchema { columns })
+}
+
+/// Infer schema from a query using LIMIT 1
+async fn infer_query_schema(pool: &ConnectionPool, query: &str) -> Result<SqlSchema, SqlError> {
+    // Wrap query in a subquery with LIMIT 1 to get schema with minimal data
+    let schema_query = format!("SELECT * FROM ({}) AS _schema_query LIMIT 1", query);
+
+    eprintln!("[SQL Schema] Query: {}", schema_query);
+
+    let row_opt: Option<AnyRow> = match sqlx::query(&schema_query)
         .fetch_optional(&pool.pool)
-        .await?;
+        .await {
+            Ok(r) => {
+                eprintln!("[SQL Schema] fetch_optional succeeded, row present: {}", r.is_some());
+                r
+            }
+            Err(e) => {
+                eprintln!("[SQL Schema] fetch_optional failed: {}", e);
+                return Err(SqlError::QueryError(e.to_string()));
+            }
+        };
 
     // If we got a row, extract column info from it
-    // If not, we need to describe the query another way
     if let Some(row) = row_opt {
         let columns: Vec<ColumnInfo> = row
             .columns()
@@ -79,6 +135,7 @@ async fn infer_query_schema(pool: &ConnectionPool, query: &str) -> Result<SqlSch
                 let type_info = col.type_info();
                 let sql_type = type_info.name().to_string();
                 let polars_dtype = sql_type_to_polars(&sql_type);
+                eprintln!("[SQL Schema] Column from query: {} ({})", name, sql_type);
                 ColumnInfo {
                     name,
                     sql_type,
@@ -89,65 +146,10 @@ async fn infer_query_schema(pool: &ConnectionPool, query: &str) -> Result<SqlSch
 
         Ok(SqlSchema { columns })
     } else {
-        // No row returned, but we can still get column info from the query result
-        // For this, we need to execute the query and inspect the columns
-        let rows: Vec<AnyRow> = sqlx::query(&schema_query)
-            .fetch_all(&pool.pool)
-            .await?;
-
-        // Even with 0 rows, SQLx gives us column metadata
-        if rows.is_empty() {
-            // Execute query directly to get metadata
-            let result = sqlx::query(&schema_query)
-                .fetch_one(&pool.pool)
-                .await;
-
-            match result {
-                Ok(row) => {
-                    let columns: Vec<ColumnInfo> = row
-                        .columns()
-                        .iter()
-                        .map(|col| {
-                            let name = col.name().to_string();
-                            let type_info = col.type_info();
-                            let sql_type = type_info.name().to_string();
-                            let polars_dtype = sql_type_to_polars(&sql_type);
-                            ColumnInfo {
-                                name,
-                                sql_type,
-                                polars_dtype,
-                            }
-                        })
-                        .collect();
-                    Ok(SqlSchema { columns })
-                }
-                Err(_) => {
-                    // As a fallback, describe the original query
-                    Err(SqlError::SchemaInferenceError(
-                        "Unable to infer schema from query".to_string(),
-                    ))
-                }
-            }
-        } else {
-            let row = &rows[0];
-            let columns: Vec<ColumnInfo> = row
-                .columns()
-                .iter()
-                .map(|col| {
-                    let name = col.name().to_string();
-                    let type_info = col.type_info();
-                    let sql_type = type_info.name().to_string();
-                    let polars_dtype = sql_type_to_polars(&sql_type);
-                    ColumnInfo {
-                        name,
-                        sql_type,
-                        polars_dtype,
-                    }
-                })
-                .collect();
-
-            Ok(SqlSchema { columns })
-        }
+        // No rows in result - query returned empty set
+        Err(SqlError::SchemaInferenceError(
+            "Query returned no rows, cannot infer schema".to_string(),
+        ))
     }
 }
 

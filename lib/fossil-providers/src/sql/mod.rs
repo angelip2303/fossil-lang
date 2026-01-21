@@ -83,11 +83,18 @@ impl TypeProviderImpl for SqlProvider {
         // Parse configuration from arguments
         let config = parse_sql_config(args, interner)?;
 
+        eprintln!("[SQL Provider] Type: {}", type_name);
+        eprintln!("[SQL Provider] Connection string: {}", config.connection_string);
+        eprintln!("[SQL Provider] Current dir: {:?}", std::env::current_dir());
+
         // Infer schema from database (runs async code synchronously)
         let rt = get_runtime();
         let schema = rt.block_on(async {
             infer_schema(&config).await
-        }).map_err(|e| e.to_provider_error(interner))?;
+        }).map_err(|e| {
+            eprintln!("[SQL Provider] Error: {:?}", e);
+            e.to_provider_error(interner)
+        })?;
 
         // Convert schema to AST fields
         let fields = schema_to_ast_fields(&schema, ast, interner);

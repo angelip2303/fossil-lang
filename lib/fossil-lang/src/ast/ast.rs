@@ -278,10 +278,21 @@ pub enum PrimitiveType {
 }
 
 /// Attribute annotation on record fields
+///
+/// Supports named arguments like `#[rdf(uri = "...", required = true)]`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Attribute {
     pub name: Symbol,
-    pub args: Vec<Literal>,
+    pub args: Vec<AttributeArg>,
+}
+
+/// A single argument in an attribute
+///
+/// Represents `key = value` pairs like `uri = "http://..."`
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AttributeArg {
+    pub key: Symbol,
+    pub value: Literal,
 }
 
 /// Record field with optional attributes

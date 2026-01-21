@@ -17,8 +17,19 @@ pub async fn handle_document_change(
 ) {
     tracing::info!("Compiling document: {}", uri);
 
-    // Compile the document
-    let result = compiler_bridge::compile_document(uri.as_str(), &text);
+    // Compile the document in a blocking task to avoid conflicts with providers
+    // that use block_on (e.g., SQL provider)
+    let uri_str = uri.to_string();
+    let text_clone = text.clone();
+    let result = match tokio::task::spawn_blocking(move || {
+        compiler_bridge::compile_document(&uri_str, &text_clone)
+    }).await {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::error!("Compilation task panicked: {}", e);
+            return;
+        }
+    };
 
     tracing::info!(
         "Compilation result: is_ok={}, errors_count={}",

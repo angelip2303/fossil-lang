@@ -121,33 +121,74 @@ impl LanguageServer for FossilLanguageServer {
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        tracing::info!("Document saved: {}", params.text_document.uri);
+        let uri = params.text_document.uri;
+        tracing::info!("Document saved: {}", uri);
+        tracing::info!("params.text is_some: {}", params.text.is_some());
+
+        // Log all cached document URIs for debugging
+        tracing::info!("Cached documents: {:?}",
+            self.documents.iter().map(|r| r.key().to_string()).collect::<Vec<_>>());
+
+        // Check if document exists in cache
+        let doc_exists = self.documents.contains_key(&uri);
+        tracing::info!("Document exists in cache: {}", doc_exists);
+
         // Get the current version from cached document
         let current_version = self.documents
-            .get(&params.text_document.uri)
+            .get(&uri)
             .map(|doc| doc.version)
             .unwrap_or(0);
 
         // Re-compile on save if we have the text
         if let Some(text) = params.text {
+            tracing::info!("Using text from save params (len={})", text.len());
             handlers::diagnostics::handle_document_change(
                 &self.client,
                 &self.documents,
-                params.text_document.uri,
+                uri,
                 text,
                 current_version,
             )
             .await;
-        } else if let Some(doc) = self.documents.get(&params.text_document.uri) {
+        } else if let Some(doc) = self.documents.get(&uri) {
             // Re-compile with cached text
+            tracing::info!("Using cached text (len={})", doc.text.len());
             handlers::diagnostics::handle_document_change(
                 &self.client,
                 &self.documents,
-                params.text_document.uri.clone(),
+                uri.clone(),
                 doc.text.clone(),
                 doc.version,
             )
             .await;
+        } else {
+            // No text available - try to read from file
+            tracing::warn!("No text available for {}, attempting to read from file", uri);
+            if let Ok(path) = uri.to_file_path() {
+                // Use spawn_blocking to avoid runtime conflicts with providers that use block_on
+                let path_clone = path.clone();
+                match tokio::task::spawn_blocking(move || std::fs::read_to_string(&path_clone)).await {
+                    Ok(Ok(text)) => {
+                        tracing::info!("Read file successfully (len={})", text.len());
+                        handlers::diagnostics::handle_document_change(
+                            &self.client,
+                            &self.documents,
+                            uri,
+                            text,
+                            0,
+                        )
+                        .await;
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("Failed to read file {}: {}", path.display(), e);
+                    }
+                    Err(e) => {
+                        tracing::error!("spawn_blocking failed: {}", e);
+                    }
+                }
+            } else {
+                tracing::error!("Failed to convert URI to file path: {}", uri);
+            }
         }
     }
 

@@ -336,6 +336,59 @@ pub enum CompileErrorKind {
         phase: &'static str,
         message: String,
     },
+
+    // === Attribute validation errors ===
+
+    /// Unknown attribute name
+    ///
+    /// The attribute is not registered in the attribute registry.
+    UnknownAttribute(Symbol),
+
+    /// Missing required attribute argument
+    ///
+    /// A required argument was not provided for the attribute.
+    MissingAttributeArg {
+        /// The attribute name
+        attr: Symbol,
+        /// The missing argument name
+        arg: &'static str,
+    },
+
+    /// Attribute argument type mismatch
+    ///
+    /// The argument value has the wrong type.
+    AttributeArgTypeMismatch {
+        /// The attribute name
+        attr: Symbol,
+        /// The argument name
+        arg: Symbol,
+        /// Expected type
+        expected: &'static str,
+        /// Actual type found
+        actual: &'static str,
+    },
+
+    /// Unknown attribute argument
+    ///
+    /// The argument is not defined in the attribute schema.
+    UnknownAttributeArg {
+        /// The attribute name
+        attr: Symbol,
+        /// The unknown argument name
+        arg: Symbol,
+    },
+
+    /// Attribute applied to invalid target
+    ///
+    /// The attribute cannot be applied to this location.
+    InvalidAttributeTarget {
+        /// The attribute name
+        attr: Symbol,
+        /// Where the attribute was applied
+        actual_target: &'static str,
+        /// Where the attribute can be applied
+        expected_target: &'static str,
+    },
 }
 
 /// A type variable used in error messages
@@ -467,6 +520,20 @@ impl CompileError {
             InternalCompilerError { phase, message } => {
                 format!("Internal compiler error in {}: {}", phase, message)
             }
+            UnknownAttribute(_) => "Unknown attribute".to_string(),
+            MissingAttributeArg { arg, .. } => {
+                format!("Missing required argument '{}'", arg)
+            }
+            AttributeArgTypeMismatch { expected, actual, .. } => {
+                format!("Type mismatch: expected {}, got {}", expected, actual)
+            }
+            UnknownAttributeArg { .. } => "Unknown attribute argument".to_string(),
+            InvalidAttributeTarget { actual_target, expected_target, .. } => {
+                format!(
+                    "Invalid target: {} (expected {})",
+                    actual_target, expected_target
+                )
+            }
         }
     }
 
@@ -538,6 +605,40 @@ impl CompileError {
             InvalidPlaceholder => "Invalid use of placeholder `_`. Placeholder is only valid in field access context (_.field)".to_string(),
             InternalCompilerError { phase, message } => {
                 format!("Internal compiler error in {}: {}", phase, message)
+            }
+            UnknownAttribute(name) => {
+                format!("Unknown attribute '{}'", format_symbol(*name, interner))
+            }
+            MissingAttributeArg { attr, arg } => {
+                format!(
+                    "Missing required argument '{}' for attribute '#[{}]'",
+                    arg,
+                    format_symbol(*attr, interner)
+                )
+            }
+            AttributeArgTypeMismatch { attr, arg, expected, actual } => {
+                format!(
+                    "Attribute '#[{}]' argument '{}': expected {}, got {}",
+                    format_symbol(*attr, interner),
+                    format_symbol(*arg, interner),
+                    expected,
+                    actual
+                )
+            }
+            UnknownAttributeArg { attr, arg } => {
+                format!(
+                    "Unknown argument '{}' for attribute '#[{}]'",
+                    format_symbol(*arg, interner),
+                    format_symbol(*attr, interner)
+                )
+            }
+            InvalidAttributeTarget { attr, actual_target, expected_target } => {
+                format!(
+                    "Attribute '#[{}]' cannot be applied to {}, only to {}",
+                    format_symbol(*attr, interner),
+                    actual_target,
+                    expected_target
+                )
             }
         }
     }

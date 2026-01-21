@@ -368,5 +368,8 @@ pub struct TypeConstructorInfo {
     pub param_kinds: Vec<Kind>,
 }
 
+pub mod attributes;
 pub mod metadata;
+
+pub use self::attributes::*;
 pub use self::metadata::*;

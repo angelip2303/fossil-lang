@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use crate::ast::ast::Literal;
-use crate::context::{DefId, Symbol};
+use crate::context::{DefId, Interner, Symbol};
 
 /// Type metadata extracted from AST during name resolution
 ///
@@ -27,14 +27,14 @@ use crate::context::{DefId, Symbol};
 /// # Example
 /// ```fossil
 /// type Person = {
-///     #[uri("http://xmlns.com/foaf/0.1/name")]
+///     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
 ///     name: string,
 /// }
 /// ```
 ///
 /// Results in TypeMetadata with:
 /// - def_id: DefId of Person
-/// - field_metadata: { "name" -> [Attribute("uri", "http://...")] }
+/// - field_metadata: { "name" -> [Attribute("rdf", { uri: "http://..." })] }
 #[derive(Debug, Clone)]
 pub struct TypeMetadata {
     /// DefId of the type this metadata belongs to
@@ -92,15 +92,114 @@ impl Default for FieldMetadata {
 
 /// Data for a single attribute
 ///
-/// Represents an attribute like `#[uri("http://example.com")]`
-/// with the attribute name and its arguments.
+/// Represents an attribute like `#[rdf(uri = "http://example.com", required = true)]`
+/// with the attribute name and its named arguments.
 #[derive(Debug, Clone)]
 pub struct AttributeData {
-    /// Name of the attribute (e.g., "uri", "rename")
+    /// Name of the attribute (e.g., "rdf", "serde")
     pub name: Symbol,
 
-    /// Arguments to the attribute as literals
-    pub args: Vec<Literal>,
+    /// Named arguments to the attribute (key -> value)
+    pub args: HashMap<Symbol, Literal>,
+}
+
+impl AttributeData {
+    /// Get a named argument value
+    pub fn get(&self, key: Symbol) -> Option<&Literal> {
+        self.args.get(&key)
+    }
+
+    /// Get a string argument value by key Symbol
+    ///
+    /// Returns the string value if the argument exists and is a string literal.
+    pub fn get_string<'a>(&self, key: Symbol, interner: &'a Interner) -> Option<&'a str> {
+        match self.args.get(&key) {
+            Some(Literal::String(sym)) => Some(interner.resolve(*sym)),
+            _ => None,
+        }
+    }
+
+    /// Get an integer argument value by key Symbol
+    ///
+    /// Returns the integer value if the argument exists and is an integer literal.
+    pub fn get_int(&self, key: Symbol) -> Option<i64> {
+        match self.args.get(&key) {
+            Some(Literal::Integer(n)) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Get a boolean argument value by key Symbol
+    ///
+    /// Returns the boolean value if the argument exists and is a boolean literal.
+    pub fn get_bool(&self, key: Symbol) -> Option<bool> {
+        match self.args.get(&key) {
+            Some(Literal::Boolean(b)) => Some(*b),
+            _ => None,
+        }
+    }
+}
+
+/// A typed wrapper for attribute access with convenient string-based lookups
+///
+/// This provides a more ergonomic API for accessing attribute arguments
+/// without needing to manually look up symbols.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let typed = TypedAttribute::new(attr_data, interner);
+/// let uri = typed.string("uri");    // Returns Option<&str>
+/// let count = typed.int("count");   // Returns Option<i64>
+/// let flag = typed.bool("enabled"); // Returns Option<bool>
+/// ```
+pub struct TypedAttribute<'a> {
+    attr: &'a AttributeData,
+    interner: &'a Interner,
+}
+
+impl<'a> TypedAttribute<'a> {
+    /// Create a new TypedAttribute wrapper
+    pub fn new(attr: &'a AttributeData, interner: &'a Interner) -> Self {
+        Self { attr, interner }
+    }
+
+    /// Get the attribute name as a string
+    pub fn name(&self) -> &str {
+        self.interner.resolve(self.attr.name)
+    }
+
+    /// Get a string argument by name
+    ///
+    /// Looks up the key in the interner and returns the string value if found.
+    pub fn string(&self, key: &str) -> Option<&str> {
+        let key_sym = self.interner.lookup(key)?;
+        self.attr.get_string(key_sym, self.interner)
+    }
+
+    /// Get an integer argument by name
+    ///
+    /// Looks up the key in the interner and returns the integer value if found.
+    pub fn int(&self, key: &str) -> Option<i64> {
+        let key_sym = self.interner.lookup(key)?;
+        self.attr.get_int(key_sym)
+    }
+
+    /// Get a boolean argument by name
+    ///
+    /// Looks up the key in the interner and returns the boolean value if found.
+    pub fn bool(&self, key: &str) -> Option<bool> {
+        let key_sym = self.interner.lookup(key)?;
+        self.attr.get_bool(key_sym)
+    }
+
+    /// Check if an argument exists
+    pub fn has(&self, key: &str) -> bool {
+        self.interner
+            .lookup(key)
+            .map(|sym| self.attr.args.contains_key(&sym))
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
@@ -120,17 +219,25 @@ mod tests {
     #[test]
     fn test_field_metadata() {
         let mut interner = Interner::default();
+        let rdf_sym = interner.intern("rdf");
         let uri_sym = interner.intern("uri");
+        let uri_value = interner.intern("http://example.com");
 
         let mut metadata = FieldMetadata::new();
+        let mut args = HashMap::new();
+        args.insert(uri_sym, Literal::String(uri_value));
         metadata.attributes.push(AttributeData {
-            name: uri_sym,
-            args: vec![],
+            name: rdf_sym,
+            args,
         });
 
-        let found = metadata.get_attribute(uri_sym);
+        let found = metadata.get_attribute(rdf_sym);
         assert!(found.is_some());
-        assert_eq!(found.unwrap().name, uri_sym);
+        assert_eq!(found.unwrap().name, rdf_sym);
+        assert_eq!(
+            found.unwrap().get(uri_sym),
+            Some(&Literal::String(uri_value))
+        );
     }
 
     #[test]

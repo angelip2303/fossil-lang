@@ -640,7 +640,7 @@ fn format_record_smart(
 }
 
 /// Format a type definition with full metadata (for type statement hovers)
-/// This shows the expanded record with all attributes like #[uri(...)]
+/// This shows the expanded record with all attributes like #[rdf(uri = "...")]
 fn format_type_definition(
     thir: &TypedHir,
     gcx: &GlobalContext,
@@ -659,7 +659,7 @@ fn format_type_definition(
 }
 
 
-/// Format a record type with metadata (attributes like #[uri(...)])
+/// Format a record type with metadata (attributes like #[rdf(uri = "...")])
 fn format_record_with_metadata_and_namer(
     thir: &TypedHir,
     gcx: &GlobalContext,
@@ -682,21 +682,13 @@ fn format_record_with_metadata_and_namer(
         let field_name = gcx.interner.resolve(*field_sym);
         let field_type_str = format_type_smart(thir, gcx, *field_ty, namer, 1);
 
-        // Check if this field has a URI attribute
+        // Format all attributes on this field
         if let Some(metadata) = &type_metadata
             && let Some(field_meta) = metadata.get_field(*field_sym) {
-                // Look for "uri" attribute
-                let uri_sym = gcx.interner.lookup("uri");
-                if let Some(uri_sym) = uri_sym
-                    && let Some(uri_attr) = field_meta.get_attribute(uri_sym) {
-                        // Get the first argument as the URI string
-                        if let Some(fossil_lang::ast::ast::Literal::String(uri_str_sym)) =
-                            uri_attr.args.first()
-                        {
-                            let uri_str = gcx.interner.resolve(*uri_str_sym);
-                            result.push_str(&format!("    #[uri(\"{}\")]\n", uri_str));
-                        }
-                    }
+                for attr in &field_meta.attributes {
+                    let attr_str = format_attribute(attr, gcx);
+                    result.push_str(&format!("    {}\n", attr_str));
+                }
             }
 
         result.push_str(&format!("    {}: {}", field_name, field_type_str));
@@ -709,6 +701,33 @@ fn format_record_with_metadata_and_namer(
 
     result.push('}');
     result
+}
+
+/// Format an attribute for display
+fn format_attribute(attr: &fossil_lang::context::AttributeData, gcx: &GlobalContext) -> String {
+    let attr_name = gcx.interner.resolve(attr.name);
+
+    if attr.args.is_empty() {
+        return format!("#[{}]", attr_name);
+    }
+
+    let args: Vec<String> = attr
+        .args
+        .iter()
+        .map(|(key_sym, value)| {
+            let key = gcx.interner.resolve(*key_sym);
+            let value_str = match value {
+                fossil_lang::ast::ast::Literal::String(s) => {
+                    format!("\"{}\"", gcx.interner.resolve(*s))
+                }
+                fossil_lang::ast::ast::Literal::Integer(n) => n.to_string(),
+                fossil_lang::ast::ast::Literal::Boolean(b) => b.to_string(),
+            };
+            format!("{} = {}", key, value_str)
+        })
+        .collect();
+
+    format!("#[{}({})]", attr_name, args.join(", "))
 }
 
 /// Collect all fields from a record row into a vector

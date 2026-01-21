@@ -24,9 +24,9 @@
 //! The provider generates:
 //! ```fossil
 //! type Person = {
-//!     #[uri("http://xmlns.com/foaf/0.1/name")]
+//!     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
 //!     name: string,
-//!     #[uri("http://xmlns.com/foaf/0.1/age")]
+//!     #[rdf(uri = "http://xmlns.com/foaf/0.1/age")]
 //!     #[optional]
 //!     age: int
 //! }
@@ -37,8 +37,8 @@ use std::sync::Arc;
 
 use fossil_lang::ast::Loc;
 use fossil_lang::ast::ast::{
-    Ast, Attribute, Literal, ProviderArgument, RecordField, Type as AstType, TypeKind as AstTypeKind,
-    PrimitiveType,
+    Ast, Attribute, AttributeArg, Literal, ProviderArgument, RecordField, Type as AstType,
+    TypeKind as AstTypeKind, PrimitiveType,
 };
 use fossil_lang::ast::thir::{
     Polytype, Type as ThirType, TypeKind as ThirTypeKind, TypeVar, TypedHir,
@@ -439,11 +439,15 @@ fn shex_fields_to_ast_fields(
             // Build attributes
             let mut attrs = Vec::new();
 
-            // Add #[uri("...")] attribute
-            let uri_attr_name = interner.intern("uri");
+            // Add #[rdf(uri = "...")] attribute
+            let rdf_attr_name = interner.intern("rdf");
+            let uri_key = interner.intern("uri");
             attrs.push(Attribute {
-                name: uri_attr_name,
-                args: vec![Literal::String(interner.intern(&field.predicate_uri))],
+                name: rdf_attr_name,
+                args: vec![AttributeArg {
+                    key: uri_key,
+                    value: Literal::String(interner.intern(&field.predicate_uri)),
+                }],
             });
 
             // Add #[optional] attribute if needed

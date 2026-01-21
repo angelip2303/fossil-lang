@@ -14,10 +14,10 @@
 //!
 //! ```fossil
 //! type Person = {
-//!     #[uri("http://xmlns.com/foaf/0.1/name")]
+//!     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
 //!     name: string,
 //!
-//!     #[uri("http://xmlns.com/foaf/0.1/age")]
+//!     #[rdf(uri = "http://xmlns.com/foaf/0.1/age")]
 //!     age: int
 //! }
 //!

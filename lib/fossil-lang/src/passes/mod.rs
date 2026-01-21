@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::ast::thir;
 use crate::ast::*;
-use crate::context::{DefId, Definitions, Interner, Kind, TypeConstructorInfo, TypeMetadata};
+use crate::context::{AttributeRegistry, AttributeSchema, DefId, Definitions, Interner, Kind, TypeConstructorInfo, TypeMetadata};
 use crate::passes::resolve::scope::Scope;
 use crate::passes::resolve::table::ResolutionTable;
 use crate::traits::function::FunctionImpl;
@@ -31,6 +31,8 @@ pub struct GlobalContext {
     /// Pre-interned wildcard symbol `_` for use in type signatures
     /// This is used in FieldSelector types to represent "any field"
     pub wildcard_symbol: crate::context::Symbol,
+    /// Registry of attribute schemas for compile-time validation
+    pub attribute_registry: AttributeRegistry,
 }
 
 impl GlobalContext {
@@ -46,12 +48,36 @@ impl GlobalContext {
             type_constructors: HashMap::new(),
             list_type_ctor: None,
             wildcard_symbol,
+            attribute_registry: AttributeRegistry::new(),
         };
 
         // Register builtin type constructors
         gcx.register_builtin_type_constructors();
 
         gcx
+    }
+
+    /// Register an attribute schema
+    ///
+    /// This allows external crates (like fossil-stdlib) to register
+    /// their attribute schemas for compile-time validation.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use fossil_lang::passes::GlobalContext;
+    /// use fossil_lang::context::{AttributeSchema, AttributeTarget, ArgSpec, ArgType};
+    ///
+    /// let mut gcx = GlobalContext::new();
+    /// gcx.register_attribute(
+    ///     AttributeSchema::new("rdf", AttributeTarget::Field)
+    ///         .arg("uri", ArgSpec::required(ArgType::String))
+    ///         .arg("prefix", ArgSpec::optional(ArgType::String))
+    /// );
+    /// ```
+    pub fn register_attribute(&mut self, schema: AttributeSchema) {
+        let name_symbol = self.interner.intern(schema.name);
+        self.attribute_registry.register(schema, name_symbol);
     }
 
     /// Register builtin type constructors

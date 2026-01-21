@@ -2,13 +2,13 @@ type Customer = csv!("lib/fossil-stdlib/examples/dataframe-ops/customers.csv")
 type Order = csv!("lib/fossil-stdlib/examples/dataframe-ops/orders.csv")
 
 type OrderForCustomer = {
-    #[uri("https://example.com/product")]
+    #[rdf(uri = "https://example.com/product")]
     product: string,
-    #[uri("https://example.com/amount")]
+    #[rdf(uri = "https://example.com/amount")]
     amount: int,
-    #[uri("https://example.com/name")]
+    #[rdf(uri = "https://example.com/name")]
     name: string,
-    #[uri("https://example.com/city")]
+    #[rdf(uri = "https://example.com/city")]
     city: string,
 }
 

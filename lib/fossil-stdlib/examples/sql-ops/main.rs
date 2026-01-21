@@ -5,11 +5,11 @@ use fossil_lang::error::CompileError;
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::executor::ThirExecutor;
 
-const PROGRAM: &str = "./lib/fossil-stdlib/examples/string-interpolation/string-interpolation.fossil";
+const PROGRAM: &str = "lib/fossil-stdlib/examples/sql-ops/sql-ops.fossil";
 
 pub fn main() -> Result<(), CompileError> {
     let mut gcx = GlobalContext::new();
-    gcx.register_provider("csv", fossil_providers::csv::CsvProvider);
+    gcx.register_provider("sql", fossil_providers::sql::SqlProvider);
     fossil_stdlib::init(&mut gcx);
 
     let compiler = Compiler::with_context(gcx);

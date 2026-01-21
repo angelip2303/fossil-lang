@@ -8,10 +8,10 @@
 //!
 //! ```fossil
 //! type Person = {
-//!     #[uri("http://xmlns.com/foaf/0.1/name")]
+//!     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
 //!     name: string,
 //!
-//!     #[uri("http://xmlns.com/foaf/0.1/age")]
+//!     #[rdf(uri = "http://xmlns.com/foaf/0.1/age")]
 //!     age: int
 //! }
 //!
@@ -88,7 +88,7 @@ pub struct EntityMetadata {
     /// DefId del tipo del valor wrapped
     pub type_def_id: Option<DefId>,
 
-    /// Metadata RDF extraída de atributos #[uri(...)]
+    /// Metadata RDF extraída de atributos #[rdf(uri = "...")]
     pub rdf_metadata: Option<RdfMetadata>,
 }
 
