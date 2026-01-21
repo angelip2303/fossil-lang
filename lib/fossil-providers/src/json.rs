@@ -1,21 +1,22 @@
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Cursor};
 use std::num::NonZeroUsize;
-use std::path::Path;
 use std::sync::Arc;
 
 use fossil_lang::ast::Loc;
-use fossil_lang::ast::ast::{Ast, Literal, Type, TypeKind};
+use fossil_lang::ast::ast::{Ast, ProviderArgument, Type, TypeKind};
 use fossil_lang::ast::thir::{
     Polytype, Type as ThirType, TypeKind as ThirTypeKind, TypeVar, TypedHir,
 };
 use fossil_lang::context::Interner;
 use fossil_lang::error::{ProviderError, RuntimeError};
+use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 use fossil_lang::traits::provider::{FunctionDef, ModuleSpec, ProviderOutput, TypeProviderImpl};
 use polars::prelude::*;
 
+use crate::source::{DataSource, ReadableSource, format_source_error};
 use crate::utils::*;
 
 pub struct JsonProvider;
@@ -23,25 +24,34 @@ pub struct JsonProvider;
 impl TypeProviderImpl for JsonProvider {
     fn provide(
         &self,
-        args: &[Literal],
+        args: &[ProviderArgument],
         ast: &mut Ast,
         interner: &mut Interner,
+        type_name: &str,
     ) -> Result<ProviderOutput, ProviderError> {
-        let path_str = extract_path_arg(args, interner)?;
+        use fossil_lang::error::CompileErrorKind;
 
-        validate_extension(&path_str, &["json", "ndjson"], interner)?;
-        validate_local_file(&path_str, interner)?;
+        let uri = extract_path_arg_from_provider(args, interner)?;
 
-        let path = Path::new(&path_str);
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
+        // Detect data source type (local file or HTTP)
+        let source = DataSource::detect(&uri).map_err(|e| {
+            ProviderError::new(
+                CompileErrorKind::ProviderError(interner.intern(&e.to_string())),
+                Loc::generated(),
+            )
+        })?;
 
-        let df = JsonReader::new(reader)
-            .infer_schema_len(NonZeroUsize::new(100))
-            .finish()?;
+        // Validate file extension
+        validate_extension(&uri, &["json", "ndjson"], interner)?;
 
-        let schema = df.schema();
-        let fields = schema_to_ast_fields(schema, ast, interner);
+        // For local files, validate that the file exists
+        if source.is_local() {
+            validate_local_file(&uri, interner)?;
+        }
+
+        // Infer schema based on source type
+        let schema = infer_json_schema(&source, interner)?;
+        let fields = schema_to_ast_fields(&schema, ast, interner);
 
         // Create AST record type
         let record_ty = ast.types.alloc(Type {
@@ -54,7 +64,8 @@ impl TypeProviderImpl for JsonProvider {
             functions: vec![FunctionDef {
                 name: "load".to_string(),
                 implementation: Arc::new(JsonLoadFunction {
-                    file_path: path_str,
+                    uri,
+                    type_name: type_name.to_string(),
                 }),
             }],
             submodules: vec![],
@@ -67,60 +78,185 @@ impl TypeProviderImpl for JsonProvider {
     }
 }
 
+/// Infers JSON schema from any data source (local or HTTP).
+fn infer_json_schema(
+    source: &DataSource,
+    interner: &mut Interner,
+) -> Result<Schema, ProviderError> {
+    use fossil_lang::error::CompileErrorKind;
+
+    match source {
+        DataSource::Local(path) => {
+            // Use Polars directly for local files
+            let file = File::open(path)?;
+            let reader = BufReader::new(file);
+
+            let df = JsonReader::new(reader)
+                .infer_schema_len(NonZeroUsize::new(100))
+                .finish()?;
+
+            Ok(df.schema().as_ref().clone())
+        }
+        DataSource::Http(_) => {
+            // Fetch data over HTTP and infer schema
+            let bytes = source.read_for_schema(None).map_err(|e| {
+                let error_msg = format_source_error(source, "infer schema", &e);
+                ProviderError::new(
+                    CompileErrorKind::ProviderError(interner.intern(&error_msg)),
+                    Loc::generated(),
+                )
+            })?;
+
+            // Parse JSON from bytes using Polars
+            let cursor = Cursor::new(bytes);
+            let df = JsonReader::new(cursor)
+                .infer_schema_len(NonZeroUsize::new(100))
+                .finish()
+                .map_err(|e| {
+                    ProviderError::new(
+                        CompileErrorKind::Runtime(format!(
+                            "Failed to parse JSON from '{}': {}",
+                            source.as_str(),
+                            e
+                        )),
+                        Loc::generated(),
+                    )
+                })?;
+
+            Ok(df.schema().as_ref().clone())
+        }
+    }
+}
+
 /// Load function for JSON files
 ///
-/// This function is generated by the JSON provider and captures the file path
+/// This function is generated by the JSON provider and captures the URI
 /// specified in the type provider invocation. At runtime, it loads the JSON
-/// file as a LazyFrame without needing any arguments.
+/// data as a LazyFrame without needing any arguments.
+///
+/// The URI can be either a local file path or an HTTP/HTTPS URL:
+/// - Local: `json!("data/users.json")`
+/// - HTTP: `json!("https://api.example.com/users.json")`
 ///
 /// Example:
 /// ```ignore
-/// type Users = json<"users.json">
+/// type Users = json!("users.json")
 /// let data = Users::load()  // No arguments needed!
+///
+/// type RemoteUsers = json!("https://api.example.com/users.json")
+/// let data = RemoteUsers::load()  // Fetches from HTTP
 /// ```
 pub struct JsonLoadFunction {
-    file_path: String,
+    uri: String,
+    type_name: String,
 }
 
 impl FunctionImpl for JsonLoadFunction {
     fn signature(
         &self,
         thir: &mut TypedHir,
-        next_type_var: &mut dyn FnMut() -> TypeVar,
+        _next_type_var: &mut dyn FnMut() -> TypeVar,
+        gcx: &GlobalContext,
     ) -> Polytype {
-        // Return a type variable that will be inferred
-        let t_var = next_type_var();
-        let result_ty = thir.types.alloc(ThirType {
+        // Look up the type DefId by name
+        let type_sym = gcx.interner.lookup(&self.type_name);
+        let type_def_id = type_sym.and_then(|sym| gcx.definitions.get_by_symbol(sym).map(|d| d.id()));
+
+        let result_ty = if let Some(def_id) = type_def_id {
+            // Look up the List type constructor
+            let list_sym = gcx.interner.lookup("List");
+            let list_def_id = list_sym.and_then(|sym| gcx.definitions.get_by_symbol(sym).map(|d| d.id()));
+
+            // Create Named type for the record type
+            let record_ty = thir.types.alloc(ThirType {
+                loc: Loc::generated(),
+                kind: ThirTypeKind::Named(def_id),
+            });
+
+            if let Some(list_id) = list_def_id {
+                // Return List<RecordType>
+                thir.types.alloc(ThirType {
+                    loc: Loc::generated(),
+                    kind: ThirTypeKind::App {
+                        ctor: list_id,
+                        args: vec![record_ty],
+                    },
+                })
+            } else {
+                record_ty
+            }
+        } else {
+            // Fallback: use type variable
+            let t_var = _next_type_var();
+            thir.types.alloc(ThirType {
+                loc: Loc::generated(),
+                kind: ThirTypeKind::Var(t_var),
+            })
+        };
+
+        // Create function type: () -> List<RecordType>
+        let fn_ty = thir.types.alloc(ThirType {
             loc: Loc::generated(),
-            kind: ThirTypeKind::Var(t_var),
+            kind: ThirTypeKind::Function(vec![], result_ty),
         });
 
-        Polytype::poly(vec![t_var], result_ty)
+        Polytype::mono(fn_ty)
     }
 
     fn call(&self, _args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
         use fossil_lang::error::{CompileError, CompileErrorKind};
 
-        // Load JSON as LazyFrame for lazy evaluation
-        let path = Path::new(&self.file_path);
-        let file = File::open(path).map_err(|e| {
+        // Detect source type
+        let source = DataSource::detect(&self.uri).map_err(|e| {
             CompileError::new(
-                CompileErrorKind::Runtime(format!("Failed to open JSON file: {}", e)),
+                CompileErrorKind::Runtime(format!("Invalid URI: {}", e)),
                 Loc::generated(),
             )
         })?;
-        let reader = BufReader::new(file);
 
-        let df = JsonReader::new(reader)
-            .infer_schema_len(NonZeroUsize::new(100))
-            .finish()
-            .map_err(|e| {
-                CompileError::new(
-                    CompileErrorKind::Runtime(format!("Failed to parse JSON file: {}", e)),
-                    Loc::generated(),
-                )
-            })?;
+        let df = match source {
+            DataSource::Local(path) => {
+                // Load JSON from local file
+                let file = File::open(&path).map_err(|e| {
+                    CompileError::new(
+                        CompileErrorKind::Runtime(format!("Failed to open JSON file: {}", e)),
+                        Loc::generated(),
+                    )
+                })?;
+                let reader = BufReader::new(file);
 
-        Ok(Value::LazyFrame(df.lazy()))
+                JsonReader::new(reader)
+                    .infer_schema_len(NonZeroUsize::new(100))
+                    .finish()
+                    .map_err(|e| {
+                        CompileError::new(
+                            CompileErrorKind::Runtime(format!("Failed to parse JSON file: {}", e)),
+                            Loc::generated(),
+                        )
+                    })?
+            }
+            DataSource::Http(_) => {
+                // Load JSON from HTTP
+                let bytes = source.read_all().map_err(|e| {
+                    CompileError::new(
+                        CompileErrorKind::Runtime(format!("Failed to fetch JSON: {}", e)),
+                        Loc::generated(),
+                    )
+                })?;
+
+                let cursor = Cursor::new(bytes);
+                JsonReader::new(cursor)
+                    .infer_schema_len(NonZeroUsize::new(100))
+                    .finish()
+                    .map_err(|e| {
+                        CompileError::new(
+                            CompileErrorKind::Runtime(format!("Failed to parse JSON: {}", e)),
+                            Loc::generated(),
+                        )
+                    })?
+            }
+        };
+
+        Ok(Value::Records(df.lazy()))
     }
 }

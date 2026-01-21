@@ -36,8 +36,8 @@ use crate::rdf::RdfMetadata;
 /// Identificador único para el tipo Extension Entity
 pub const ENTITY_TYPE_ID: ExtensionTypeId = ExtensionTypeId(1);
 
-/// Identificador para listas de entidades (batch processing)
-pub const ENTITY_LIST_TYPE_ID: ExtensionTypeId = ExtensionTypeId(2);
+/// Identificador para streams perezosos de entidades
+pub const LAZY_ENTITY_STREAM_TYPE_ID: ExtensionTypeId = ExtensionTypeId(2);
 
 /// Global storage for Entity type constructor DefId
 ///
@@ -102,40 +102,36 @@ impl ExtensionMetadata for EntityMetadata {
     }
 }
 
-/// Extension for batch processing of entities
+/// Lazy Streaming Entity Batch for streaming serialization
 ///
-/// Represents a collection of entities as a LazyFrame with parallel subject URIs.
-/// This is more efficient than Vec<Value> for large batches of entities.
+/// Stores a LazyFrame that will be processed in chunks during serialization.
+/// This enables O(chunk_size) memory usage instead of O(n).
 ///
-/// # Design
-///
-/// - `data`: LazyFrame containing all entity data (rows are entities, columns are properties)
-/// - `subjects`: Vec of subject URIs, parallel to rows in LazyFrame
-/// - `rdf_metadata`: Shared RDF metadata for all entities (field URIs from #[uri(...)] attributes)
-///
-/// This design is extensible beyond RDF:
-/// - For RDF: subjects are URIs (http://example.com/person/1)
-/// - For SQL: subjects could be foreign keys (person_id = 1)
-/// - For Neo4j: subjects could be node IDs (node:123)
+/// Memory: O(chunk_size) per chunk during serialization
 #[derive(Clone)]
-pub struct EntityExtension {
-    /// LazyFrame containing entity data (lazy until serialization)
-    pub data: polars::prelude::LazyFrame,
-
-    /// Subject identifiers parallel to LazyFrame rows
-    /// For RDF: URIs, For SQL: Foreign keys, For Neo4j: Node IDs
-    pub subjects: Vec<Arc<str>>,
-
-    /// Optional type DefId (if entities have same type)
-    pub type_def_id: Option<DefId>,
-
-    /// Shared RDF metadata for all entities
-    pub rdf_metadata: Option<RdfMetadata>,
+pub struct LazyStreamingEntityBatch {
+    /// Source LazyFrame (not collected until serialize)
+    pub lf: polars::prelude::LazyFrame,
+    /// Subject URI prefix (e.g., "http://example.org/person/")
+    pub subject_prefix: String,
+    /// Column name for subject ID (e.g., "id")
+    pub id_column: String,
+    /// RDF metadata (predicate URIs for each column)
+    pub rdf_metadata: RdfMetadata,
 }
 
-impl ExtensionMetadata for EntityExtension {
+impl std::fmt::Debug for LazyStreamingEntityBatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LazyStreamingEntityBatch")
+            .field("subject_prefix", &self.subject_prefix)
+            .field("id_column", &self.id_column)
+            .finish()
+    }
+}
+
+impl ExtensionMetadata for LazyStreamingEntityBatch {
     fn type_name(&self) -> &str {
-        "EntityList"
+        "LazyStreamingEntityBatch"
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -163,6 +159,7 @@ impl FunctionImpl for EntityWithIdFunction {
         &self,
         thir: &mut TypedHir,
         next_type_var: &mut dyn FnMut() -> TypeVar,
+        _gcx: &GlobalContext,
     ) -> Polytype {
         // forall T. (T, string) -> Entity<T>
         let t_var = next_type_var();
@@ -240,11 +237,10 @@ impl FunctionImpl for EntityWithIdFunction {
         // Infer DefId from value type context
         let type_def_id = infer_type_def_id(&inner, ctx);
 
-        // Extract RDF metadata if available
+        // Extract RDF metadata if available (using reference, no clone needed)
         let rdf_metadata = type_def_id.and_then(|def_id| {
             ctx.gcx.type_metadata.get(&def_id).and_then(|tm| {
-                let mut interner = ctx.gcx.interner.clone();
-                RdfMetadata::from_type_metadata(tm, &mut interner)
+                RdfMetadata::from_type_metadata(tm, &ctx.gcx.interner)
             })
         });
 
@@ -265,7 +261,7 @@ impl FunctionImpl for EntityWithIdFunction {
 ///
 /// Attempts to determine the DefId of the type that created this value.
 /// For records (LazyFrame), checks ctx.current_type first, then tries to
-/// find a matching type definition in type_metadata.
+/// find a matching type definition in type_metadata via structural matching.
 fn infer_type_def_id(value: &Value, ctx: &RuntimeContext) -> Option<DefId> {
     // First try current_type from context
     if ctx.current_type.is_some() {
@@ -273,16 +269,35 @@ fn infer_type_def_id(value: &Value, ctx: &RuntimeContext) -> Option<DefId> {
     }
 
     // If that's not set, try to find a type definition that has metadata
-    // For records (LazyFrames), we can try to match structure
-    if let Value::LazyFrame(_lf) = value {
+    // For records (LazyFrames), use structural matching based on field names
+    if let Value::Records(lf) = value {
         // If there's only one type with metadata, use that as a heuristic
-        // This works for simple cases like our example
         if ctx.gcx.type_metadata.len() == 1 {
             return ctx.gcx.type_metadata.keys().next().copied();
         }
 
-        // TODO: More sophisticated matching based on field names/types
-        // For now, this heuristic works for the common case
+        // Structural matching: collect the first row to get column names
+        if let Ok(df) = lf.clone().slice(0, 1).collect() {
+            let columns: std::collections::HashSet<String> = df
+                .get_column_names()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+
+            // Find a type that matches all column names
+            for (def_id, type_meta) in &ctx.gcx.type_metadata {
+                let type_fields: std::collections::HashSet<String> = type_meta
+                    .field_metadata
+                    .keys()
+                    .map(|sym| ctx.gcx.interner.resolve(*sym).to_string())
+                    .collect();
+
+                // Check if field names match exactly
+                if columns == type_fields {
+                    return Some(*def_id);
+                }
+            }
+        }
     }
 
     None

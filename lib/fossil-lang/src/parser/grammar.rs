@@ -7,10 +7,15 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use chumsky::input::IterInput;
 use chumsky::pratt::{infix, left, postfix};
 use chumsky::prelude::*;
+use logos::Logos;
 
-use crate::ast::ast::*;
+use crate::ast::ast::{
+    Argument, Ast, Attribute, Expr, ExprId, ExprKind, Literal, Param, Path, PrimitiveType,
+    ProviderArgument, RecordField, Stmt, StmtId, StmtKind, Type, TypeId, TypeKind,
+};
 use crate::ast::{Loc, SourceId};
 use crate::context::{Interner, Symbol};
 use crate::parser::lexer::Token;
@@ -67,17 +72,26 @@ fn parse_stmt_impl<'a, I>(
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
-    // Use .then() instead of .ignore_then() to preserve full span
+    // Parse selective items: { item1, item2 }
+    let import_items = parse_symbol(ctx)
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LBrace), just(Token::RBrace));
+
+    // Import: open module { items } as alias
     let import_stmt = just(Token::Open)
         .then(parse_path(ctx))
+        .then(import_items.or_not())
         .then(just(Token::As).ignore_then(parse_symbol(ctx)).or_not())
-        .map_with(|((_, module), alias), e| {
-            ctx.alloc_stmt(StmtKind::Import { module, alias }, ctx.to_loc(e.span()))
+        .map_with(|(((_, module), items), alias), e| {
+            ctx.alloc_stmt(StmtKind::Import { module, items, alias }, ctx.to_loc(e.span()))
         });
 
     // Use .then() instead of .ignore_then() to preserve full span
+    // Use parse_binding_name to allow both identifiers and underscore (discard pattern)
     let let_stmt = just(Token::Let)
-        .then(parse_symbol(ctx))
+        .then(parse_binding_name(ctx))
         .then(
             just(Token::Colon)
                 .ignore_then(parse_type(ctx))
@@ -90,11 +104,26 @@ where
         });
 
     // Use .then() instead of .ignore_then() to preserve full span
+    // Also detect invalid type annotation pattern: `type Name: Foo = Bar`
     let type_stmt = just(Token::Type)
         .then(parse_symbol(ctx))
+        .then(
+            // Detect invalid type annotation pattern: `: SomeType`
+            just(Token::Colon)
+                .ignore_then(parse_type(ctx))
+                .map_with(|_, e| Some(e.span()))
+                .or_not()
+                .map(|opt| opt.flatten())
+        )
         .then_ignore(just(Token::Eq))
         .then(parse_type(ctx))
-        .map_with(|((_, name), ty), e| {
+        .validate(|(((_, name), invalid_annotation_span), ty), e, emitter| {
+            if let Some(annotation_span) = invalid_annotation_span {
+                emitter.emit(Rich::custom(
+                    annotation_span,
+                    "Type declarations cannot have type annotations. Remove the `: <type>` after the name."
+                ));
+            }
             ctx.alloc_stmt(StmtKind::Type { name, ty }, ctx.to_loc(e.span()))
         });
 
@@ -109,6 +138,17 @@ where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
     select! { Token::Identifier(ident) => ctx.intern(ident) }
+}
+
+/// Parse a binding name for let statements - accepts identifiers OR underscore (discard pattern)
+fn parse_binding_name<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
+where
+    I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
+{
+    select! {
+        Token::Identifier(ident) => ctx.intern(ident),
+        Token::Underscore => ctx.intern("_"),
+    }
 }
 
 fn parse_path<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Path, ParserError<'a>> + Clone
@@ -134,11 +174,17 @@ where
         })
 }
 
-fn parse_param<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Param, ParserError<'a>> + Clone
+/// Parse a parameter with optional default value: `name` or `name = default`
+fn parse_param<'a, I>(
+    ctx: &'a AstCtx,
+    expr: impl Parser<'a, I, ExprId, ParserError<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, Param, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
-    parse_symbol(ctx).map(|name| Param { name })
+    parse_symbol(ctx)
+        .then(just(Token::Eq).ignore_then(expr).or_not())
+        .map(|(name, default)| Param { name, default })
 }
 
 fn parse_primitive_type<'a, I>() -> impl Parser<'a, I, PrimitiveType, ParserError<'a>> + Clone
@@ -164,8 +210,77 @@ where
             .then(just(Token::RParen))
             .map_with(|_, e| ctx.alloc_expr(ExprKind::Unit, ctx.to_loc(e.span())));
 
-        let literal = parse_literal(ctx)
-            .map_with(|lit, e| ctx.alloc_expr(ExprKind::Literal(lit), ctx.to_loc(e.span())));
+        // Non-string literals (integers, booleans)
+        let non_string_literal = select! {
+            Token::Integer(i) => Literal::Integer(i),
+            Token::True => Literal::Boolean(true),
+            Token::False => Literal::Boolean(false),
+        }
+        .map_with(|lit, e| ctx.alloc_expr(ExprKind::Literal(lit), ctx.to_loc(e.span())));
+
+        // String literal with potential interpolation
+        let string_expr = select! { Token::String(s) => s }
+            .map_with(move |s: &str, e| {
+                let loc = ctx.to_loc(e.span());
+
+                // Try to parse as interpolated string
+                if let Some((parts, expr_strs)) = parse_interpolation_segments(s) {
+                    // Parse each expression string
+                    let mut parsed_exprs = Vec::new();
+                    for expr_str in expr_strs {
+                        // Re-parse the expression string using logos + chumsky
+                        let lexer = Token::lexer(expr_str);
+                        let tokens: Vec<_> = lexer
+                            .spanned()
+                            .map(|(tok, span)| {
+                                let token = match tok {
+                                    Ok(t) => t,
+                                    Err(_) => Token::Identifier("error"),
+                                };
+                                (token, SimpleSpan::from(span))
+                            })
+                            .collect();
+
+                        // Parse as expression using IterInput
+                        let len = expr_str.len();
+                        let eoi = SimpleSpan::from(len..len);
+                        let input = IterInput::new(tokens.into_iter(), eoi);
+                        let parsed = parse_expr(ctx)
+                            .parse(input)
+                            .into_result();
+
+                        match parsed {
+                            Ok(expr_id) => parsed_exprs.push(expr_id),
+                            Err(_) => {
+                                // If parsing fails, create an error placeholder
+                                // In a real implementation, we'd report the error
+                                let error_lit = ctx.alloc_expr(
+                                    ExprKind::Literal(Literal::String(ctx.intern(expr_str))),
+                                    loc.clone(),
+                                );
+                                parsed_exprs.push(error_lit);
+                            }
+                        }
+                    }
+
+                    // Intern the string parts
+                    let interned_parts: Vec<_> = parts.iter().map(|p| ctx.intern(p)).collect();
+
+                    ctx.alloc_expr(
+                        ExprKind::StringInterpolation {
+                            parts: interned_parts,
+                            exprs: parsed_exprs,
+                        },
+                        loc,
+                    )
+                } else {
+                    // Regular string literal
+                    ctx.alloc_expr(ExprKind::Literal(Literal::String(ctx.intern(s))), loc)
+                }
+            });
+
+        // Combine all literal types
+        let literal = non_string_literal.or(string_expr);
 
         let list = expr
             .clone()
@@ -199,7 +314,7 @@ where
 
         let function = just(Token::Func)
             .ignore_then(
-                parse_param(ctx)
+                parse_param(ctx, expr.clone())
                     .separated_by(just(Token::Comma))
                     .allow_trailing()
                     .collect()
@@ -211,10 +326,22 @@ where
                 ctx.alloc_expr(ExprKind::Function { params, body }, ctx.to_loc(e.span()))
             });
 
+        // Parse named argument: `name: expr`
+        let named_arg = parse_symbol(ctx)
+            .then_ignore(just(Token::Colon))
+            .then(expr.clone())
+            .map(|(name, value)| Argument::Named { name, value });
+
+        // Parse positional argument: just `expr`
+        let positional_arg = expr.clone().map(Argument::Positional);
+
+        // Try named first (since it's more specific), fall back to positional
+        let argument = named_arg.or(positional_arg);
+
         let application = path
             .clone()
             .then(
-                expr.clone()
+                argument
                     .separated_by(just(Token::Comma))
                     .allow_trailing()
                     .collect()
@@ -224,10 +351,15 @@ where
                 ctx.alloc_expr(ExprKind::Application { callee, args }, ctx.to_loc(e.span()))
             });
 
+        // Placeholder `_` for field selectors
+        let placeholder = just(Token::Underscore)
+            .map_with(|_, e| ctx.alloc_expr(ExprKind::Placeholder, ctx.to_loc(e.span())));
+
         // Block must come BEFORE record since both start with {
         // Block: { stmt* } parses as statements
         // Record: { field = expr, ... } requires field names with =
         // Function must come BEFORE application and path to avoid parsing 'fn' as identifier
+        // Placeholder must come BEFORE path to avoid `_` being parsed as identifier
         // Use .or() instead of choice() to avoid backtracking that pollutes the arena
         let atom = function
             .or(application)
@@ -236,6 +368,7 @@ where
             .or(list)
             .or(block)
             .or(record)
+            .or(placeholder)
             .or(path)
             .map_with(|expr, e| (expr, e.span()))
             .boxed();
@@ -246,12 +379,14 @@ where
             .pratt((
                 postfix(
                     10, // Highest precedence
-                    just(Token::Dot).ignore_then(parse_symbol(ctx)),
-                    |(lhs, lhs_span): (ExprId, SimpleSpan), field, _| {
-                        let loc = ctx.to_loc(lhs_span);
+                    just(Token::Dot).ignore_then(parse_symbol(ctx)).map_with(|field, e| (field, e.span())),
+                    |(lhs, lhs_span): (ExprId, SimpleSpan), (field, field_span): (Symbol, SimpleSpan), _| {
+                        // Merge spans: create a span from start of lhs to end of field
+                        let merged_span = lhs_span.start()..field_span.end();
+                        let merged_loc = ctx.to_loc(SimpleSpan::from(merged_span.clone()));
                         (
-                            ctx.alloc_expr(ExprKind::FieldAccess { expr: lhs, field }, loc.clone()),
-                            lhs_span,
+                            ctx.alloc_expr(ExprKind::FieldAccess { expr: lhs, field }, merged_loc),
+                            SimpleSpan::from(merged_span),
                         )
                     },
                 ),
@@ -282,10 +417,71 @@ where
 {
     select! {
         Token::Integer(i) => Literal::Integer(i),
+        // Note: For literals used in provider arguments, we don't parse interpolation
+        // Interpolation is only handled in expression context via parse_string_expr
         Token::String(s) => Literal::String(ctx.intern(s)),
         Token::True => Literal::Boolean(true),
         Token::False => Literal::Boolean(false),
     }
+}
+
+/// Parse interpolation segments from a string like "Hello ${name}, you are ${age}!"
+/// Returns (parts, expr_strings) where parts are literal segments and expr_strings are the expressions
+fn parse_interpolation_segments(s: &str) -> Option<(Vec<&str>, Vec<&str>)> {
+    // Quick check: does the string contain any interpolation?
+    if !s.contains("${") {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    let mut exprs = Vec::new();
+    let mut current_pos = 0;
+    let bytes = s.as_bytes();
+
+    while current_pos < s.len() {
+        // Find next ${
+        if let Some(start) = s[current_pos..].find("${") {
+            let start_abs = current_pos + start;
+            // Add the literal part before ${
+            parts.push(&s[current_pos..start_abs]);
+
+            // Find matching }
+            // We need to handle nested braces for expressions like ${obj.field}
+            let expr_start = start_abs + 2;
+            let mut brace_depth = 1;
+            let mut expr_end = expr_start;
+
+            while expr_end < s.len() && brace_depth > 0 {
+                match bytes[expr_end] {
+                    b'{' => brace_depth += 1,
+                    b'}' => brace_depth -= 1,
+                    _ => {}
+                }
+                if brace_depth > 0 {
+                    expr_end += 1;
+                }
+            }
+
+            if brace_depth != 0 {
+                // Unmatched brace - treat as regular string
+                return None;
+            }
+
+            exprs.push(&s[expr_start..expr_end]);
+            current_pos = expr_end + 1; // Skip past the closing }
+        } else {
+            // No more interpolations, add remaining text
+            parts.push(&s[current_pos..]);
+            break;
+        }
+    }
+
+    // If we ended at an interpolation, add empty trailing part
+    if parts.len() == exprs.len() {
+        parts.push("");
+    }
+
+    Some((parts, exprs))
 }
 
 /// Parse attribute: #[name("arg1", "arg2")]
@@ -356,18 +552,30 @@ where
                 .map_with(|fields, e| ctx.alloc_type(TypeKind::Record(fields), ctx.to_loc(e.span())))
         };
 
-        // Parse type provider invocation: csv<"file.csv", "option">
+        // Parse named provider argument: `name: literal`
+        let named_provider_arg = parse_symbol(ctx)
+            .then_ignore(just(Token::Colon))
+            .then(parse_literal(ctx))
+            .map(|(name, value)| ProviderArgument::Named { name, value });
+
+        // Parse positional provider argument: just `literal`
+        let positional_provider_arg = parse_literal(ctx).map(ProviderArgument::Positional);
+
+        // Try named first, fall back to positional
+        let provider_argument = named_provider_arg.or(positional_provider_arg);
+
+        // Parse type provider invocation: csv!("file.csv") or csv!(path: "file.csv", delimiter: ";")
         let provider = parse_path(ctx)
+            .then_ignore(just(Token::Bang))
             .then(
-                parse_literal(ctx)
+                provider_argument
                     .separated_by(just(Token::Comma))
-                    .at_least(1)
+                    .allow_trailing()
                     .collect()
-                    .delimited_by(just(Token::LAngle), just(Token::RAngle))
+                    .delimited_by(just(Token::LParen), just(Token::RParen))
             )
-            .try_map(|(path, literals), span| {
-                // Type providers use literals as arguments
-                Ok(ctx.alloc_type(TypeKind::Provider { provider: path, args: literals }, ctx.to_loc(span)))
+            .map_with(|(path, args), e| {
+                ctx.alloc_type(TypeKind::Provider { provider: path, args }, ctx.to_loc(e.span()))
             });
 
         // Parse Name or Name<Type, Type, ...>

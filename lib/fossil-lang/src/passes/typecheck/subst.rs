@@ -89,6 +89,24 @@ impl Subst {
                 }
             }
 
+            thir::TypeKind::FieldSelector { record_ty, field_ty, field } => {
+                let new_record_ty = self.apply_with_cache(record_ty, thir_ast, cache);
+                let new_field_ty = self.apply_with_cache(field_ty, thir_ast, cache);
+
+                if new_record_ty == record_ty && new_field_ty == field_ty {
+                    ty_id
+                } else {
+                    thir_ast.types.alloc(thir::Type {
+                        loc: loc.clone(),
+                        kind: thir::TypeKind::FieldSelector {
+                            record_ty: new_record_ty,
+                            field_ty: new_field_ty,
+                            field,
+                        },
+                    })
+                }
+            }
+
             thir::TypeKind::Primitive(_) | thir::TypeKind::Named(_) => ty_id,
         };
 
@@ -138,10 +156,13 @@ impl Subst {
             thir::RecordRow::Var(v) => {
                 // Check if v is bound in the substitution
                 if let Some(&bound_ty) = self.map.get(&v) {
-                    // Extract the row from the bound type
-                    let bound = thir_ast.types.get(bound_ty);
-                    if let thir::TypeKind::Record(row) = &bound.kind {
-                        row.clone()
+                    // First, recursively apply substitution to the bound type
+                    let resolved_ty = self.apply_with_cache(bound_ty, thir_ast, cache);
+                    // Extract the row from the resolved type
+                    let resolved = thir_ast.types.get(resolved_ty);
+                    if let thir::TypeKind::Record(row) = &resolved.kind {
+                        // Recursively apply to the extracted row as well
+                        self.apply_row(row.clone(), thir_ast, cache)
                     } else {
                         thir::RecordRow::Var(v)
                     }

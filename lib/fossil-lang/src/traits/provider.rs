@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use crate::ast::ast::{Literal, Ast, TypeId};
-use crate::context::Interner;
+use crate::ast::ast::{Ast, Literal, ProviderArgument, TypeId};
+use crate::context::{Interner, Symbol};
 use crate::error::ProviderError;
 use crate::traits::function::FunctionImpl;
 
@@ -43,6 +43,57 @@ pub struct FunctionDef {
     pub implementation: Arc<dyn FunctionImpl>,
 }
 
+/// Information about a provider parameter
+#[derive(Debug, Clone)]
+pub struct ProviderParamInfo {
+    /// Parameter name
+    pub name: &'static str,
+    /// Whether this parameter is required
+    pub required: bool,
+    /// Default value if not provided (only for optional params)
+    pub default: Option<Literal>,
+}
+
+/// Resolved provider arguments (name → value mapping)
+#[derive(Debug, Default)]
+pub struct ResolvedProviderArgs {
+    args: std::collections::HashMap<Symbol, Literal>,
+}
+
+impl ResolvedProviderArgs {
+    /// Get a required string argument
+    pub fn get_string(&self, name: Symbol, interner: &Interner) -> Option<String> {
+        self.args.get(&name).and_then(|lit| {
+            if let Literal::String(sym) = lit {
+                Some(interner.resolve(*sym).to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get an optional boolean argument
+    pub fn get_bool(&self, name: Symbol) -> Option<bool> {
+        self.args.get(&name).and_then(|lit| {
+            if let Literal::Boolean(b) = lit {
+                Some(*b)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Check if an argument was provided
+    pub fn has(&self, name: Symbol) -> bool {
+        self.args.contains_key(&name)
+    }
+
+    /// Insert an argument
+    pub fn insert(&mut self, name: Symbol, value: Literal) {
+        self.args.insert(name, value);
+    }
+}
+
 /// The TypeProvider trait generates an AST type and optional module at compile-time
 ///
 /// Providers have access to the AST type arena to allocate types,
@@ -59,16 +110,25 @@ pub struct FunctionDef {
 ///
 /// Example:
 /// ```ignore
-/// type People = csv<"people.csv">
+/// type People = csv!("people.csv")
 /// let data = People::load()  // Generated module function
 /// ```
 pub trait TypeProviderImpl: Send + Sync {
+    /// Define the expected parameters for this provider
+    ///
+    /// Returns information about each parameter: name, required, default value.
+    /// Used for validation and documentation.
+    fn param_info(&self) -> Vec<ProviderParamInfo> {
+        vec![]
+    }
+
     /// Generate an AST type and optional module from compile-time arguments
     ///
     /// # Arguments
-    /// * `args` - Literal arguments passed to the provider (e.g., file path)
+    /// * `args` - Arguments passed to the provider (positional or named)
     /// * `ast` - Mutable access to the AST arena for type allocation
     /// * `interner` - Mutable access to the symbol interner
+    /// * `type_name` - The name of the type being defined (e.g., "PersonData")
     ///
     /// # Returns
     /// A `ProviderOutput` containing:
@@ -76,8 +136,9 @@ pub trait TypeProviderImpl: Send + Sync {
     /// - An optional module specification with functions
     fn provide(
         &self,
-        args: &[Literal],
+        args: &[ProviderArgument],
         ast: &mut Ast,
         interner: &mut Interner,
+        type_name: &str,
     ) -> Result<ProviderOutput, ProviderError>;
 }

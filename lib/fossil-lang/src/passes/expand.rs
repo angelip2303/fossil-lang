@@ -98,10 +98,12 @@ impl ProviderExpander {
         };
 
         // Execute the provider to generate type + optional module (F# style)
+        let type_name_str = self.gcx.interner.resolve(type_name).to_string();
         let provider_output = provider_impl.provide(
             &args,
             &mut self.ast,
             &mut self.gcx.interner,
+            &type_name_str,
         )?;
 
         // Replace the Provider type node with the generated AST type

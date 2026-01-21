@@ -7,6 +7,7 @@ use fossil_lang::ast::Loc;
 use fossil_lang::ast::ast::PrimitiveType;
 use fossil_lang::ast::thir::{Polytype, Type, TypeKind, TypeVar, TypedHir};
 use fossil_lang::error::RuntimeError;
+use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 
@@ -29,6 +30,7 @@ impl FunctionImpl for StringConcatFunction {
         &self,
         thir: &mut TypedHir,
         _next_type_var: &mut dyn FnMut() -> TypeVar,
+        _gcx: &GlobalContext,
     ) -> Polytype {
         // (string, string) -> string
 
@@ -119,6 +121,7 @@ impl FunctionImpl for ToStringFunction {
         &self,
         thir: &mut TypedHir,
         next_type_var: &mut dyn FnMut() -> TypeVar,
+        _gcx: &GlobalContext,
     ) -> Polytype {
         // forall T. (T) -> string
         let t_var = next_type_var();

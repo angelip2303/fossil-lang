@@ -34,7 +34,8 @@ impl TypeChecker {
                 let thir_items: Result<Vec<_>, CompileError> = items
                     .iter()
                     .map(|&item| {
-                        let (_, item_ty) = self.infer(item)?;
+                        let (subst, item_ty) = self.infer(item)?;
+                        self.global_subst = self.global_subst.compose(&subst, &mut self.target);
                         self.fold_expr_to_thir(item, item_ty)
                     })
                     .collect();
@@ -45,7 +46,8 @@ impl TypeChecker {
                 let thir_fields: Result<Vec<_>, CompileError> = fields
                     .iter()
                     .map(|(name, field_expr)| {
-                        let (_, field_ty) = self.infer(*field_expr)?;
+                        let (subst, field_ty) = self.infer(*field_expr)?;
+                        self.global_subst = self.global_subst.compose(&subst, &mut self.target);
                         let thir_field = self.fold_expr_to_thir(*field_expr, field_ty)?;
                         Ok((*name, thir_field))
                     })
@@ -54,34 +56,86 @@ impl TypeChecker {
             }
 
             hir::ExprKind::Function { params, body } => {
-                // Need to restore local env for folding the body
-                // Build the local env again from params
+                // Extract parameter types and return type from the inferred function type
+                // Apply global_subst to get resolved types
+                let resolved_ty = self.global_subst.apply(ty, &mut self.target);
+                let func_type = self.target.types.get(resolved_ty);
+
+                let (param_types, ret_ty) = match &func_type.kind {
+                    thir::TypeKind::Function(param_tys, ret) => {
+                        (param_tys.clone(), *ret)
+                    }
+                    _ => {
+                        // Fallback: if not a function type, infer fresh types
+                        let param_types: Vec<_> = params.iter()
+                            .map(|_| self.fresh_type_var_generated())
+                            .collect();
+                        let ret_ty = self.fresh_type_var_generated();
+                        (param_types, ret_ty)
+                    }
+                };
+
+                // Build the local env with the actual inferred parameter types
                 let mut local_env = self.env.clone();
-                for param in params {
-                    let param_ty = self.fresh_type_var_generated();
+                for (param, &param_ty) in params.iter().zip(param_types.iter()) {
                     local_env.insert(param.def_id, thir::Polytype::mono(param_ty));
                 }
 
                 let saved_env = std::mem::replace(&mut self.env, local_env);
-                let (_, body_ty) = self.infer(*body)?;
-                let thir_body = self.fold_expr_to_thir(*body, body_ty)?;
+                let thir_body = self.fold_expr_to_thir(*body, ret_ty)?;
                 self.env = saved_env;
 
+                // Convert params with defaults
+                let thir_params: Result<Vec<_>, CompileError> = params
+                    .iter()
+                    .map(|p| {
+                        let default = if let Some(default_expr) = p.default {
+                            let (subst, default_ty) = self.infer(default_expr)?;
+                            self.global_subst = self.global_subst.compose(&subst, &mut self.target);
+                            Some(self.fold_expr_to_thir(default_expr, default_ty)?)
+                        } else {
+                            None
+                        };
+                        Ok(thir::Param {
+                            name: p.name,
+                            def_id: p.def_id,
+                            default,
+                        })
+                    })
+                    .collect();
+
                 thir::ExprKind::Function {
-                    params: params.clone(),
+                    params: thir_params?,
                     body: thir_body,
                 }
             }
 
             hir::ExprKind::Application { callee, args } => {
-                let (_, callee_ty) = self.infer(*callee)?;
+                let (subst, callee_ty) = self.infer(*callee)?;
+                self.global_subst = self.global_subst.compose(&subst, &mut self.target);
                 let thir_callee = self.fold_expr_to_thir(*callee, callee_ty)?;
 
+                // Convert arguments, preserving named/positional distinction
                 let thir_args: Result<Vec<_>, CompileError> = args
                     .iter()
-                    .map(|&arg| {
-                        let (_, arg_ty) = self.infer(arg)?;
-                        self.fold_expr_to_thir(arg, arg_ty)
+                    .map(|arg| {
+                        match arg {
+                            hir::Argument::Positional(expr_id) => {
+                                let (subst, arg_ty) = self.infer(*expr_id)?;
+                                self.global_subst = self.global_subst.compose(&subst, &mut self.target);
+                                let thir_expr = self.fold_expr_to_thir(*expr_id, arg_ty)?;
+                                Ok(thir::Argument::Positional(thir_expr))
+                            }
+                            hir::Argument::Named { name, value } => {
+                                let (subst, arg_ty) = self.infer(*value)?;
+                                self.global_subst = self.global_subst.compose(&subst, &mut self.target);
+                                let thir_expr = self.fold_expr_to_thir(*value, arg_ty)?;
+                                Ok(thir::Argument::Named {
+                                    name: *name,
+                                    value: thir_expr,
+                                })
+                            }
+                        }
                     })
                     .collect();
 
@@ -92,11 +146,30 @@ impl TypeChecker {
             }
 
             hir::ExprKind::FieldAccess { expr, field } => {
-                let (_, expr_ty) = self.infer(*expr)?;
-                let thir_expr = self.fold_expr_to_thir(*expr, expr_ty)?;
-                thir::ExprKind::FieldAccess {
-                    expr: thir_expr,
-                    field: *field,
+                // Check if this is a field selector (_.field)
+                let expr_kind = &self.source.exprs.get(*expr).kind;
+                if matches!(expr_kind, hir::ExprKind::Placeholder) {
+                    // This is a field selector: _.field
+                    // Get record_ty from the inferred FieldSelector type
+                    let resolved_ty = self.global_subst.apply(ty, &mut self.target);
+                    let record_ty = match &self.target.types.get(resolved_ty).kind {
+                        thir::TypeKind::FieldSelector { record_ty, .. } => *record_ty,
+                        _ => resolved_ty, // Fallback
+                    };
+
+                    thir::ExprKind::FieldSelector {
+                        field: *field,
+                        record_ty,
+                    }
+                } else {
+                    // Normal field access
+                    let (subst, expr_ty) = self.infer(*expr)?;
+                    self.global_subst = self.global_subst.compose(&subst, &mut self.target);
+                    let thir_expr = self.fold_expr_to_thir(*expr, expr_ty)?;
+                    thir::ExprKind::FieldAccess {
+                        expr: thir_expr,
+                        field: *field,
+                    }
                 }
             }
 
@@ -111,12 +184,38 @@ impl TypeChecker {
                     stmts: thir_stmts?,
                 }
             }
+
+            hir::ExprKind::StringInterpolation { parts, exprs } => {
+                // Convert all interpolated expressions
+                let thir_exprs: Result<Vec<_>, CompileError> = exprs
+                    .iter()
+                    .map(|&expr_id| {
+                        let (subst, expr_ty) = self.infer(expr_id)?;
+                        self.global_subst = self.global_subst.compose(&subst, &mut self.target);
+                        self.fold_expr_to_thir(expr_id, expr_ty)
+                    })
+                    .collect();
+
+                thir::ExprKind::StringInterpolation {
+                    parts: parts.clone(),
+                    exprs: thir_exprs?,
+                }
+            }
+
+            hir::ExprKind::Placeholder => {
+                // Standalone placeholder should have been rejected by the type checker
+                // This is only reached when _.field is converted, which is handled in FieldAccess
+                unreachable!("Placeholder should be handled in FieldAccess context")
+            }
         };
+
+        // Apply global substitution to resolve any remaining type variables
+        let resolved_ty = self.global_subst.apply(ty, &mut self.target);
 
         let thir_id = self.target.exprs.alloc(thir::Expr {
             loc,
             kind: thir_kind,
-            ty,
+            ty: resolved_ty,
         });
 
         self.expr_cache.insert(hir_expr, thir_id);

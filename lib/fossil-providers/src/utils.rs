@@ -1,25 +1,41 @@
 use std::path::Path;
 
-use fossil_lang::ast::ast::{Literal, Ast, Type, TypeKind, PrimitiveType, RecordField};
+use fossil_lang::ast::ast::{Ast, Literal, PrimitiveType, ProviderArgument, RecordField, Type, TypeKind};
 use fossil_lang::context::Interner;
 use fossil_lang::error::ProviderError;
-use polars::prelude::*;
+use polars::prelude::Schema;
 
-pub fn extract_path_arg(
-    args: &[Literal],
+/// Extract path from provider arguments (supports both positional and named args)
+pub fn extract_path_arg_from_provider(
+    args: &[ProviderArgument],
     interner: &mut Interner,
 ) -> Result<String, ProviderError> {
-    match args {
-        [Literal::String(path)] => Ok(interner.resolve(*path).to_string()),
-        _ => {
-            use fossil_lang::error::{CompileError, CompileErrorKind};
-            let msg = interner.intern("Provider expects a single string argument (file path)");
-            Err(CompileError::new(
-                CompileErrorKind::ProviderError(msg),
-                fossil_lang::ast::Loc::generated(),
-            ))
+    use fossil_lang::error::{CompileError, CompileErrorKind};
+
+    // First, try named arg "path"
+    let path_sym = interner.intern("path");
+    for arg in args {
+        if let ProviderArgument::Named { name, value } = arg {
+            if *name == path_sym {
+                if let Literal::String(s) = value {
+                    return Ok(interner.resolve(*s).to_string());
+                }
+            }
         }
     }
+
+    // Then try first positional arg
+    for arg in args {
+        if let ProviderArgument::Positional(Literal::String(path)) = arg {
+            return Ok(interner.resolve(*path).to_string());
+        }
+    }
+
+    let msg = interner.intern("Provider expects a string argument (file path)");
+    Err(CompileError::new(
+        CompileErrorKind::ProviderError(msg),
+        fossil_lang::ast::Loc::generated(),
+    ))
 }
 
 pub fn validate_extension(
@@ -57,15 +73,15 @@ pub fn validate_extension(
     }
 }
 
+/// Validates that a local file path exists and is a file.
+///
+/// Note: This function should only be called for local file paths.
+/// Use `DataSource::is_local()` to check the source type before calling this.
 pub fn validate_local_file(
     path_str: &str,
     interner: &mut Interner,
 ) -> Result<(), ProviderError> {
     use fossil_lang::error::{CompileError, CompileErrorKind};
-
-    if !PlPath::new(path_str).is_local() {
-        return Ok(());
-    }
 
     let path = Path::new(path_str);
 

@@ -142,8 +142,21 @@ impl Interner {
         sym
     }
 
+    /// Lookup a symbol without creating it if not found
+    /// Returns None if the string hasn't been interned
+    pub fn lookup(&self, s: &str) -> Option<Symbol> {
+        self.map.get(s).copied()
+    }
+
     pub fn resolve(&self, sym: Symbol) -> &str {
         &self.strings[sym.0 as usize]
+    }
+
+    /// Try to resolve a symbol, returning None if the symbol index is out of bounds.
+    /// This is useful when the symbol may have been interned in a different interner
+    /// (e.g., during error recovery in compilation).
+    pub fn try_resolve(&self, sym: Symbol) -> Option<&str> {
+        self.strings.get(sym.0 as usize).map(|s| s.as_str())
     }
 }
 

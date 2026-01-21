@@ -1,0 +1,43 @@
+// SQL Provider Example
+// Demonstrates loading data from an SQLite database
+
+// Load data from tables using the sql provider
+type Customer = sql!("sqlite:lib/fossil-stdlib/examples/sql-ops/shop.db", "customers")
+type Product = sql!("sqlite:lib/fossil-stdlib/examples/sql-ops/shop.db", "products")
+type Order = sql!("sqlite:lib/fossil-stdlib/examples/sql-ops/shop.db", "orders")
+
+// Custom query example - get only active electronics
+type ElectronicsProduct = sql!("sqlite:lib/fossil-stdlib/examples/sql-ops/shop.db", "SELECT * FROM products WHERE category = 'Electronics'")
+
+// Define output type for order details
+type OrderDetail = {
+    #[uri("https://example.com/order/customer_name")]
+    customer_name: string,
+    #[uri("https://example.com/order/product_name")]
+    product_name: string,
+    #[uri("https://example.com/order/quantity")]
+    quantity: int,
+    #[uri("https://example.com/order/order_date")]
+    order_date: string,
+}
+
+// Load all data
+let customers = Customer::load()
+let products = Product::load()
+let orders = Order::load()
+let electronics = ElectronicsProduct::load()
+
+// Join orders with customers
+let orders_with_customers = List::join(orders, customers, "customer_id", "id")
+
+// Join with products
+let full_orders = List::join(orders_with_customers, products, "product_id", "id")
+
+// Transform to OrderDetail entities
+full_orders
+    |> List::map(fn (e) -> {
+        let detail = OrderDetail(e.name, e.name_right, e.quantity, e.order_date)
+        let id = String::concat("http://example.com/order/", String::to_string(e.id))
+        Entity::with_id(detail, id)
+    })
+    |> Rdf::serialize("lib/fossil-stdlib/examples/sql-ops/results.ttl")

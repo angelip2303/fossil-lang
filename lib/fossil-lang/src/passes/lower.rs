@@ -58,7 +58,7 @@ impl HirLowering {
         let loc = stmt.loc.clone();
 
         let hir_kind = match &stmt_kind {
-            ast::StmtKind::Import { module, alias } => {
+            ast::StmtKind::Import { module, items, alias } => {
                 // If no alias is provided, use the module name
                 let alias = alias.unwrap_or_else(|| match module {
                     ast::Path::Simple(name) => *name,
@@ -73,7 +73,8 @@ impl HirLowering {
                 });
                 hir::StmtKind::Import {
                     module: module.clone(),
-                    alias
+                    items: items.clone(),
+                    alias,
                 }
             }
 
@@ -172,17 +173,23 @@ impl HirLowering {
                     .function_params
                     .get(&expr_id)
                     .expect("SAFETY: Name resolution pass must run before lowering and populate function_params table. \
-                             All Function expressions are guaranteed to have parameter DefId entries after name resolution completes successfully.");
+                             All Function expressions are guaranteed to have parameter DefId entries after name resolution completes successfully.")
+                    .clone();
 
-                // Create HIR params with DefIds
-                let hir_params: Vec<_> = params
-                    .iter()
-                    .zip(param_def_ids)
-                    .map(|(param, def_id)| hir::Param {
+                // Create HIR params with DefIds and lower default values
+                let mut hir_params = Vec::with_capacity(params.len());
+                for (param, def_id) in params.iter().zip(param_def_ids.iter()) {
+                    let default = if let Some(default_expr) = param.default {
+                        Some(self.lower_expr(default_expr)?)
+                    } else {
+                        None
+                    };
+                    hir_params.push(hir::Param {
                         name: param.name,
                         def_id: *def_id,
-                    })
-                    .collect();
+                        default,
+                    });
+                }
 
                 // Lower the body (parameter references are already resolved)
                 let hir_body = self.lower_expr(body)?;
@@ -195,11 +202,25 @@ impl HirLowering {
 
             ast::ExprKind::Application { callee, args } => {
                 let hir_callee = self.lower_expr(callee)?;
-                let hir_args: Result<Vec<_>, CompileError> =
-                    args.iter().map(|&id| self.lower_expr(id)).collect();
+                // Lower each argument, preserving named/positional distinction
+                let mut hir_args = Vec::with_capacity(args.len());
+                for arg in args {
+                    let hir_arg = match arg {
+                        ast::Argument::Positional(expr_id) => {
+                            hir::Argument::Positional(self.lower_expr(expr_id)?)
+                        }
+                        ast::Argument::Named { name, value } => {
+                            hir::Argument::Named {
+                                name,
+                                value: self.lower_expr(value)?,
+                            }
+                        }
+                    };
+                    hir_args.push(hir_arg);
+                }
                 hir::ExprKind::Application {
                     callee: hir_callee,
-                    args: hir_args?,
+                    args: hir_args,
                 }
             }
 
@@ -216,9 +237,20 @@ impl HirLowering {
                     ast::ExprKind::Application { callee, args } => {
                         // RHS is already a function call: prepend LHS as first argument
                         let hir_callee = self.lower_expr(callee)?;
-                        let mut hir_args = vec![hir_arg];
+                        let mut hir_args = vec![hir::Argument::Positional(hir_arg)];
                         for arg in args {
-                            hir_args.push(self.lower_expr(arg)?);
+                            let lowered_arg = match arg {
+                                ast::Argument::Positional(expr_id) => {
+                                    hir::Argument::Positional(self.lower_expr(expr_id)?)
+                                }
+                                ast::Argument::Named { name, value } => {
+                                    hir::Argument::Named {
+                                        name,
+                                        value: self.lower_expr(value)?,
+                                    }
+                                }
+                            };
+                            hir_args.push(lowered_arg);
                         }
                         hir::ExprKind::Application {
                             callee: hir_callee,
@@ -230,7 +262,7 @@ impl HirLowering {
                         let hir_func = self.lower_expr(rhs)?;
                         hir::ExprKind::Application {
                             callee: hir_func,
-                            args: vec![hir_arg],
+                            args: vec![hir::Argument::Positional(hir_arg)],
                         }
                     }
                 }
@@ -256,6 +288,21 @@ impl HirLowering {
                     stmts: hir_stmts?,
                 }
             }
+
+            ast::ExprKind::StringInterpolation { parts, exprs } => {
+                // Lower all interpolated expressions
+                let hir_exprs: Result<Vec<_>, _> = exprs
+                    .iter()
+                    .map(|&expr_id| self.lower_expr(expr_id))
+                    .collect();
+
+                hir::ExprKind::StringInterpolation {
+                    parts,
+                    exprs: hir_exprs?,
+                }
+            }
+
+            ast::ExprKind::Placeholder => hir::ExprKind::Placeholder,
         };
 
         let hir_id = self.hir.exprs.alloc(hir::Expr {

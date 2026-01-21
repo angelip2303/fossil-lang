@@ -2,8 +2,35 @@ use polars::prelude::DataType;
 
 use crate::ast::Loc;
 use crate::ast::ast::{Literal, Path, PrimitiveType};
-use crate::ast::hir::Param;
 use crate::context::*;
+
+/// THIR Param with resolved DefId and optional default value
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Param {
+    pub name: Symbol,
+    pub def_id: DefId,
+    /// Optional default value for this parameter
+    pub default: Option<ExprId>,
+}
+
+/// An argument in a function call (positional or named) - THIR version
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Argument {
+    /// A positional argument: `func(expr)`
+    Positional(ExprId),
+    /// A named argument: `func(name: expr)`
+    Named { name: Symbol, value: ExprId },
+}
+
+impl Argument {
+    /// Get the expression value of this argument
+    pub fn value(&self) -> ExprId {
+        match self {
+            Argument::Positional(expr) => *expr,
+            Argument::Named { value, .. } => *value,
+        }
+    }
+}
 
 pub type StmtId = NodeId<Stmt>;
 pub type ExprId = NodeId<Expr>;
@@ -26,8 +53,12 @@ pub struct Stmt {
 /// A statement in the language
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StmtKind {
-    /// An import declaration `open Module as alias`
-    Import { module: Path, alias: Symbol },
+    /// An import declaration `open Module { items } as alias`
+    Import {
+        module: Path,
+        items: Option<Vec<Symbol>>,
+        alias: Symbol,
+    },
     /// A value binding `let name = expr`
     Let { name: Symbol, value: ExprId },
     /// A type definition `type name = type`
@@ -58,12 +89,26 @@ pub enum ExprKind {
     Record(Vec<(Symbol, ExprId)>),
     /// A function definition `fn (param1, param2, ...) -> expr`
     Function { params: Vec<Param>, body: ExprId },
-    /// A function application `callee(arg1, arg2, ...)`
-    Application { callee: ExprId, args: Vec<ExprId> },
+    /// A function application `callee(arg1, arg2, ...)` with positional and named arguments
+    Application { callee: ExprId, args: Vec<Argument> },
     /// Field access `expr.field`
     FieldAccess { expr: ExprId, field: Symbol },
     /// A block expression `{ stmt* }`
     Block { stmts: Vec<StmtId> },
+    /// A string interpolation `"Hello ${name}, you are ${age} years old!"`
+    /// Invariant: parts.len() == exprs.len() + 1
+    StringInterpolation {
+        parts: Vec<Symbol>,
+        exprs: Vec<ExprId>,
+    },
+    /// Field selector `_.field` - type-safe reference to a field
+    /// Evaluates to the field name as a string at runtime
+    FieldSelector {
+        /// The name of the field being selected
+        field: Symbol,
+        /// The record type this selector applies to (for type checking)
+        record_ty: TypeId,
+    },
 }
 
 #[derive(Debug)]
@@ -102,6 +147,16 @@ pub enum TypeKind {
     Record(RecordRow),
     /// A type variable (for type inference)
     Var(TypeVar),
+    /// FieldSelector<T, F> - selects field F of type T from a record
+    /// Used for type-safe field references like `_.field`
+    FieldSelector {
+        /// The record type that contains the field
+        record_ty: TypeId,
+        /// The type of the field being selected
+        field_ty: TypeId,
+        /// The name of the field being selected
+        field: Symbol,
+    },
 }
 
 /// Row type for extensible records (supports row polymorphism)

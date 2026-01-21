@@ -12,6 +12,7 @@ use crate::ast::Loc;
 use crate::ast::thir::{Polytype, Type, TypeId, TypeKind, TypeVar, TypedHir};
 use crate::context::{DefId, Symbol};
 use crate::error::{CompileError, CompileErrorKind, RuntimeError};
+use crate::passes::GlobalContext;
 use crate::runtime::value::Value;
 use crate::traits::function::{FunctionImpl, RuntimeContext};
 
@@ -53,6 +54,7 @@ impl FunctionImpl for RecordConstructorFunction {
         &self,
         thir: &mut TypedHir,
         _next_type_var: &mut dyn FnMut() -> TypeVar,
+        _gcx: &GlobalContext,
     ) -> Polytype {
         // Constructor signature: (T1, T2, ..., Tn) -> RecordType
         // where T1, T2, ..., Tn are the field types
@@ -110,7 +112,7 @@ impl FunctionImpl for RecordConstructorFunction {
         })?;
 
         // Return as LazyFrame for consistency with record literals
-        Ok(Value::LazyFrame(df.lazy()))
+        Ok(Value::Records(df.lazy()))
     }
 }
 
@@ -120,7 +122,7 @@ fn value_to_series(value: &Value, name: &str) -> Result<Series, RuntimeError> {
         Value::Int(i) => Ok(Series::new(name.into(), &[*i])),
         Value::String(s) => Ok(Series::new(name.into(), &[s.as_ref()])),
         Value::Bool(b) => Ok(Series::new(name.into(), &[*b])),
-        Value::LazyFrame(lf) => {
+        Value::Records(lf) => {
             // If the value is already a LazyFrame (nested record), collect it
             let df = lf.clone().collect().map_err(|e| {
                 CompileError::new(

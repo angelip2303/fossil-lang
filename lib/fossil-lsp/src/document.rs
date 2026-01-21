@@ -12,6 +12,8 @@ pub struct DocumentState {
     pub version: i32,
     /// Compiled THIR program (if compilation succeeded)
     pub thir: Option<Arc<ThirProgram>>,
+    /// Last successful THIR program (used for completions when current compilation fails)
+    pub last_valid_thir: Option<Arc<ThirProgram>>,
     /// Compilation errors
     pub errors: Vec<CompileError>,
     /// The GlobalContext containing the interner for symbol resolution
@@ -25,9 +27,23 @@ impl DocumentState {
             text,
             version,
             thir: None,
+            last_valid_thir: None,
             errors: Vec::new(),
             gcx: GlobalContext::default(),
         }
+    }
+
+    /// Update the THIR, keeping track of the last valid one for completions
+    pub fn update_thir(&mut self, thir: Option<Arc<ThirProgram>>) {
+        if thir.is_some() {
+            self.last_valid_thir = thir.clone();
+        }
+        self.thir = thir;
+    }
+
+    /// Get the THIR program for completions (prefers current, falls back to last valid)
+    pub fn thir_for_completion(&self) -> Option<&Arc<ThirProgram>> {
+        self.thir.as_ref().or(self.last_valid_thir.as_ref())
     }
 
     /// Check if the document compiled successfully

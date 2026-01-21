@@ -13,12 +13,19 @@ impl TypeChecker {
     /// Algorithm W: infer the type of an expression
     /// Returns (substitution, type)
     pub fn infer(&mut self, expr_id: hir::ExprId) -> Result<(Subst, thir::TypeId), CompileError> {
+        // Check cache first - if we've already inferred this expression, return cached type
+        // Apply global_subst to resolve any type variables that were resolved after caching
+        if let Some(&cached_ty) = self.infer_cache.get(&expr_id) {
+            let resolved_ty = self.global_subst.apply(cached_ty, &mut self.target);
+            return Ok((Subst::default(), resolved_ty));
+        }
+
         // Clone what we need before any mutable operations
         let expr = self.source.exprs.get(expr_id);
         let expr_kind = expr.kind.clone();
         let loc = expr.loc.clone();
 
-        match &expr_kind {
+        let result = match &expr_kind {
             hir::ExprKind::Unit => {
                 let ty = self.primitive_type(PrimitiveType::Unit, loc.clone());
                 Ok((Subst::default(), ty))
@@ -56,6 +63,17 @@ impl TypeChecker {
 
                 // Instantiate with fresh type variables
                 let ty = self.instantiate(&poly);
+
+                // For monomorphic types (no forall vars), apply local_subst to
+                // resolve type variables that have been constrained by earlier
+                // subexpressions (e.g., previous field accesses on the same var).
+                // Don't apply to polymorphic types to preserve let-polymorphism.
+                let ty = if poly.forall.is_empty() {
+                    self.local_subst.apply(ty, &mut self.target)
+                } else {
+                    ty
+                };
+
                 Ok((Subst::default(), ty))
             }
 
@@ -135,14 +153,26 @@ impl TypeChecker {
             }
 
             hir::ExprKind::Application { callee, args } => {
+                // Save local_subst so we can restore it after this expression
+                let saved_local_subst = std::mem::take(&mut self.local_subst);
+
                 // Infer type of callee
                 let (mut subst, callee_ty) = self.infer(*callee)?;
+                // Update local_subst so subsequent lookups see constraints
+                self.local_subst = self.local_subst.compose(&subst, &mut self.target);
 
-                // Infer types of arguments
+                // Infer types of arguments (extracting the value from each Argument)
+                // TODO: Full named parameter support would require looking up param names
+                // from callee's signature and reordering. For now, we just use positional order.
                 let mut arg_types = Vec::new();
                 for arg in args {
-                    let (s, arg_ty) = self.infer(*arg)?;
+                    let arg_expr_id = arg.value();
+                    let (s, arg_ty) = self.infer(arg_expr_id)?;
                     subst = subst.compose(&s, &mut self.target);
+                    // Update local_subst after each argument so subsequent arguments
+                    // can see constraints from earlier ones (e.g., multiple field
+                    // accesses on the same variable)
+                    self.local_subst = self.local_subst.compose(&s, &mut self.target);
                     let arg_ty = subst.apply(arg_ty, &mut self.target);
                     arg_types.push(arg_ty);
                 }
@@ -158,11 +188,63 @@ impl TypeChecker {
                 let s = self.unify(callee_ty, expected_ty, loc)?;
                 subst = subst.compose(&s, &mut self.target);
 
+                // Restore local_subst - the constraints from this expression
+                // will be propagated via the returned subst
+                self.local_subst = saved_local_subst;
+
                 let final_ret_ty = subst.apply(ret_ty, &mut self.target);
                 Ok((subst, final_ret_ty))
             }
 
+            hir::ExprKind::Placeholder => {
+                // Standalone placeholder is invalid - only valid in _.field context
+                Err(CompileError::new(
+                    CompileErrorKind::InvalidPlaceholder,
+                    loc,
+                )
+                .with_context("The placeholder `_` must be followed by a field access like `_.field`")
+                .with_suggestion(crate::error::ErrorSuggestion::Help(
+                    "Use `_.field` to create a type-safe field selector, e.g., `List::join(a, b, left_on: _.id, right_on: _.customer_id)`".to_string()
+                )))
+            }
+
             hir::ExprKind::FieldAccess { expr, field } => {
+                // Check if this is a field selector (_.field)
+                let expr_kind = &self.source.exprs.get(*expr).kind;
+                if matches!(expr_kind, hir::ExprKind::Placeholder) {
+                    // This is a field selector: _.field
+                    // Create fresh type variables for record type and field type
+                    let record_ty = self.fresh_type_var(loc.clone());
+                    let field_ty = self.fresh_type_var(loc.clone());
+
+                    // Constraint: record_ty must have the field
+                    let rest_var = self.tvg.fresh();
+                    let expected_row = thir::RecordRow::Extend {
+                        field: *field,
+                        ty: field_ty,
+                        rest: Box::new(thir::RecordRow::Var(rest_var)),
+                    };
+                    let expected_record = self.record_type(expected_row, loc.clone());
+                    let s1 = self.unify(record_ty, expected_record, loc.clone())?;
+
+                    // Apply substitution before allocating to avoid borrow issues
+                    let resolved_record_ty = s1.apply(record_ty, &mut self.target);
+                    let resolved_field_ty = s1.apply(field_ty, &mut self.target);
+
+                    // Create type FieldSelector<record_ty, field_ty>
+                    let selector_ty = self.target.types.alloc(thir::Type {
+                        loc: loc.clone(),
+                        kind: thir::TypeKind::FieldSelector {
+                            record_ty: resolved_record_ty,
+                            field_ty: resolved_field_ty,
+                            field: *field,
+                        },
+                    });
+
+                    return Ok((s1, selector_ty));
+                }
+
+                // Normal field access (existing code)
                 // Infer type of the expression
                 let (mut subst, expr_ty) = self.infer(*expr)?;
                 let expr_ty = subst.apply(expr_ty, &mut self.target);
@@ -221,6 +303,24 @@ impl TypeChecker {
                         Ok((subst, field_ty))
                     }
 
+                    thir::TypeKind::FieldSelector { field: selector_field, .. } => {
+                        // Trying to access a field on a FieldSelector (e.g., _.foo.bar)
+                        let selector_name = self.gcx.interner.resolve(*selector_field);
+                        let field_name = self.gcx.interner.resolve(*field);
+                        Err(CompileError::new(
+                            CompileErrorKind::UndefinedVariable { name: *field },
+                            loc.clone(),
+                        )
+                        .with_context(format!(
+                            "Cannot access field '{}' on a field selector `_.{}`",
+                            field_name, selector_name
+                        ))
+                        .with_suggestion(crate::error::ErrorSuggestion::Help(
+                            "Field selectors (_.field) are references to column names, not records. \
+                             To select a nested field, use a separate field selector or access the field directly on the record.".to_string()
+                        )))
+                    }
+
                     _ => Err(CompileError::new(
                         CompileErrorKind::UndefinedVariable { name: *field },
                         loc.clone(),
@@ -234,6 +334,7 @@ impl TypeChecker {
 
             hir::ExprKind::Block { stmts } => {
                 let mut subst = Subst::default();
+                let mut block_ty = None;
 
                 // Type-check all statements in the block (except possibly the last)
                 let num_stmts = stmts.len();
@@ -244,11 +345,11 @@ impl TypeChecker {
                     // For the last statement, we handle it specially if it's an Expr
                     if is_last {
                         match &stmt.kind {
-                            hir::StmtKind::Expr(expr_id) => {
+                            hir::StmtKind::Expr(inner_expr_id) => {
                                 // Infer the type of the last expression
-                                let (s, ty) = self.infer(*expr_id)?;
+                                let (s, ty) = self.infer(*inner_expr_id)?;
                                 subst = subst.compose(&s, &mut self.target);
-                                return Ok((subst, ty));
+                                block_ty = Some(ty);
                             }
                             _ => {
                                 // Last statement is not an expression - just check it
@@ -261,11 +362,32 @@ impl TypeChecker {
                     }
                 }
 
-                // Empty block or block ending with non-expression statement returns Unit
-                let unit_ty = self.primitive_type(PrimitiveType::Unit, loc);
-                Ok((subst, unit_ty))
+                // Return the block type or Unit if empty/non-expression ending
+                let final_ty = block_ty.unwrap_or_else(|| self.primitive_type(PrimitiveType::Unit, loc));
+                Ok((subst, final_ty))
             }
+
+            hir::ExprKind::StringInterpolation { parts: _, exprs } => {
+                // String interpolation always produces a string
+                // Type-check all interpolated expressions (they will be converted to strings)
+                let mut subst = Subst::default();
+                for &expr in exprs {
+                    let (s, _) = self.infer(expr)?;
+                    subst = subst.compose(&s, &mut self.target);
+                    // Note: We don't require any specific type for interpolated expressions
+                    // They will be converted to strings at runtime
+                }
+                let ty = self.primitive_type(PrimitiveType::String, loc);
+                Ok((subst, ty))
+            }
+        };
+
+        // Cache the result before returning
+        if let Ok((_, ty)) = &result {
+            self.infer_cache.insert(expr_id, *ty);
         }
+
+        result
     }
 
     /// Instantiate a polytype with fresh type variables

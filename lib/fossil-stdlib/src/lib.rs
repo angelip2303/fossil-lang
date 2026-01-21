@@ -1,17 +1,10 @@
-pub mod csv;
 pub mod entity;
 pub mod list;
 pub mod rdf;
 pub mod string;
 
-// CSV runtime loading
-pub use csv::CsvLoadFunction;
-
 // DataFrame iteration and transformation
-pub use list::{
-    DistinctFunction, EachFunction, JoinFunction, MapFunction, SelectFunction, SortFunction,
-    UnionFunction,
-};
+pub use list::{JoinFunction, MapFunction};
 
 // Entity extension system
 pub use entity::{ENTITY_TYPE_ID, EntityMetadata, EntityWithIdFunction, register_entity_type};
@@ -54,17 +47,10 @@ pub fn init(gcx: &mut GlobalContext) {
     gcx.register_function("String", "concat", StringConcatFunction);
     gcx.register_function("String", "to_string", ToStringFunction);
 
-    // Register List iteration functions
+    // Register List functions
     gcx.register_function("List", "map", MapFunction);
-    gcx.register_function("List", "each", EachFunction);
-
-    // Register List DataFrame operations
     gcx.register_function("List", "join", JoinFunction);
-    gcx.register_function("List", "union", UnionFunction);
-    gcx.register_function("List", "select", SelectFunction);
-    gcx.register_function("List", "sort", SortFunction);
-    gcx.register_function("List", "distinct", DistinctFunction);
 
     // Register RDF serialization functions
-    gcx.register_function("rdf", "serialize", RdfSerializeFunction);
+    gcx.register_function("Rdf", "serialize", RdfSerializeFunction);
 }

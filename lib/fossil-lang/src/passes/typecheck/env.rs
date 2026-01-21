@@ -63,6 +63,11 @@ impl TypeEnv {
                 vars.extend(self.free_vars_type(*ret, thir));
                 vars
             }
+            thir::TypeKind::FieldSelector { record_ty, field_ty, .. } => {
+                let mut vars = self.free_vars_type(*record_ty, thir);
+                vars.extend(self.free_vars_type(*field_ty, thir));
+                vars
+            }
             thir::TypeKind::Primitive(_) | thir::TypeKind::Named(_) => HashSet::new(),
         }
     }

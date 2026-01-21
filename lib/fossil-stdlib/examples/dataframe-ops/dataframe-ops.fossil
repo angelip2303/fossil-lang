@@ -1,5 +1,5 @@
-type Customer = csv<"lib/fossil-stdlib/examples/dataframe-ops/customers.csv">
-type Order = csv<"lib/fossil-stdlib/examples/dataframe-ops/orders.csv">
+type Customer = csv!("lib/fossil-stdlib/examples/dataframe-ops/customers.csv")
+type Order = csv!("lib/fossil-stdlib/examples/dataframe-ops/orders.csv")
 
 type OrderForCustomer = {
     #[uri("https://example.com/product")]
@@ -14,12 +14,11 @@ type OrderForCustomer = {
 
 let customers = Customer::load()
 let orders = Order::load()
-let orders_for_customers = List::join(customers, orders, "id", "customer_id")
 
-orders_for_customers
+List::join(customers, orders, left_on: _.id, right_on: _.customer_id)
     |> List::map(fn (e) -> {
         let res = OrderForCustomer(e.product, e.amount, e.name, e.city)
         let id = String::concat("http://example.com/order_for_customer/", String::to_string(e.order_id))
         Entity::with_id(res, id)
     })
-    |> rdf::serialize("lib/fossil-stdlib/examples/dataframe-ops/results.ttl")
+    |> Rdf::serialize("lib/fossil-stdlib/examples/dataframe-ops/results.ttl")

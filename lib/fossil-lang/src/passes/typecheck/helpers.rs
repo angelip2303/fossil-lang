@@ -105,6 +105,15 @@ impl TypeChecker {
             thir::TypeKind::Record(row) => {
                 format!("{{{}}}", self.format_row(row))
             }
+            thir::TypeKind::FieldSelector { record_ty, field_ty, field } => {
+                let field_name = self.gcx.interner.resolve(*field);
+                format!(
+                    "FieldSelector<{}, {} as {}>",
+                    self.format_type(*record_ty),
+                    field_name,
+                    self.format_type(*field_ty)
+                )
+            }
         }
     }
 

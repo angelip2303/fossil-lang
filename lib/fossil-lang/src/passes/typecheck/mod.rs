@@ -93,6 +93,7 @@ impl TypeVarGen {
 /// - **env**: Type environment mapping definitions to polytypes
 /// - **expr_cache**: Memoization of HIR → THIR expression conversions
 /// - **type_cache**: Memoization of HIR → THIR type conversions
+/// - **global_subst**: Accumulated substitution from all inference operations
 ///
 /// ## Usage
 ///
@@ -108,7 +109,16 @@ pub struct TypeChecker {
     env: TypeEnv,
     expr_cache: HashMap<hir::ExprId, thir::ExprId>,
     type_cache: HashMap<hir::TypeId, thir::TypeId>,
+    /// Cache for inferred types: maps HIR ExprId to (Subst, TypeId)
+    infer_cache: HashMap<hir::ExprId, thir::TypeId>,
     resolutions: ResolutionTable,
+    /// Global substitution accumulated during type inference
+    global_subst: Subst,
+    /// Local substitution for the current compound expression being inferred.
+    /// This is used to propagate constraints between subexpressions (e.g.,
+    /// multiple field accesses on the same variable within a function call).
+    /// It gets merged into global_subst when the expression inference completes.
+    local_subst: Subst,
 }
 
 impl TypeChecker {
@@ -128,7 +138,10 @@ impl TypeChecker {
             env: TypeEnv::default(),
             expr_cache: HashMap::new(),
             type_cache: HashMap::new(),
+            infer_cache: HashMap::new(),
             resolutions: hir_program.resolutions,
+            global_subst: Subst::default(),
+            local_subst: Subst::default(),
         };
 
         // Initialize environment with registered functions
@@ -153,7 +166,7 @@ impl TypeChecker {
             if let DefKind::Func(Some(func_impl)) = &def.kind {
                 // Get the function's signature
                 let mut next_var = || self.tvg.fresh();
-                let polytype = func_impl.signature(&mut self.target, &mut next_var);
+                let polytype = func_impl.signature(&mut self.target, &mut next_var, &self.gcx);
 
                 // Add to type environment
                 self.env.insert(def_id, polytype);
@@ -289,10 +302,91 @@ impl TypeChecker {
         // Instantiate record constructors now that we have complete type information
         self.instantiate_record_constructors();
 
+        // Zonk all types: apply global substitution to resolve all type variables
+        self.zonk_all_types();
+
         Ok(ThirProgram {
             thir: self.target,
             gcx: self.gcx,
         })
+    }
+
+    /// Zonk all types in the THIR
+    ///
+    /// This method applies the global substitution to all types in the THIR,
+    /// ensuring that type variables are resolved to their final concrete types.
+    /// This is essential for IDE features like hover to show resolved types.
+    fn zonk_all_types(&mut self) {
+        // Collect all expression IDs and their old types first to avoid borrowing issues
+        let expr_types: Vec<(thir::ExprId, thir::TypeId)> = self.target.exprs
+            .iter()
+            .map(|(id, expr)| (id, expr.ty))
+            .collect();
+
+        // Apply substitution to each expression's type
+        for (expr_id, old_ty) in expr_types {
+            let new_ty = self.global_subst.apply(old_ty, &mut self.target);
+
+            if new_ty != old_ty {
+                // Update the expression with the resolved type
+                self.target.exprs.get_mut(expr_id).ty = new_ty;
+            }
+        }
+
+        // Also zonk types in type statements
+        let stmt_types: Vec<(thir::StmtId, thir::TypeId)> = self.target.root
+            .iter()
+            .filter_map(|stmt_id| {
+                let stmt = self.target.stmts.get(*stmt_id);
+                if let thir::StmtKind::Type { ty, .. } = &stmt.kind {
+                    Some((*stmt_id, *ty))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (stmt_id, old_ty) in stmt_types {
+            let new_ty = self.global_subst.apply(old_ty, &mut self.target);
+
+            if new_ty != old_ty {
+                let stmt = self.target.stmts.get_mut(stmt_id);
+                if let thir::StmtKind::Type { ty, .. } = &mut stmt.kind {
+                    *ty = new_ty;
+                }
+            }
+        }
+
+        // Zonk types in function parameters
+        // Collect function expressions and their type info
+        let func_info: Vec<(thir::ExprId, thir::TypeId, Vec<thir::TypeId>, thir::TypeId, crate::ast::Loc)> = self.target.exprs
+            .iter()
+            .filter_map(|(id, expr)| {
+                let ty = self.target.types.get(expr.ty);
+                if let thir::TypeKind::Function(params, ret) = &ty.kind {
+                    Some((id, expr.ty, params.clone(), *ret, ty.loc.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (expr_id, _old_ty_id, old_params, old_ret, loc) in func_info {
+            let new_params: Vec<_> = old_params
+                .iter()
+                .map(|p| self.global_subst.apply(*p, &mut self.target))
+                .collect();
+            let new_ret = self.global_subst.apply(old_ret, &mut self.target);
+
+            // Check if anything changed
+            if new_params != old_params || new_ret != old_ret {
+                let new_ty_id = self.target.types.alloc(thir::Type {
+                    loc,
+                    kind: thir::TypeKind::Function(new_params, new_ret),
+                });
+                self.target.exprs.get_mut(expr_id).ty = new_ty_id;
+            }
+        }
     }
 
     /// Instantiate record constructor functions after type checking
@@ -399,10 +493,11 @@ impl TypeChecker {
         let loc = stmt.loc.clone();
 
         let thir_kind = match stmt_kind {
-            hir::StmtKind::Import { module, alias } => {
+            hir::StmtKind::Import { module, items, alias } => {
                 // Imports don't have types, just pass through
                 thir::StmtKind::Import {
                     module: module.clone(),
+                    items: items.clone(),
                     alias,
                 }
             }
@@ -427,6 +522,9 @@ impl TypeChecker {
                     inferred_ty
                 };
 
+                // Accumulate substitution into global
+                self.global_subst = self.global_subst.compose(&subst, &mut self.target);
+
                 // Generalize the type
                 let poly = self.env.generalize(final_ty, &self.target);
 
@@ -450,7 +548,9 @@ impl TypeChecker {
 
             hir::StmtKind::Expr(expr) => {
                 // Infer type of the expression
-                let (_, ty) = self.infer(expr)?;
+                let (subst, ty) = self.infer(expr)?;
+                // Accumulate substitution into global
+                self.global_subst = self.global_subst.compose(&subst, &mut self.target);
                 let thir_expr = self.fold_expr_to_thir(expr, ty)?;
                 thir::StmtKind::Expr(thir_expr)
             }

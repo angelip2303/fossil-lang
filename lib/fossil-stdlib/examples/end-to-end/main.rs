@@ -5,7 +5,7 @@ use fossil_lang::error::CompileError;
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::executor::ThirExecutor;
 
-const PROGRAM: &str = "lib/fossil-stdlib/examples/end-to-end/end-to-end.fossil";
+const PROGRAM: &str = "./lib/fossil-stdlib/examples/end-to-end/end-to-end.fossil";
 
 pub fn main() -> Result<(), CompileError> {
     let mut gcx = GlobalContext::new();

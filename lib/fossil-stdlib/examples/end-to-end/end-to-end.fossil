@@ -1,4 +1,4 @@
-type Person = csv<"lib/fossil-stdlib/examples/end-to-end/people.csv">
+type Person = csv!("lib/fossil-stdlib/examples/end-to-end/people.csv")
 
 type PersonShape = {
     #[uri("https://example.com/name")]
@@ -16,4 +16,4 @@ let people = Person::load() |>
         Entity::with_id(res, String::concat("http://example.com/person/", person.name))
     })
 
-rdf::serialize(people, "lib/fossil-stdlib/examples/end-to-end/results.ttl")
+Rdf::serialize(people, "lib/fossil-stdlib/examples/end-to-end/results.ttl")

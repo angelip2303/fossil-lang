@@ -13,3 +13,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+fossil-lang = { workspace = true }
+fossil-stdlib = { workspace = true }
+fossil-providers = { workspace = true }

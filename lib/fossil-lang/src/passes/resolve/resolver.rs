@@ -94,13 +94,18 @@ impl NameResolver {
             let loc = stmt.loc.clone();
 
             match &stmt.kind {
-                StmtKind::Import { module, alias } => {
+                StmtKind::Import { module, items, alias } => {
+                    // Register the import in the scope
+                    // If items are specified, we'll handle selective imports
+                    // For now, just register the alias if present
                     if let Some(alias) = alias {
                         self.scopes
                             .current_mut()
                             .imports
                             .insert(*alias, module.clone());
                     }
+                    // TODO: Handle selective imports { item1, item2 }
+                    let _ = items; // Suppress unused warning for now
                 }
 
                 StmtKind::Let { name, ty: _, value } => {
@@ -233,6 +238,11 @@ impl NameResolver {
                     let def_id = self.gcx.definitions.insert(None, param.name, DefKind::Let);
                     self.scopes.current_mut().values.insert(param.name, def_id);
                     param_def_ids.push(def_id);
+
+                    // Resolve default value if present
+                    if let Some(default_expr) = param.default {
+                        self.resolve_expr(default_expr)?;
+                    }
                 }
 
                 // Store the parameter DefIds for this function
@@ -246,8 +256,9 @@ impl NameResolver {
 
             ExprKind::Application { callee, args } => {
                 self.resolve_expr(callee)?;
+                // Resolve each argument's value (whether positional or named)
                 for arg in args {
-                    self.resolve_expr(arg)?;
+                    self.resolve_expr(arg.value())?;
                 }
             }
 
@@ -275,7 +286,14 @@ impl NameResolver {
                 self.scopes.pop();
             }
 
-            ExprKind::Unit | ExprKind::Literal(_) => {}
+            ExprKind::Unit | ExprKind::Literal(_) | ExprKind::Placeholder => {}
+
+            ExprKind::StringInterpolation { parts: _, exprs } => {
+                // Resolve all interpolated expressions
+                for expr in exprs {
+                    self.resolve_expr(expr)?;
+                }
+            }
         }
 
         Ok(())

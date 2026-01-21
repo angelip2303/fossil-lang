@@ -29,12 +29,17 @@ pub async fn handle_document_change(
     // Log each error for debugging
     for (i, err) in result.errors.iter().enumerate() {
         tracing::info!(
-            "Error {}: {} at span {}..{} (source {})",
+            "Error {}: {:?} at span {}..{} (source {})",
             i,
-            err.message_with_interner(&result.gcx.interner),
+            err.kind,
             err.loc.span.start,
             err.loc.span.end,
             err.loc.source
+        );
+        tracing::info!(
+            "Error {} message: {}",
+            i,
+            err.message_with_interner(&result.gcx.interner)
         );
     }
 
@@ -61,19 +66,27 @@ pub async fn handle_document_change(
         })
         .collect();
 
-    tracing::info!("Publishing {} diagnostics", diagnostics.len());
+    tracing::info!("Publishing {} diagnostics for {} (version {})", diagnostics.len(), uri, version);
+    if diagnostics.is_empty() {
+        tracing::info!("Clearing all diagnostics for {}", uri);
+    }
 
-    // Store document state
-    let doc_state = DocumentState {
-        uri: uri.to_string(),
-        text,
-        version,
-        thir: result.thir,
-        errors: result.errors,
-        gcx: result.gcx,
-    };
-
-    documents.insert(uri.clone(), doc_state);
+    // Update or create document state, preserving last_valid_thir for completions
+    if let Some(mut doc) = documents.get_mut(&uri) {
+        // Update existing document, keeping the last valid THIR
+        doc.text = text;
+        doc.version = version;
+        doc.update_thir(result.thir);
+        doc.errors = result.errors;
+        doc.gcx = result.gcx;
+    } else {
+        // Create new document state
+        let mut doc_state = DocumentState::new(uri.to_string(), text, version);
+        doc_state.update_thir(result.thir);
+        doc_state.errors = result.errors;
+        doc_state.gcx = result.gcx;
+        documents.insert(uri.clone(), doc_state);
+    }
 
     // Publish diagnostics to client
     client.publish_diagnostics(uri, diagnostics, Some(version)).await;

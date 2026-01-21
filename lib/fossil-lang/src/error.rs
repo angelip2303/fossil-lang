@@ -27,18 +27,23 @@ use crate::{
     context::{Interner, Symbol},
 };
 
-/// Format a Symbol using the interner to get the actual name
+/// Format a Symbol using the interner to get the actual name.
+/// Uses try_resolve to safely handle symbols that may not exist in this interner
+/// (can happen when errors are created in a different compilation context).
 fn format_symbol(sym: Symbol, interner: &Interner) -> String {
-    interner.resolve(sym).to_string()
+    interner
+        .try_resolve(sym)
+        .unwrap_or("<unknown>")
+        .to_string()
 }
 
 /// Format a Path using the interner to get readable names
 fn format_path(path: &Path, interner: &Interner) -> String {
     match path {
-        Path::Simple(sym) => interner.resolve(*sym).to_string(),
+        Path::Simple(sym) => interner.try_resolve(*sym).unwrap_or("<unknown>").to_string(),
         Path::Qualified(parts) => parts
             .iter()
-            .map(|s| interner.resolve(*s))
+            .map(|s| interner.try_resolve(*s).unwrap_or("<unknown>"))
             .collect::<Vec<_>>()
             .join("::"),
         Path::Relative { dots, components } => {
@@ -49,7 +54,7 @@ fn format_path(path: &Path, interner: &Interner) -> String {
             };
             let path_str = components
                 .iter()
-                .map(|s| interner.resolve(*s))
+                .map(|s| interner.try_resolve(*s).unwrap_or("<unknown>"))
                 .collect::<Vec<_>>()
                 .join("::");
             format!("{}{}", prefix, path_str)
@@ -316,6 +321,9 @@ pub enum CompileErrorKind {
     /// Runtime error with message string (avoids needing Symbol/Interner in runtime code)
     Runtime(String),
 
+    /// Invalid use of placeholder `_` - only valid in field access context (_.field)
+    InvalidPlaceholder,
+
     /// Internal compiler error - indicates a bug in the compiler itself
     ///
     /// These errors should never occur in correct compiler code.
@@ -455,6 +463,7 @@ impl CompileError {
             InvalidRecordField(field, _) => format!("Invalid record field '{:?}'", field),
             ProviderError(_) => "Provider error".to_string(),
             Runtime(msg) => msg.clone(),
+            InvalidPlaceholder => "Invalid use of placeholder `_`. Placeholder is only valid in field access context (_.field)".to_string(),
             InternalCompilerError { phase, message } => {
                 format!("Internal compiler error in {}: {}", phase, message)
             }
@@ -526,6 +535,7 @@ impl CompileError {
                 }
             }
             Runtime(msg) => msg.clone(),
+            InvalidPlaceholder => "Invalid use of placeholder `_`. Placeholder is only valid in field access context (_.field)".to_string(),
             InternalCompilerError { phase, message } => {
                 format!("Internal compiler error in {}: {}", phase, message)
             }

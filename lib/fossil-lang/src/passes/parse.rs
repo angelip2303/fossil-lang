@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use chumsky::prelude::*;
 use chumsky::input::IterInput;
+use chumsky::error::RichReason;
 use chumsky::Parser as ChumskyParser;
 use logos::Logos;
 
@@ -88,7 +89,11 @@ impl Parser {
 
                 for err in chumsky_errors {
                     // Use the interner from the Rc<RefCell<>> since gcx.interner was moved
-                    let error_message = format!("Parse error: {:?}", err.reason());
+                    // Extract custom messages cleanly, fall back to debug format for others
+                    let error_message = match err.reason() {
+                        RichReason::Custom(msg) => msg.to_string(),
+                        reason => format!("Parse error: {:?}", reason),
+                    };
                     let error_msg = interner_ref.intern(&error_message);
                     // Convert SimpleSpan to Loc
                     let simple_span = err.span();
@@ -163,5 +168,27 @@ mod tests {
 
         // Should succeed
         assert!(result.is_ok(), "Expected parse to succeed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_type_with_annotation_rejected() {
+        let src = "type MyType: Foo = Bar";
+        let result = Parser::parse(src, 0);
+        assert!(result.is_err(), "Should reject type alias with annotation");
+
+        // Verify the error message is our custom message
+        if let Err(errors) = result {
+            let has_custom_message = errors.0.iter().any(|e| {
+                matches!(&e.kind, CompileErrorKind::Parse(_))
+            });
+            assert!(has_custom_message, "Expected custom error message about type annotations");
+        }
+    }
+
+    #[test]
+    fn test_type_without_annotation_works() {
+        let src = "type MyType = int";
+        let result = Parser::parse(src, 0);
+        assert!(result.is_ok(), "Valid type alias should work: {:?}", result.err());
     }
 }

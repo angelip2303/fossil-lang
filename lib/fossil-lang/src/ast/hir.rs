@@ -6,11 +6,32 @@ pub type StmtId = NodeId<Stmt>;
 pub type ExprId = NodeId<Expr>;
 pub type TypeId = NodeId<Type>;
 
-/// HIR Param with resolved DefId
+/// HIR Param with resolved DefId and optional default value
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Param {
     pub name: Symbol,
     pub def_id: DefId,
+    /// Optional default value for this parameter
+    pub default: Option<ExprId>,
+}
+
+/// An argument in a function call (positional or named) - HIR version
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Argument {
+    /// A positional argument: `func(expr)`
+    Positional(ExprId),
+    /// A named argument: `func(name: expr)`
+    Named { name: Symbol, value: ExprId },
+}
+
+impl Argument {
+    /// Get the expression value of this argument
+    pub fn value(&self) -> ExprId {
+        match self {
+            Argument::Positional(expr) => *expr,
+            Argument::Named { value, .. } => *value,
+        }
+    }
 }
 
 /// HIR RecordField with attributes preserved from AST
@@ -38,8 +59,12 @@ pub struct Stmt {
 /// A declaration in the language
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StmtKind {
-    /// An import declaration `open Module as alias`
-    Import { module: Path, alias: Symbol },
+    /// An import declaration `open Module { items } as alias`
+    Import {
+        module: Path,
+        items: Option<Vec<Symbol>>,
+        alias: Symbol,
+    },
     /// A value binding `let name: ty = expr` with optional type annotation
     Let {
         name: Symbol,
@@ -75,12 +100,20 @@ pub enum ExprKind {
     Record(Vec<(Symbol, ExprId)>),
     /// A function definition `fn (param1, param2, ...) -> expr`
     Function { params: Vec<Param>, body: ExprId },
-    /// A function application `callee(arg1, arg2, ...)`
-    Application { callee: ExprId, args: Vec<ExprId> },
+    /// A function application `callee(arg1, arg2, ...)` with positional and named arguments
+    Application { callee: ExprId, args: Vec<Argument> },
     /// Field access `expr.field`
     FieldAccess { expr: ExprId, field: Symbol },
     /// A block expression `{ stmt* }`
     Block { stmts: Vec<StmtId> },
+    /// A string interpolation `"Hello ${name}, you are ${age} years old!"`
+    /// Invariant: parts.len() == exprs.len() + 1
+    StringInterpolation {
+        parts: Vec<Symbol>,
+        exprs: Vec<ExprId>,
+    },
+    /// Placeholder `_` for field selectors (e.g., `_.field`)
+    Placeholder,
 }
 
 #[derive(Debug)]

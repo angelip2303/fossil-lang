@@ -15,6 +15,16 @@ rust-version.workspace = true
 [dependencies]
 # external dependencies
 polars.workspace = true
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "mysql", "any"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+once_cell = "1.19"
+reqwest = { version = "0.12", features = ["blocking"] }
+
+# ShEx support (rudof project)
+# Using rudof_lib plus sub-crates that need to be accessed directly
+rudof_lib = "0.1"
+shex_ast = "0.1"
+iri_s = "0.1"
 
 # internal dependencies
 fossil-lang.workspace = true

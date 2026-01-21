@@ -38,10 +38,16 @@ impl<'a> RuntimeContext<'a> {
 
 pub trait FunctionImpl: Send + Sync {
     /// Returns the type signature of the function
+    ///
+    /// # Arguments
+    /// * `thir` - Mutable access to TypedHir for allocating types
+    /// * `next_type_var` - Function to generate fresh type variables
+    /// * `gcx` - Global context with type constructors (e.g., list_type_ctor)
     fn signature(
         &self,
         thir: &mut TypedHir,
         next_type_var: &mut dyn FnMut() -> TypeVar,
+        gcx: &GlobalContext,
     ) -> Polytype;
 
     /// Execute the function with the given arguments at runtime

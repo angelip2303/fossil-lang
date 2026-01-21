@@ -21,11 +21,7 @@ oxigraph = "0.4"
 
 # internal dependencies
 fossil-lang.workspace = true
+fossil-providers.workspace = true
 
 [dev-dependencies]
 tempfile = "3.13"
-fossil-providers.workspace = true
-
-[[example]]
-name = "csv_to_rdf"
-path = "examples/csv_to_rdf.rs"

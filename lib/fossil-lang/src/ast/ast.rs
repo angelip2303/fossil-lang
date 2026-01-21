@@ -23,8 +23,15 @@ pub struct Stmt {
 /// A declaration in the language
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StmtKind {
-    /// An import declaration `open Module as alias`
-    Import { module: Path, alias: Option<Symbol> },
+    /// An import declaration `open Module { items } as alias`
+    /// - module: The module path (providers::csv, "./utils", etc.)
+    /// - items: Optional selective imports { item1, item2 }
+    /// - alias: Optional alias (as alias)
+    Import {
+        module: Path,
+        items: Option<Vec<Symbol>>,
+        alias: Option<Symbol>,
+    },
     /// A value binding `let name = expr` or `let name: Type = expr`
     Let {
         name: Symbol,
@@ -58,8 +65,8 @@ pub enum ExprKind {
     Record(Vec<(Symbol, ExprId)>),
     /// A function definition `fn (param1, param2, ...) -> expr`
     Function { params: Vec<Param>, body: ExprId },
-    /// A function application `callee(arg1, arg2, ...)`
-    Application { callee: ExprId, args: Vec<ExprId> },
+    /// A function application `callee(arg1, arg2, ...)` with positional and named arguments
+    Application { callee: ExprId, args: Vec<Argument> },
     /// A pipe expression `lhs |> rhs`
     Pipe { lhs: ExprId, rhs: ExprId },
     /// Field access `expr.field`
@@ -69,6 +76,15 @@ pub enum ExprKind {
     /// If the last statement is Stmt::Expr(e), the block returns e.
     /// Otherwise, returns Unit.
     Block { stmts: Vec<StmtId> },
+    /// A string interpolation `"Hello ${name}, you are ${age} years old!"`
+    /// Invariant: parts.len() == exprs.len() + 1
+    /// For example: "a${x}b${y}c" has parts=["a", "b", "c"] and exprs=[x, y]
+    StringInterpolation {
+        parts: Vec<Symbol>,
+        exprs: Vec<ExprId>,
+    },
+    /// Placeholder `_` for field selectors (e.g., `_.field`)
+    Placeholder,
 }
 
 #[derive(Debug)]
@@ -85,8 +101,8 @@ pub enum TypeKind {
     Unit,
     /// A primitive type
     Primitive(PrimitiveType),
-    /// A type provider invocation `Provider<arg1, arg2, ...>` (unresolved)
-    Provider { provider: Path, args: Vec<Literal> },
+    /// A type provider invocation `provider!(arg1, arg2, ...)` with named/positional args
+    Provider { provider: Path, args: Vec<ProviderArgument> },
     /// A type function type `(T1, T2, ...) -> T`
     Function(Vec<TypeId>, TypeId),
     /// A list type `[T]`
@@ -207,9 +223,49 @@ pub enum Literal {
     Boolean(bool),
 }
 
+/// An argument in a function call (positional or named)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Argument {
+    /// A positional argument: `func(expr)`
+    Positional(ExprId),
+    /// A named argument: `func(name: expr)`
+    Named { name: Symbol, value: ExprId },
+}
+
+impl Argument {
+    /// Get the expression value of this argument
+    pub fn value(&self) -> ExprId {
+        match self {
+            Argument::Positional(expr) => *expr,
+            Argument::Named { value, .. } => *value,
+        }
+    }
+}
+
+/// A provider argument (literal-based, positional or named)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ProviderArgument {
+    /// A positional argument: `csv!("file.csv")`
+    Positional(Literal),
+    /// A named argument: `csv!(path: "file.csv")`
+    Named { name: Symbol, value: Literal },
+}
+
+impl ProviderArgument {
+    /// Get the literal value of this argument
+    pub fn value(&self) -> &Literal {
+        match self {
+            ProviderArgument::Positional(lit) => lit,
+            ProviderArgument::Named { value, .. } => value,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Param {
     pub name: Symbol,
+    /// Optional default value for this parameter
+    pub default: Option<ExprId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

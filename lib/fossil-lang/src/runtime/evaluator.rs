@@ -185,13 +185,91 @@ impl<'a> ThirEvaluator<'a> {
             ExprKind::Block { stmts } => self.eval_block(stmts),
 
             ExprKind::Unit => Ok(Value::Unit),
+
+            ExprKind::StringInterpolation { parts, exprs } => {
+                self.eval_string_interpolation(parts, exprs)
+            }
+
+            ExprKind::FieldSelector { field, .. } => {
+                // Field selector evaluates to the field name as a string
+                let field_str = self.gcx.interner.resolve(*field);
+                Ok(Value::FieldSelector(Arc::from(field_str)))
+            }
+        }
+    }
+
+    /// Evaluate a string interpolation expression
+    fn eval_string_interpolation(
+        &mut self,
+        parts: &[Symbol],
+        exprs: &[ExprId],
+    ) -> Result<Value, RuntimeError> {
+        let mut result = String::new();
+
+        // Invariant: parts.len() == exprs.len() + 1
+        for (i, part) in parts.iter().enumerate() {
+            // Add the literal part
+            result.push_str(self.gcx.interner.resolve(*part));
+
+            // If there's a corresponding expression, evaluate and convert to string
+            if i < exprs.len() {
+                let value = self.eval(exprs[i])?;
+                let string_value = self.value_to_string(&value)?;
+                result.push_str(&string_value);
+            }
+        }
+
+        Ok(Value::String(Arc::from(result)))
+    }
+
+    /// Convert a Value to its string representation for interpolation
+    fn value_to_string(&self, value: &Value) -> Result<String, RuntimeError> {
+        match value {
+            Value::Int(i) => Ok(i.to_string()),
+            Value::String(s) => Ok(s.to_string()),
+            Value::Bool(b) => Ok(b.to_string()),
+            Value::Unit => Ok("()".to_string()),
+            Value::Column(series) => {
+                // For a single-element series, return the value
+                if series.len() == 1 {
+                    use polars::datatypes::AnyValue;
+                    match series.get(0).map_err(|e| self.make_error(format!("Series access error: {}", e)))? {
+                        AnyValue::Int64(i) => Ok(i.to_string()),
+                        AnyValue::String(s) => Ok(s.to_string()),
+                        AnyValue::Boolean(b) => Ok(b.to_string()),
+                        _ => Ok(format!("{:?}", series)),
+                    }
+                } else {
+                    Ok(format!("{:?}", series))
+                }
+            }
+            Value::Records(lf) => {
+                // Collect and format the DataFrame
+                match lf.clone().collect() {
+                    Ok(df) => Ok(format!("{}", df)),
+                    Err(_) => Ok("<records>".to_string()),
+                }
+            }
+            Value::List(items) => {
+                let strs: Result<Vec<_>, _> = items.iter().map(|v| self.value_to_string(v)).collect();
+                Ok(format!("[{}]", strs?.join(", ")))
+            }
+            Value::Closure { .. } => Ok("<function>".to_string()),
+            Value::Function(_) => Ok("<function>".to_string()),
+            Value::BuiltinFunction(_, _) => Ok("<builtin>".to_string()),
+            Value::Record(df, idx) => {
+                // Format a single row
+                Ok(format!("row {} of {}", idx, df.height()))
+            }
+            Value::Extension { metadata, .. } => Ok(format!("<{}>", metadata.type_name())),
+            Value::FieldSelector(field) => Ok(field.to_string()),
         }
     }
 
     /// Evaluate a record expression
     fn eval_record(&mut self, fields: &[(Symbol, ExprId)]) -> Result<Value, RuntimeError> {
         if fields.is_empty() {
-            return Ok(Value::LazyFrame(LazyFrame::default()));
+            return Ok(Value::Records(LazyFrame::default()));
         }
 
         let mut series_vec = Vec::new();
@@ -204,7 +282,7 @@ impl<'a> ThirEvaluator<'a> {
                 Value::Int(i) => Series::new(name_str, &[i]).into_column(),
                 Value::String(s) => Series::new(name_str, &[s.as_ref()]).into_column(),
                 Value::Bool(b) => Series::new(name_str, &[b]).into_column(),
-                Value::Series(mut s) => {
+                Value::Column(mut s) => {
                     s.rename(name_str);
                     s.into_column()
                 }
@@ -219,13 +297,13 @@ impl<'a> ThirEvaluator<'a> {
         let df = DataFrame::new(series_vec)
             .map_err(|e| self.make_error(format!("Failed to create DataFrame: {}", e)))?;
 
-        Ok(Value::LazyFrame(df.lazy()))
+        Ok(Value::Records(df.lazy()))
     }
 
     /// Evaluate a list expression
     fn eval_list(&mut self, items: &[ExprId]) -> Result<Value, RuntimeError> {
         if items.is_empty() {
-            return Ok(Value::Series(Series::default()));
+            return Ok(Value::Column(Series::default()));
         }
 
         let values: Vec<Value> = items
@@ -242,7 +320,7 @@ impl<'a> ThirEvaluator<'a> {
                         _ => unreachable!("Type checker ensures homogeneous lists"),
                     })
                     .collect();
-                Ok(Value::Series(Series::from_iter(ints)))
+                Ok(Value::Column(Series::from_iter(ints)))
             }
 
             Value::String(_) => {
@@ -253,7 +331,7 @@ impl<'a> ThirEvaluator<'a> {
                         _ => unreachable!("Type checker ensures homogeneous lists"),
                     })
                     .collect();
-                Ok(Value::Series(Series::from_iter(strings)))
+                Ok(Value::Column(Series::from_iter(strings)))
             }
 
             Value::Bool(_) => {
@@ -264,21 +342,21 @@ impl<'a> ThirEvaluator<'a> {
                         _ => unreachable!("Type checker ensures homogeneous lists"),
                     })
                     .collect();
-                Ok(Value::Series(Series::from_iter(bools)))
+                Ok(Value::Column(Series::from_iter(bools)))
             }
 
-            Value::LazyFrame(_) => {
+            Value::Records(_) => {
                 let dfs: Vec<LazyFrame> = values
                     .into_iter()
                     .map(|v| match v {
-                        Value::LazyFrame(lf) => lf,
+                        Value::Records(lf) => lf,
                         _ => unreachable!("Type checker ensures homogeneous lists"),
                     })
                     .collect();
                 let concatenated = concat(dfs, UnionArgs::default()).map_err(|e| {
-                    self.make_error(format!("Failed to concatenate LazyFrames: {}", e))
+                    self.make_error(format!("Failed to concatenate lists: {}", e))
                 })?;
-                Ok(Value::LazyFrame(concatenated))
+                Ok(Value::Records(concatenated))
             }
 
             Value::Extension { .. } => {
@@ -304,7 +382,7 @@ impl<'a> ThirEvaluator<'a> {
     }
 
     /// Evaluate a function application
-    fn eval_application(&mut self, callee: ExprId, args: &[ExprId]) -> Result<Value, RuntimeError> {
+    fn eval_application(&mut self, callee: ExprId, args: &[crate::ast::thir::Argument]) -> Result<Value, RuntimeError> {
         // Check recursion depth before proceeding
         self.check_recursion_depth()?;
 
@@ -312,10 +390,12 @@ impl<'a> ThirEvaluator<'a> {
         let callee_loc = callee_expr.loc.clone();
         let callee_val = self.eval(callee)?;
 
-        // Evaluate arguments
+        // Evaluate arguments (extracting values from Argument enum)
+        // TODO: Full named parameter support would require looking up param names
+        // from callee's signature and reordering. For now, we just use positional order.
         let arg_values: Vec<Value> = args
             .iter()
-            .map(|arg| self.eval(*arg))
+            .map(|arg| self.eval(arg.value()))
             .collect::<Result<Vec<_>, _>>()?;
 
         match callee_val {
@@ -376,7 +456,7 @@ impl<'a> ThirEvaluator<'a> {
                 // Try to extract DefId from first argument's type (for functions like Entity::with_id)
                 // This handles cases with explicit type annotations
                 if !args.is_empty() {
-                    let first_arg_expr = self.thir.exprs.get(args[0]);
+                    let first_arg_expr = self.thir.exprs.get(args[0].value());
                     let arg_type = self.thir.types.get(first_arg_expr.ty);
 
                     // If it's a Named type, extract the DefId
@@ -402,7 +482,19 @@ impl<'a> ThirEvaluator<'a> {
         let value = self.eval(expr)?;
 
         match value {
-            Value::LazyFrame(lf) => {
+            // Optimized path: direct row access without collection
+            Value::Record(df, row_idx) => {
+                let field_name = self.gcx.interner.resolve(field);
+
+                let column = df.column(field_name).map_err(|e| {
+                    self.make_error(format!("Field '{}' not found: {}", field_name, e))
+                })?;
+
+                let series = column.as_materialized_series();
+                self.series_value_at(series, row_idx)
+            }
+
+            Value::Records(lf) => {
                 // Extract field from LazyFrame
                 let field_name = self.gcx.interner.resolve(field);
 
@@ -413,7 +505,7 @@ impl<'a> ThirEvaluator<'a> {
                 // Collect only the selected column
                 let df = lf_selected
                     .collect()
-                    .map_err(|e| self.make_error(format!("Failed to collect LazyFrame: {}", e)))?;
+                    .map_err(|e| self.make_error(format!("Failed to access field: {}", e)))?;
 
                 // Get the column (should be the only one)
                 let column = df.column(field_name).map_err(|e| {
@@ -428,7 +520,7 @@ impl<'a> ThirEvaluator<'a> {
                     self.series_to_scalar(&series)
                 } else {
                     // Multiple rows, return Series
-                    Ok(Value::Series(series))
+                    Ok(Value::Column(series))
                 }
             }
 
@@ -468,11 +560,16 @@ impl<'a> ThirEvaluator<'a> {
 
     /// Convert a single-value Series to a scalar Value
     fn series_to_scalar(&self, series: &Series) -> Result<Value, RuntimeError> {
+        self.series_value_at(series, 0)
+    }
+
+    /// Get a scalar Value from a Series at a specific index
+    fn series_value_at(&self, series: &Series, idx: usize) -> Result<Value, RuntimeError> {
         use polars::datatypes::AnyValue;
 
         let any_value = series
-            .get(0)
-            .map_err(|e| self.make_error(format!("Failed to get value from series: {}", e)))?;
+            .get(idx)
+            .map_err(|e| self.make_error(format!("Failed to get value from series at index {}: {}", idx, e)))?;
 
         match any_value {
             AnyValue::Int64(i) => Ok(Value::Int(i)),

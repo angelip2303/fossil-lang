@@ -58,8 +58,12 @@ pub enum Token<'a> {
     RAngle,
     #[token("::")]
     ModuleSep,
+    #[token("!")]
+    Bang,
+    #[token("_", priority = 3)]
+    Underscore,
 
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice())]
+    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice(), priority = 2)]
     Identifier(&'a str),
 
     #[regex(r#""([^"\\]|\\.)*""#, |lex| &lex.slice()[1..(lex.slice().len()-1)])]

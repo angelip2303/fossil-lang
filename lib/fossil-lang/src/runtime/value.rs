@@ -5,8 +5,7 @@ use std::sync::Arc;
 
 use polars::prelude::*;
 
-use crate::ast::hir::Param;
-use crate::ast::thir::ExprId;
+use crate::ast::thir::{ExprId, Param};
 use crate::context::{DefId, Symbol};
 
 // TODO: Fix BindingId when module system is implemented
@@ -47,13 +46,19 @@ pub trait ExtensionMetadata: Send + Sync {
 
 #[derive(Clone)]
 pub enum Value {
-    // internal values
+    // Primitive values
     Int(i64),
     String(Arc<str>),
     Bool(bool),
-    Series(Series),
-    LazyFrame(LazyFrame),
     Unit,
+
+    // Collection values (backed by Polars internally)
+    /// A single column of data
+    Column(Series),
+    /// A collection of records (rows with named fields)
+    Records(LazyFrame),
+    /// A single record (efficient row access into shared data)
+    Record(Arc<DataFrame>, usize),
 
     // functions as values allow, for example, them to be passed
     // as parameters to other functions (Higher-order functions)
@@ -75,6 +80,11 @@ pub enum Value {
     /// List of heterogeneous values (for collecting results, extensions, etc.)
     List(Vec<Value>),
 
+    /// Field selector - represents a type-safe reference to a field name
+    /// Evaluates to the field name as a string at runtime
+    /// Used for functions like List::join(left, right, left_on: _.id, right_on: _.customer_id)
+    FieldSelector(Arc<str>),
+
     /// Generic extension system for stdlib-defined types
     ///
     /// Permite que stdlib defina tipos wrapped (Entity, Future, Option, etc.)
@@ -87,7 +97,7 @@ pub enum Value {
     /// ```ignore
     /// Value::Extension {
     ///     type_id: ENTITY_TYPE_ID,
-    ///     value: Box::new(Value::LazyFrame(...)),
+    ///     value: Box::new(Value::Record(...)),
     ///     metadata: Arc::new(EntityMetadata { ... }),
     /// }
     /// ```

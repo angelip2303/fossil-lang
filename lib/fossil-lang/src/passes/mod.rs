@@ -28,16 +28,24 @@ pub struct GlobalContext {
     pub type_constructors: HashMap<DefId, TypeConstructorInfo>,
     /// Cached DefId for the List type constructor (builtin)
     pub list_type_ctor: Option<DefId>,
+    /// Pre-interned wildcard symbol `_` for use in type signatures
+    /// This is used in FieldSelector types to represent "any field"
+    pub wildcard_symbol: crate::context::Symbol,
 }
 
 impl GlobalContext {
     pub fn new() -> Self {
+        let mut interner = Interner::default();
+        // Pre-intern the wildcard symbol for use in type signatures
+        let wildcard_symbol = interner.intern("_");
+
         let mut gcx = Self {
-            interner: Interner::default(),
+            interner,
             definitions: Definitions::default(),
             type_metadata: HashMap::new(),
             type_constructors: HashMap::new(),
             list_type_ctor: None,
+            wildcard_symbol,
         };
 
         // Register builtin type constructors

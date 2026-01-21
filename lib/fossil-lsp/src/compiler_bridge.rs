@@ -20,6 +20,8 @@ fn create_context() -> GlobalContext {
     // Register built-in type providers
     gcx.register_provider("csv", fossil_providers::csv::CsvProvider);
     gcx.register_provider("json", fossil_providers::json::JsonProvider);
+    gcx.register_provider("shex", fossil_providers::shex::ShexProvider);
+    gcx.register_provider("sql", fossil_providers::sql::SqlProvider);
 
     // Register stdlib types and functions
     fossil_stdlib::init(&mut gcx);
