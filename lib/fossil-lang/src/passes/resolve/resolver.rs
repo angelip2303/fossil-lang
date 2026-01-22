@@ -158,11 +158,10 @@ impl NameResolver {
 
             StmtKind::Let { name, ty, value } => {
                 // Resolve type annotation if present
-                if let Some(type_id) = ty {
-                    if let Err(e) = self.resolve_type(*type_id) {
+                if let Some(type_id) = ty
+                    && let Err(e) = self.resolve_type(*type_id) {
                         errors.push(e);
                     }
-                }
 
                 // Resolve the value expression
                 if let Err(e) = self.resolve_expr(*value) {
@@ -611,7 +610,7 @@ impl NameResolver {
         // Check for missing required arguments
         for required_arg in schema.required_args() {
             let required_sym = self.gcx.interner.lookup(required_arg);
-            let is_provided = required_sym.map_or(false, |sym| provided_args.contains(&sym));
+            let is_provided = required_sym.is_some_and(|sym| provided_args.contains(&sym));
 
             if !is_provided {
                 errors.push(

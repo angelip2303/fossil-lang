@@ -1,5 +1,7 @@
 # TODO
 
+## Hay bugs en ShEx con el tema de opcionales y demás (cardinalidad)
+
 ## Sigue habiendo algun bug con el autocompletado de FieldSelectors, además, los field selectors no parece que resuelvan tipos correctamente
 
 ## Cuando ocurre un error de tipo en un atributo se muestra todo el record como erroneo, y no solo el atributo que falla

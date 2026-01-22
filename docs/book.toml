@@ -11,8 +11,8 @@ enable = false
 
 [output.html]
 no-section-label = true
-git-repository-url = ""
 git-repository-icon = "fa-github"
+git-repository-url = "https://github.com/angelip2303/fossil-lang"
 additional-css = ["theme/pagetoc.css", "theme/highlight.css"]
 additional-js = [
     "turtle.js",

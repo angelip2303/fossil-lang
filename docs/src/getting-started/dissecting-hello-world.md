@@ -1,57 +1,88 @@
 # Dissecting Hello World!
 
-```
-open Data.Csv as Csv
-open Random as Random
+```fossil
+type Input = csv!("people.csv")
 
-type Person = Csv<"people.csv">
-
-type PersonWithAge = {
+type Output = {
+    #[rdf(uri = "http://example.com/person/name")]
     name: string,
-    age: number
+    
+    #[rdf(uri = "http://example.com/person/age")]
+    age: number,
+    
+    #[rdf(uri = "http://example.com/person/email")]
+    email: string
 }
 
-let people = Person.load "people.csv"
+let csv_to_rdf = fn(row) -> {
+    Output(row.name, row.age, row.name)
+        |> Entity::with_id("http://example.com/person/${row.name}")
+}
 
-let peopleWithAge =
-    people
-        |> map (fn person -> {
-            name = person.name,
-            age = Random.int 0 100
-        } :> PersonWithAge)
-
-Csv.write peopleWithAge "people_with_age.csv"
+Input::load()
+|> List::map(csv_to_rdf)
+|> Rdf::serialize("results.ttl")
 ```
 
 There are a number of things going on in the basic pipeline example so lets break them down one step at a time.
 
-```
-open Data.Csv as Csv
-open Random as Random
+```fossil
+type
 ```
 
-`fossil` uses the keyword `open` to load the content of another module.
-In this example we use it to get access to the `Data.Csv` and `Random` modules, which are bundled in the `fossil` standard library.
-The `Data` sub-modules provide a set of functions for working with different data formats.
-In this case, we use the `Data.Csv` module to read and write a CSV file.
-The `Random` module provides a set of functions for generating random values.
-As it can be seen, the `as` keyword is used to give a module an alias, _e.g_ load all the content in `Data.Csv` and make it available with the `Csv` prefix.
+`fossil` uses the keyword `type` to declare a new type.
 
-> In case no alias is provided, the module is loaded globally.
-
+```fossil
+csv!("people.csv")
 ```
+
+`fossil` introduces a meta-programming feature that allows users define types inferred from source files at compile-time.
+These generate modules that provide two core functionalities: _a type_ and the `load` function.
+The type is a record type that represents the structure of the source, while the `load` function is used to load the data from the source file.
+In this example, we define a type `Input` that represents the structure of a CSV file.
+
+> Providers can be distinguished from functions as they are suffixed with `!`.
+
+```fossil
+{
+    #[rdf(uri = "http://example.com/person/name")]
+    name: string,
+    
+    #[rdf(uri = "http://example.com/person/age")]
+    age: number,
+    
+    #[rdf(uri = "http://example.com/person/email")]
+    email: string
+}
+```
+
+Records are composed data structures that can be used to represent complex data types.
+They are surrounded by curly braces `{}`, and contain a number of fields each separated by a comma.
+Fields are defined using a name followed by a colon `:` and the type of the field.
+Fields can also be annotated with attributes, such as `#[rdf(uri = "...")]`, which can be used to provide additional information about the field.
+
+> Internally, type providers build the record type from the source file.
+
+```fossil
 let
 ```
 
 `fossil` uses the `let` keyword to bind values for later use.
 
-```
-type Person = Csv<"people.csv">
-let people = Person.load "people.csv"
+```fossil
+fn(row) -> { }
 ```
 
-Here we access the `read` function from  `Data.Csv` and `Data.Excel`, respectively.
-As mentioned earlier, in the case of the `Data.Csv` module, the `read` function is loaded globally, thus available in the global scope, while in the case of latter, the `Excel` prefix is used to access the corresponding function.
+Functions are a way to encapsulate a block of code that can be called multiple times.
+They are defined using the `fn` keyword followed by the parameters and the return type.
+
+```fossil
+Output(row.name, row.age, row.name)
+```
+
+Constructors are a way to create new instances of a record type.
+
+> A constructor for `type Name = { name: string }` is `Name("John")`, which is equivalent to `let name: Name = {name = "John"}`
 
 ```
 |>
@@ -61,28 +92,8 @@ The pipe operator `|>` is used to chain functions together.
 It takes the output of the previous function and passes it as the first argument to the next function call.
 Hence, `var |> func` is equivalent to `func(var)`.
 
-```
-join(addresses, left_on = "name", right_on = "name")
-```
-
-Functions can also have named arguments, which can be used to make the code more readable.
-
-```
-{
-  id  = col("name") :: string |> trim |> upper,
-  age = col("age") :: int
-}
+```fossil
+"http://example.com/person/${row.name}"
 ```
 
-Records `{ ... }` are expressions that define key → expression mappings.
-They are not primitive values but context-dependent blocks of transformations.
-For example, in the `select` function, a record specifies how to derive new columns: each key is the alias of the resulting column, and each value is an expression that produces its content.
-
-```
-::
-```
-
-`::` is the cast operator, and can be used to convert a value to a specific type.
-
-
-> Implementation wise, the cast operator is a syntactic sugar for a function call, _e.g_ `var :: string` is equivalent to `string(var)`.
+`fossil` provides a way to interpolate values into strings using the `${}` syntax.

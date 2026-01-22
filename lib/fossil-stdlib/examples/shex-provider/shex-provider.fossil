@@ -8,4 +8,4 @@ let csv_to_rdf = fn(row) -> {
 
 PersonData::load()
 |> List::map(csv_to_rdf)
-|> Rdf::serialize("lib/fossil-stdlib/examples/shex-provider/results.ttl")
+|> Rdf::serialize("results.ttl")
