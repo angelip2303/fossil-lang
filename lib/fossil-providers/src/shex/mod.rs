@@ -37,8 +37,8 @@ use std::sync::Arc;
 
 use fossil_lang::ast::Loc;
 use fossil_lang::ast::ast::{
-    Ast, Attribute, AttributeArg, Literal, ProviderArgument, RecordField, Type as AstType,
-    TypeKind as AstTypeKind, PrimitiveType,
+    Ast, Attribute, AttributeArg, Literal, PrimitiveType, ProviderArgument, RecordField,
+    Type as AstType, TypeKind as AstTypeKind,
 };
 use fossil_lang::ast::thir::{
     Polytype, Type as ThirType, TypeKind as ThirTypeKind, TypeVar, TypedHir,
@@ -48,11 +48,13 @@ use fossil_lang::error::{CompileErrorKind, ProviderError, RuntimeError};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
-use fossil_lang::traits::provider::{FunctionDef, ModuleSpec, ProviderOutput, ProviderParamInfo, TypeProviderImpl};
+use fossil_lang::traits::provider::{
+    FunctionDef, ModuleSpec, ProviderOutput, ProviderParamInfo, TypeProviderImpl,
+};
 
-use shex_ast::ast::{Schema, ShapeExpr, TripleExpr, ShapeExprLabel};
-use shex_ast::compact::ShExParser;
 use iri_s::IriS;
+use shex_ast::ast::{Schema, ShapeExpr, ShapeExprLabel, TripleExpr};
+use shex_ast::compact::ShExParser;
 
 use crate::utils::*;
 
@@ -153,9 +155,10 @@ fn parse_shex_args(
                     path = Some(interner.resolve(*s).to_string());
                 }
             } else if *name == shape_sym
-                && let Literal::String(s) = value {
-                    shape = Some(interner.resolve(*s).to_string());
-                }
+                && let Literal::String(s) = value
+            {
+                shape = Some(interner.resolve(*s).to_string());
+            }
         }
     }
 
@@ -233,9 +236,7 @@ fn extract_shape_fields(
     // Find shape by name in the schema
     let shapes = schema.shapes().ok_or_else(|| {
         ProviderError::new(
-            CompileErrorKind::ProviderError(
-                interner.intern("Schema has no shapes defined"),
-            ),
+            CompileErrorKind::ProviderError(interner.intern("Schema has no shapes defined")),
             Loc::generated(),
         )
     })?;
@@ -335,7 +336,7 @@ fn extract_fields_from_triple_expr(
 
             // Cardinality - min/max are i32
             let min_val = min.unwrap_or(1);
-            let max_val = *max;  // max is already Option<i32>
+            let max_val = *max; // max is already Option<i32>
 
             let optional = min_val == 0;
             let is_list = max_val.map(|m| m > 1).unwrap_or(true); // unbounded = list
@@ -397,9 +398,14 @@ fn xsd_str_to_fossil_type(iri_str: &str) -> PrimitiveType {
     // Common XSD types
     if iri_str.contains("string") {
         PrimitiveType::String
-    } else if iri_str.contains("integer") || iri_str.contains("int") || iri_str.contains("long") || iri_str.contains("short") {
+    } else if iri_str.contains("integer")
+        || iri_str.contains("int")
+        || iri_str.contains("long")
+        || iri_str.contains("short")
+    {
         PrimitiveType::Int
-    } else if iri_str.contains("float") || iri_str.contains("double") || iri_str.contains("decimal") {
+    } else if iri_str.contains("float") || iri_str.contains("double") || iri_str.contains("decimal")
+    {
         PrimitiveType::Float
     } else if iri_str.contains("boolean") {
         PrimitiveType::Bool
