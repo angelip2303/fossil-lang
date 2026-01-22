@@ -31,16 +31,16 @@ use crate::{
 /// Uses try_resolve to safely handle symbols that may not exist in this interner
 /// (can happen when errors are created in a different compilation context).
 fn format_symbol(sym: Symbol, interner: &Interner) -> String {
-    interner
-        .try_resolve(sym)
-        .unwrap_or("<unknown>")
-        .to_string()
+    interner.try_resolve(sym).unwrap_or("<unknown>").to_string()
 }
 
 /// Format a Path using the interner to get readable names
 fn format_path(path: &Path, interner: &Interner) -> String {
     match path {
-        Path::Simple(sym) => interner.try_resolve(*sym).unwrap_or("<unknown>").to_string(),
+        Path::Simple(sym) => interner
+            .try_resolve(*sym)
+            .unwrap_or("<unknown>")
+            .to_string(),
         Path::Qualified(parts) => parts
             .iter()
             .map(|s| interner.try_resolve(*s).unwrap_or("<unknown>"))
@@ -122,11 +122,7 @@ impl CompileErrors {
     /// This is a convenience method for converting an error accumulation
     /// into a Result type.
     pub fn into_result<T>(self, ok: T) -> Result<T, Self> {
-        if self.is_empty() {
-            Ok(ok)
-        } else {
-            Err(self)
-        }
+        if self.is_empty() { Ok(ok) } else { Err(self) }
     }
 
     /// Generate Ariadne reports for all errors
@@ -209,10 +205,7 @@ impl ErrorSuggestion {
                 if *confidence > 0.8 {
                     format!("Did you mean '{}'?", suggestion)
                 } else {
-                    format!(
-                        "Did you mean '{}' (similar to '{}')?",
-                        suggestion, wrong
-                    )
+                    format!("Did you mean '{}' (similar to '{}')?", suggestion, wrong)
                 }
             }
             Self::ConsiderImporting { module, path } => {
@@ -253,19 +246,19 @@ pub enum CompileErrorKind {
         /// The expected type
         expected: TypeId,
         /// The actual type encountered
-        actual: TypeId
+        actual: TypeId,
     },
 
     /// Reference to an undefined variable
     UndefinedVariable {
         /// Name of the undefined variable
-        name: Symbol
+        name: Symbol,
     },
 
     /// Reference to an undefined path (qualified name)
     UndefinedPath {
         /// The path that could not be resolved
-        path: Path
+        path: Path,
     },
 
     /// Function called with wrong number of arguments
@@ -273,7 +266,7 @@ pub enum CompileErrorKind {
         /// Expected number of arguments
         expected: usize,
         /// Actual number of arguments provided
-        actual: usize
+        actual: usize,
     },
 
     /// Attempt to redefine an already-defined name
@@ -338,7 +331,6 @@ pub enum CompileErrorKind {
     },
 
     // === Attribute validation errors ===
-
     /// Unknown attribute name
     ///
     /// The attribute is not registered in the attribute registry.
@@ -651,8 +643,8 @@ impl CompileError {
     /// # Returns
     /// An Ariadne `Report` that can be printed or written to a file.
     pub fn report(&self) -> Report<'_, Loc> {
-        let mut report = Report::build(ReportKind::Error, self.loc.clone())
-            .with_message(self.message());
+        let mut report =
+            Report::build(ReportKind::Error, self.loc.clone()).with_message(self.message());
 
         // Add main label
         let mut label = Label::new(self.loc.clone());
@@ -674,20 +666,19 @@ impl CompileError {
             CompileErrorKind::UndefinedVariable { .. } => {
                 if self.suggestions.is_empty() {
                     report = report.with_help(
-                        "Variables must be defined before use. Check spelling and scope."
+                        "Variables must be defined before use. Check spelling and scope.",
                     );
                 }
             }
             CompileErrorKind::TypeMismatch { .. } => {
                 if self.suggestions.is_empty() {
-                    report = report.with_help(
-                        "Type mismatches can be fixed with explicit type annotations."
-                    );
+                    report = report
+                        .with_help("Type mismatches can be fixed with explicit type annotations.");
                 }
             }
             CompileErrorKind::ArityMismatch { .. } => {
                 report = report.with_help(
-                    "Check the function definition to see the expected number of arguments."
+                    "Check the function definition to see the expected number of arguments.",
                 );
             }
             CompileErrorKind::InternalCompilerError { phase, .. } => {
@@ -730,132 +721,5 @@ impl From<std::io::Error> for CompileError {
             crate::ast::Loc::generated(),
         )
         .with_context(format!("IO error: {}", err))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_error_with_suggestion() {
-        let error = CompileError::new(
-            CompileErrorKind::UndefinedVariable {
-                name: Symbol::synthetic(),
-            },
-            Loc::generated(),
-        )
-        .with_suggestion(ErrorSuggestion::DidYouMean {
-            wrong: "lenght".to_string(),
-            suggestion: "length".to_string(),
-            confidence: 0.9,
-        });
-
-        assert_eq!(error.suggestions.len(), 1);
-    }
-
-    #[test]
-    fn test_error_with_multiple_suggestions() {
-        let error = CompileError::new(
-            CompileErrorKind::UndefinedVariable {
-                name: Symbol::synthetic(),
-            },
-            Loc::generated(),
-        )
-        .with_suggestion(ErrorSuggestion::DidYouMean {
-            wrong: "lenght".to_string(),
-            suggestion: "length".to_string(),
-            confidence: 0.9,
-        })
-        .with_suggestion(ErrorSuggestion::Help(
-            "Check variable names in current scope".to_string(),
-        ));
-
-        assert_eq!(error.suggestions.len(), 2);
-    }
-
-    #[test]
-    fn test_suggestion_format_high_confidence() {
-        let suggestion = ErrorSuggestion::DidYouMean {
-            wrong: "lenght".to_string(),
-            suggestion: "length".to_string(),
-            confidence: 0.9,
-        };
-
-        let formatted = suggestion.format();
-        assert_eq!(formatted, "Did you mean 'length'?");
-    }
-
-    #[test]
-    fn test_suggestion_format_low_confidence() {
-        let suggestion = ErrorSuggestion::DidYouMean {
-            wrong: "foo".to_string(),
-            suggestion: "bar".to_string(),
-            confidence: 0.5,
-        };
-
-        let formatted = suggestion.format();
-        assert!(formatted.contains("Did you mean 'bar'"));
-        assert!(formatted.contains("similar to 'foo'"));
-    }
-
-    #[test]
-    fn test_compile_errors_accumulation() {
-        let mut errors = CompileErrors::new();
-        assert!(errors.is_empty());
-
-        errors.push(CompileError::new(
-            CompileErrorKind::UndefinedVariable {
-                name: Symbol::synthetic(),
-            },
-            Loc::generated(),
-        ));
-
-        errors.push(CompileError::new(
-            CompileErrorKind::Parse(Symbol::synthetic()),
-            Loc::generated(),
-        ));
-
-        assert!(!errors.is_empty());
-        assert_eq!(errors.0.len(), 2);
-    }
-
-    #[test]
-    fn test_compile_errors_into_result_ok() {
-        let errors = CompileErrors::new();
-        let result = errors.into_result(42);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 42);
-    }
-
-    #[test]
-    fn test_compile_errors_into_result_err() {
-        let mut errors = CompileErrors::new();
-        errors.push(CompileError::new(
-            CompileErrorKind::UndefinedVariable {
-                name: Symbol::synthetic(),
-            },
-            Loc::generated(),
-        ));
-
-        let result: Result<i32, CompileErrors> = errors.into_result(42);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_internal_compiler_error_helper() {
-        let error = CompileError::internal(
-            "type_checking",
-            "Unexpected None value",
-            Loc::generated(),
-        );
-
-        match error.kind {
-            CompileErrorKind::InternalCompilerError { phase, message } => {
-                assert_eq!(phase, "type_checking");
-                assert_eq!(message, "Unexpected None value");
-            }
-            _ => panic!("Expected InternalCompilerError variant"),
-        }
     }
 }

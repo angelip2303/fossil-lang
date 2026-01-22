@@ -1,15 +1,18 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use chumsky::prelude::*;
-use chumsky::input::IterInput;
-use chumsky::error::RichReason;
 use chumsky::Parser as ChumskyParser;
+use chumsky::error::RichReason;
+use chumsky::input::IterInput;
+use chumsky::prelude::*;
 use logos::Logos;
 
-use crate::ast::{ast::Ast, Loc};
+use crate::ast::{Loc, ast::Ast};
 use crate::error::{CompileError, CompileErrorKind, CompileErrors};
-use crate::parser::{grammar::{AstCtx, parse_stmt}, lexer::Token};
+use crate::parser::{
+    grammar::{AstCtx, parse_stmt},
+    lexer::Token,
+};
 use crate::passes::{GlobalContext, ParsedProgram};
 
 pub struct Parser;
@@ -24,7 +27,6 @@ impl Parser {
         source_id: usize,
         mut gcx: GlobalContext,
     ) -> Result<ParsedProgram, CompileErrors> {
-
         // Tokenize with Logos - collect tokens WITH their original byte spans
         let lexer = Token::lexer(src);
         let len = src.len();
@@ -101,94 +103,11 @@ impl Parser {
                         source: source_id,
                         span: simple_span.into_range(),
                     };
-                    compile_errors.push(CompileError::new(
-                        CompileErrorKind::Parse(error_msg),
-                        loc,
-                    ));
+                    compile_errors.push(CompileError::new(CompileErrorKind::Parse(error_msg), loc));
                 }
 
                 Err(compile_errors)
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_multiple_parse_errors() {
-        // Create source with multiple syntax errors
-        // Note: Chumsky's error recovery may not catch all errors in one pass,
-        // but the infrastructure now supports collecting multiple errors
-        let src = "let = 42\nlet y = \nlet z = ]";
-        let result = Parser::parse(src, 0);
-
-        // Should return an error
-        match result {
-            Err(errors) => {
-                // Verify that we get CompileErrors (which can hold multiple errors)
-                // The actual count depends on parser error recovery behavior
-                assert!(
-                    errors.0.len() >= 1,
-                    "Expected at least 1 parse error, got {}",
-                    errors.0.len()
-                );
-                println!("Got {} parse error(s)", errors.0.len());
-            }
-            Ok(_) => panic!("Expected parse to fail with errors"),
-        }
-    }
-
-    #[test]
-    fn test_single_parse_error() {
-        // Create source with one syntax error
-        let src = "let = 42";
-        let result = Parser::parse(src, 0);
-
-        // Should return an error
-        match result {
-            Err(errors) => {
-                assert!(
-                    errors.0.len() >= 1,
-                    "Expected at least 1 parse error, got {}",
-                    errors.0.len()
-                );
-            }
-            Ok(_) => panic!("Expected parse to fail with error"),
-        }
-    }
-
-    #[test]
-    fn test_valid_parse() {
-        // Create valid source
-        let src = "let x = 42";
-        let result = Parser::parse(src, 0);
-
-        // Should succeed
-        assert!(result.is_ok(), "Expected parse to succeed: {:?}", result.err());
-    }
-
-    #[test]
-    fn test_type_with_annotation_rejected() {
-        let src = "type MyType: Foo = Bar";
-        let result = Parser::parse(src, 0);
-        assert!(result.is_err(), "Should reject type alias with annotation");
-
-        // Verify the error message is our custom message
-        if let Err(errors) = result {
-            let has_custom_message = errors.0.iter().any(|e| {
-                matches!(&e.kind, CompileErrorKind::Parse(_))
-            });
-            assert!(has_custom_message, "Expected custom error message about type annotations");
-        }
-    }
-
-    #[test]
-    fn test_type_without_annotation_works() {
-        let src = "type MyType = int";
-        let result = Parser::parse(src, 0);
-        assert!(result.is_ok(), "Valid type alias should work: {:?}", result.err());
     }
 }

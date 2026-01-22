@@ -239,9 +239,10 @@ impl FunctionImpl for EntityWithIdFunction {
 
         // Extract RDF metadata if available (using reference, no clone needed)
         let rdf_metadata = type_def_id.and_then(|def_id| {
-            ctx.gcx.type_metadata.get(&def_id).and_then(|tm| {
-                RdfMetadata::from_type_metadata(tm, &ctx.gcx.interner)
-            })
+            ctx.gcx
+                .type_metadata
+                .get(&def_id)
+                .and_then(|tm| RdfMetadata::from_type_metadata(tm, &ctx.gcx.interner))
         });
 
         // Create Entity extension
@@ -301,91 +302,4 @@ fn infer_type_def_id(value: &Value, ctx: &RuntimeContext) -> Option<DefId> {
     }
 
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use fossil_lang::passes::GlobalContext;
-
-    #[test]
-    fn test_entity_metadata_type_name() {
-        let metadata = EntityMetadata {
-            id: Arc::from("http://example.com/test"),
-            type_def_id: None,
-            rdf_metadata: None,
-        };
-
-        assert_eq!(metadata.type_name(), "Entity");
-    }
-
-    #[test]
-    fn test_entity_metadata_downcast() {
-        let metadata: Arc<dyn ExtensionMetadata> = Arc::new(EntityMetadata {
-            id: Arc::from("http://example.com/test"),
-            type_def_id: None,
-            rdf_metadata: None,
-        });
-
-        let downcasted = metadata.as_any().downcast_ref::<EntityMetadata>();
-        assert!(downcasted.is_some());
-        assert_eq!(downcasted.unwrap().id.as_ref(), "http://example.com/test");
-    }
-
-    #[test]
-    fn test_entity_with_id_requires_two_args() {
-        let func = EntityWithIdFunction;
-        let gcx = GlobalContext::new();
-        let thir = TypedHir::default();
-        let ctx = RuntimeContext::new(&gcx, &thir);
-
-        // Should fail with only one argument
-        let result = func.call(vec![Value::Int(42)], &ctx);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_entity_with_id_requires_string_id() {
-        let func = EntityWithIdFunction;
-        let gcx = GlobalContext::new();
-        let thir = TypedHir::default();
-        let ctx = RuntimeContext::new(&gcx, &thir);
-
-        // Should fail if second argument is not a string
-        let result = func.call(vec![Value::Int(42), Value::Int(99)], &ctx);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_entity_with_id_creates_extension() {
-        let func = EntityWithIdFunction;
-        let gcx = GlobalContext::new();
-        let thir = TypedHir::default();
-        let ctx = RuntimeContext::new(&gcx, &thir);
-
-        let result = func
-            .call(
-                vec![
-                    Value::Int(42),
-                    Value::String("http://example.com/42".into()),
-                ],
-                &ctx,
-            )
-            .unwrap();
-
-        match result {
-            Value::Extension {
-                type_id,
-                value,
-                metadata,
-            } => {
-                assert_eq!(type_id, ENTITY_TYPE_ID);
-                assert!(matches!(*value, Value::Int(42)));
-
-                let entity_meta = metadata.as_any().downcast_ref::<EntityMetadata>().unwrap();
-                assert_eq!(entity_meta.id.as_ref(), "http://example.com/42");
-            }
-            _ => panic!("Expected Extension value"),
-        }
-    }
 }

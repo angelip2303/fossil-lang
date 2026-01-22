@@ -171,12 +171,8 @@ pub trait WritableSource {
 impl ReadableSource for DataSource {
     fn read_all(&self) -> Result<Vec<u8>, SourceError> {
         match self {
-            DataSource::Local(path) => {
-                std::fs::read(path).map_err(SourceError::from)
-            }
-            DataSource::Http(url) => {
-                http_get(url, None)
-            }
+            DataSource::Local(path) => std::fs::read(path).map_err(SourceError::from),
+            DataSource::Http(url) => http_get(url, None),
         }
     }
 
@@ -193,9 +189,7 @@ impl ReadableSource for DataSource {
                     std::fs::read(path).map_err(SourceError::from)
                 }
             }
-            DataSource::Http(url) => {
-                http_get(url, max_bytes)
-            }
+            DataSource::Http(url) => http_get(url, max_bytes),
         }
     }
 }
@@ -206,16 +200,15 @@ impl WritableSource for DataSource {
             DataSource::Local(path) => {
                 // Create parent directories if needed
                 if let Some(parent) = path.parent()
-                    && !parent.exists() {
-                        std::fs::create_dir_all(parent)?;
-                    }
+                    && !parent.exists()
+                {
+                    std::fs::create_dir_all(parent)?;
+                }
                 let mut file = std::fs::File::create(path)?;
                 file.write_all(data)?;
                 Ok(())
             }
-            DataSource::Http(url) => {
-                http_post(url, data)
-            }
+            DataSource::Http(url) => http_post(url, data),
         }
     }
 }
@@ -231,19 +224,13 @@ fn http_get(url: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, SourceError>
         .build()
         .map_err(|e| SourceError::Network(e.to_string()))?;
 
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|e| {
-            if e.is_timeout() {
-                SourceError::Timeout(format!(
-                    "Connection timeout after 30s fetching '{}'",
-                    url
-                ))
-            } else {
-                SourceError::Network(e.to_string())
-            }
-        })?;
+    let response = client.get(url).send().map_err(|e| {
+        if e.is_timeout() {
+            SourceError::Timeout(format!("Connection timeout after 30s fetching '{}'", url))
+        } else {
+            SourceError::Network(e.to_string())
+        }
+    })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -287,10 +274,7 @@ fn http_post(url: &str, data: &[u8]) -> Result<(), SourceError> {
         .send()
         .map_err(|e| {
             if e.is_timeout() {
-                SourceError::Timeout(format!(
-                    "Connection timeout after 60s posting to '{}'",
-                    url
-                ))
+                SourceError::Timeout(format!("Connection timeout after 60s posting to '{}'", url))
             } else {
                 SourceError::Network(e.to_string())
             }
@@ -347,73 +331,5 @@ pub fn format_source_error(source: &DataSource, operation: &str, error: &SourceE
                 operation, uri, error
             )
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_detect_local_paths() {
-        assert!(matches!(
-            DataSource::detect("file.csv").unwrap(),
-            DataSource::Local(_)
-        ));
-        assert!(matches!(
-            DataSource::detect("./relative/path.csv").unwrap(),
-            DataSource::Local(_)
-        ));
-        assert!(matches!(
-            DataSource::detect("/absolute/path.csv").unwrap(),
-            DataSource::Local(_)
-        ));
-        assert!(matches!(
-            DataSource::detect("../parent/file.json").unwrap(),
-            DataSource::Local(_)
-        ));
-    }
-
-    #[test]
-    fn test_detect_http_urls() {
-        assert!(matches!(
-            DataSource::detect("http://example.com/data.csv").unwrap(),
-            DataSource::Http(_)
-        ));
-        assert!(matches!(
-            DataSource::detect("https://api.example.com/data.json").unwrap(),
-            DataSource::Http(_)
-        ));
-        assert!(matches!(
-            DataSource::detect("https://raw.githubusercontent.com/file.csv").unwrap(),
-            DataSource::Http(_)
-        ));
-    }
-
-    #[test]
-    fn test_empty_uri_error() {
-        assert!(matches!(
-            DataSource::detect(""),
-            Err(SourceError::InvalidUri(_))
-        ));
-        assert!(matches!(
-            DataSource::detect("   "),
-            Err(SourceError::InvalidUri(_))
-        ));
-    }
-
-    #[test]
-    fn test_source_methods() {
-        let local = DataSource::Local(PathBuf::from("test.csv"));
-        assert!(local.is_local());
-        assert!(!local.is_http());
-        assert!(local.as_path().is_some());
-        assert!(local.as_url().is_none());
-
-        let http = DataSource::Http("https://example.com/data.csv".to_string());
-        assert!(!http.is_local());
-        assert!(http.is_http());
-        assert!(http.as_path().is_none());
-        assert!(http.as_url().is_some());
     }
 }

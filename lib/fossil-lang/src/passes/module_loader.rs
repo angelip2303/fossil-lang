@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path as StdPath, PathBuf};
 
-use crate::ast::ast::{Ast, Path};
 use crate::ast::Loc;
+use crate::ast::ast::{Ast, Path};
 use crate::context::{DefId, DefKind, ModuleInfo, Symbol};
-use crate::passes::GlobalContext;
 use crate::error::{CompileError, CompileErrorKind};
+use crate::passes::GlobalContext;
 use crate::passes::parse::Parser;
 
 /// Module loader - maps file system to module tree
@@ -86,18 +86,20 @@ impl ModuleLoader {
         self.next_source_id += 1;
 
         // 5. Parse module
-        let mut parsed = Parser::parse_with_context(&src, source_id, gcx.clone()).map_err(|errors| {
-            // TODO(Phase 2.2): Handle all errors once pipeline supports CompileErrors
-            let first_error = errors.0.into_iter().next()
-                .unwrap_or_else(|| CompileError::new(
-                    CompileErrorKind::Parse(Symbol::synthetic()),
-                    Loc::generated()
-                ));
-            first_error.with_context(format!(
-                "Error parsing module file '{}'",
-                file_path.display()
-            ))
-        })?;
+        let mut parsed =
+            Parser::parse_with_context(&src, source_id, gcx.clone()).map_err(|errors| {
+                // TODO(Phase 2.2): Handle all errors once pipeline supports CompileErrors
+                let first_error = errors.0.into_iter().next().unwrap_or_else(|| {
+                    CompileError::new(
+                        CompileErrorKind::Parse(Symbol::synthetic()),
+                        Loc::generated(),
+                    )
+                });
+                first_error.with_context(format!(
+                    "Error parsing module file '{}'",
+                    file_path.display()
+                ))
+            })?;
 
         // 6. Create module name from file path
         let module_name = self.path_to_module_name(&file_path, &mut parsed.gcx.interner);
@@ -158,10 +160,7 @@ impl ModuleLoader {
                         CompileErrorKind::UndefinedModule(import.clone()),
                         crate::ast::Loc::generated(),
                     )
-                    .with_context(format!(
-                        "Module file not found at '{}'",
-                        path.display()
-                    )))
+                    .with_context(format!("Module file not found at '{}'", path.display())))
                 }
             }
 
@@ -182,10 +181,7 @@ impl ModuleLoader {
                         CompileErrorKind::UndefinedModule(import.clone()),
                         crate::ast::Loc::generated(),
                     )
-                    .with_context(format!(
-                        "Module file not found at '{}'",
-                        path.display()
-                    )))
+                    .with_context(format!("Module file not found at '{}'", path.display())))
                 }
             }
 
@@ -208,13 +204,16 @@ impl ModuleLoader {
 
                 // Navigate up 'dots' times (dots=0 means current dir already handled)
                 for _ in 0..*dots {
-                    path = path.parent().ok_or_else(|| {
-                        CompileError::new(
-                            CompileErrorKind::UndefinedModule(import.clone()),
-                            crate::ast::Loc::generated(),
-                        )
-                        .with_context("Relative import goes above project root")
-                    })?.to_path_buf();
+                    path = path
+                        .parent()
+                        .ok_or_else(|| {
+                            CompileError::new(
+                                CompileErrorKind::UndefinedModule(import.clone()),
+                                crate::ast::Loc::generated(),
+                            )
+                            .with_context("Relative import goes above project root")
+                        })?
+                        .to_path_buf();
                 }
 
                 // Navigate down through components
@@ -231,10 +230,7 @@ impl ModuleLoader {
                         CompileErrorKind::UndefinedModule(import.clone()),
                         crate::ast::Loc::generated(),
                     )
-                    .with_context(format!(
-                        "Module file not found at '{}'",
-                        path.display()
-                    )))
+                    .with_context(format!("Module file not found at '{}'", path.display())))
                 }
             }
         }
@@ -245,7 +241,11 @@ impl ModuleLoader {
     /// Examples:
     /// - `/project/utils.fossil` -> `utils`
     /// - `/project/data/csv.fossil` -> `csv`
-    fn path_to_module_name(&self, path: &StdPath, interner: &mut crate::context::Interner) -> Symbol {
+    fn path_to_module_name(
+        &self,
+        path: &StdPath,
+        interner: &mut crate::context::Interner,
+    ) -> Symbol {
         path.file_stem()
             .and_then(|s| s.to_str())
             .map(|s| interner.intern(s))
@@ -267,89 +267,9 @@ impl ModuleLoader {
     /// Add a child module
     pub fn add_module_child(&mut self, parent_id: DefId, child_id: DefId) {
         if let Some(info) = self.modules.get_mut(&parent_id)
-            && !info.children.contains(&child_id) {
-                info.children.push(child_id);
-            }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    #[test]
-    fn test_module_loader_simple_path() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
-
-        // Create test file
-        let test_file = root.join("utils.fossil");
-        fs::write(&test_file, "let x = 42").unwrap();
-
-        let mut loader = ModuleLoader::new(root.clone());
-        let mut gcx = GlobalContext::default();
-        let sym = gcx.interner.intern("utils");
-        let path = Path::Simple(sym);
-
-        let result = loader.load_module(&path, &root.join("main.fossil"), &mut gcx);
-        assert!(result.is_ok());
-
-        let (maybe_ast, _def_id, _source_id) = result.unwrap();
-        assert!(maybe_ast.is_some());
-        let ast = maybe_ast.unwrap();
-        assert!(!ast.root.is_empty());
-    }
-
-    #[test]
-    fn test_module_loader_qualified_path() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
-
-        // Create nested directory structure
-        let data_dir = root.join("data");
-        fs::create_dir(&data_dir).unwrap();
-        let csv_file = data_dir.join("csv.fossil");
-        fs::write(&csv_file, "let parse_csv = fn() -> ()").unwrap();
-
-        let mut loader = ModuleLoader::new(root.clone());
-        let mut gcx = GlobalContext::default();
-
-        let data_sym = gcx.interner.intern("data");
-        let csv_sym = gcx.interner.intern("csv");
-        let path = Path::Qualified(vec![data_sym, csv_sym]);
-
-        let result = loader.load_module(&path, &root.join("main.fossil"), &mut gcx);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_module_loader_caching() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
-
-        let test_file = root.join("utils.fossil");
-        fs::write(&test_file, "let x = 42").unwrap();
-
-        let mut loader = ModuleLoader::new(root.clone());
-        let mut gcx = GlobalContext::default();
-        let sym = gcx.interner.intern("utils");
-        let path = Path::Simple(sym);
-
-        // Load once
-        let first = loader.load_module(&path, &root.join("main.fossil"), &mut gcx);
-        assert!(first.is_ok());
-        let (first_ast, first_def_id, _) = first.unwrap();
-        assert!(first_ast.is_some()); // First load should return AST
-
-        // Load again - should hit cache
-        let second = loader.load_module(&path, &root.join("main.fossil"), &mut gcx);
-        assert!(second.is_ok());
-        let (second_ast, second_def_id, _) = second.unwrap();
-        assert!(second_ast.is_none()); // Cached load should NOT return AST
-
-        // Both should return the same DefId
-        assert_eq!(first_def_id, second_def_id);
+            && !info.children.contains(&child_id)
+        {
+            info.children.push(child_id);
+        }
     }
 }

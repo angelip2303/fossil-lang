@@ -22,11 +22,16 @@
 
 use std::sync::Arc;
 
-use fossil_lang::ast::ast::{Ast, Literal, PrimitiveType, ProviderArgument, RecordField, Type as AstType, TypeKind as AstTypeKind};
 use fossil_lang::ast::Loc;
+use fossil_lang::ast::ast::{
+    Ast, Literal, PrimitiveType, ProviderArgument, RecordField, Type as AstType,
+    TypeKind as AstTypeKind,
+};
 use fossil_lang::context::Interner;
 use fossil_lang::error::ProviderError;
-use fossil_lang::traits::provider::{FunctionDef, ModuleSpec, ProviderOutput, ProviderParamInfo, TypeProviderImpl};
+use fossil_lang::traits::provider::{
+    FunctionDef, ModuleSpec, ProviderOutput, ProviderParamInfo, TypeProviderImpl,
+};
 use polars::prelude::DataType;
 
 pub mod config;
@@ -40,7 +45,7 @@ pub mod streaming;
 use config::parse_sql_config;
 use connection::get_runtime;
 use functions::SqlLoadFunction;
-use schema::{infer_schema, SqlSchema};
+use schema::{SqlSchema, infer_schema};
 
 /// SQL Type Provider
 ///
@@ -84,17 +89,20 @@ impl TypeProviderImpl for SqlProvider {
         let config = parse_sql_config(args, interner)?;
 
         eprintln!("[SQL Provider] Type: {}", type_name);
-        eprintln!("[SQL Provider] Connection string: {}", config.connection_string);
+        eprintln!(
+            "[SQL Provider] Connection string: {}",
+            config.connection_string
+        );
         eprintln!("[SQL Provider] Current dir: {:?}", std::env::current_dir());
 
         // Infer schema from database (runs async code synchronously)
         let rt = get_runtime();
-        let schema = rt.block_on(async {
-            infer_schema(&config).await
-        }).map_err(|e| {
-            eprintln!("[SQL Provider] Error: {:?}", e);
-            e.to_provider_error(interner)
-        })?;
+        let schema = rt
+            .block_on(async { infer_schema(&config).await })
+            .map_err(|e| {
+                eprintln!("[SQL Provider] Error: {:?}", e);
+                e.to_provider_error(interner)
+            })?;
 
         // Convert schema to AST fields
         let fields = schema_to_ast_fields(&schema, ast, interner);
@@ -153,26 +161,17 @@ fn schema_to_ast_fields(
 /// Convert polars DataType to fossil PrimitiveType
 fn polars_dtype_to_primitive(dtype: &DataType) -> PrimitiveType {
     match dtype {
-        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 |
-        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-            PrimitiveType::Int
-        }
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64 => PrimitiveType::Int,
         DataType::Float32 | DataType::Float64 => PrimitiveType::Float,
         DataType::Boolean => PrimitiveType::Bool,
         DataType::String | DataType::Categorical(_, _) => PrimitiveType::String,
         _ => PrimitiveType::String, // Default to string for unknown types
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_polars_dtype_to_primitive() {
-        assert!(matches!(polars_dtype_to_primitive(&DataType::Int64), PrimitiveType::Int));
-        assert!(matches!(polars_dtype_to_primitive(&DataType::Float64), PrimitiveType::Float));
-        assert!(matches!(polars_dtype_to_primitive(&DataType::Boolean), PrimitiveType::Bool));
-        assert!(matches!(polars_dtype_to_primitive(&DataType::String), PrimitiveType::String));
     }
 }

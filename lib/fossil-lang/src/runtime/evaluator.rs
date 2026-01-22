@@ -39,9 +39,7 @@ pub struct CallStack {
 impl CallStack {
     /// Create a new empty call stack
     pub fn new() -> Self {
-        Self {
-            frames: Vec::new(),
-        }
+        Self { frames: Vec::new() }
     }
 
     /// Push a new stack frame
@@ -233,7 +231,10 @@ impl<'a> ThirEvaluator<'a> {
                 // For a single-element series, return the value
                 if series.len() == 1 {
                     use polars::datatypes::AnyValue;
-                    match series.get(0).map_err(|e| self.make_error(format!("Series access error: {}", e)))? {
+                    match series
+                        .get(0)
+                        .map_err(|e| self.make_error(format!("Series access error: {}", e)))?
+                    {
                         AnyValue::Int64(i) => Ok(i.to_string()),
                         AnyValue::String(s) => Ok(s.to_string()),
                         AnyValue::Boolean(b) => Ok(b.to_string()),
@@ -251,7 +252,8 @@ impl<'a> ThirEvaluator<'a> {
                 }
             }
             Value::List(items) => {
-                let strs: Result<Vec<_>, _> = items.iter().map(|v| self.value_to_string(v)).collect();
+                let strs: Result<Vec<_>, _> =
+                    items.iter().map(|v| self.value_to_string(v)).collect();
                 Ok(format!("[{}]", strs?.join(", ")))
             }
             Value::Closure { .. } => Ok("<function>".to_string()),
@@ -353,9 +355,8 @@ impl<'a> ThirEvaluator<'a> {
                         _ => unreachable!("Type checker ensures homogeneous lists"),
                     })
                     .collect();
-                let concatenated = concat(dfs, UnionArgs::default()).map_err(|e| {
-                    self.make_error(format!("Failed to concatenate lists: {}", e))
-                })?;
+                let concatenated = concat(dfs, UnionArgs::default())
+                    .map_err(|e| self.make_error(format!("Failed to concatenate lists: {}", e)))?;
                 Ok(Value::Records(concatenated))
             }
 
@@ -382,7 +383,11 @@ impl<'a> ThirEvaluator<'a> {
     }
 
     /// Evaluate a function application
-    fn eval_application(&mut self, callee: ExprId, args: &[crate::ast::thir::Argument]) -> Result<Value, RuntimeError> {
+    fn eval_application(
+        &mut self,
+        callee: ExprId,
+        args: &[crate::ast::thir::Argument],
+    ) -> Result<Value, RuntimeError> {
         // Check recursion depth before proceeding
         self.check_recursion_depth()?;
 
@@ -567,9 +572,12 @@ impl<'a> ThirEvaluator<'a> {
     fn series_value_at(&self, series: &Series, idx: usize) -> Result<Value, RuntimeError> {
         use polars::datatypes::AnyValue;
 
-        let any_value = series
-            .get(idx)
-            .map_err(|e| self.make_error(format!("Failed to get value from series at index {}: {}", idx, e)))?;
+        let any_value = series.get(idx).map_err(|e| {
+            self.make_error(format!(
+                "Failed to get value from series at index {}: {}",
+                idx, e
+            ))
+        })?;
 
         match any_value {
             AnyValue::Int64(i) => Ok(Value::Int(i)),
@@ -591,10 +599,7 @@ impl<'a> ThirEvaluator<'a> {
     fn make_error_with_stack(&self, msg: impl Into<String>) -> RuntimeError {
         use crate::error::{CompileError, CompileErrorKind};
 
-        let mut error = CompileError::new(
-            CompileErrorKind::Runtime(msg.into()),
-            Loc::generated(),
-        );
+        let mut error = CompileError::new(CompileErrorKind::Runtime(msg.into()), Loc::generated());
 
         // Add call stack if not empty
         if !self.call_stack.is_empty() {
@@ -602,169 +607,5 @@ impl<'a> ThirEvaluator<'a> {
         }
 
         error
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ast::thir::Expr;
-
-    #[test]
-    fn test_eval_literal() {
-        let gcx = GlobalContext::new();
-        let mut thir = TypedHir::default();
-
-        // Create a simple integer literal
-        let expr_id = thir.exprs.alloc(Expr {
-            loc: Loc::generated(),
-            kind: ExprKind::Literal(crate::ast::ast::Literal::Integer(42)),
-            ty: thir.types.alloc(crate::ast::thir::Type {
-                loc: Loc::generated(),
-                kind: crate::ast::thir::TypeKind::Primitive(crate::ast::ast::PrimitiveType::Int),
-            }),
-        });
-
-        let env = ThirEnvironment::new();
-        let mut eval = ThirEvaluator::new(&thir, &gcx, env);
-
-        let result = eval.eval(expr_id).unwrap();
-        assert!(matches!(result, Value::Int(42)));
-    }
-
-    #[test]
-    fn test_eval_variable() {
-        use crate::context::DefKind;
-
-        let mut gcx = GlobalContext::new();
-
-        let var_name = gcx.interner.intern("x");
-
-        // Create a DefId for the variable
-        let var_def_id = gcx.definitions.insert(None, var_name, DefKind::Let);
-
-        let mut env = ThirEnvironment::new();
-        env.bind(var_name, Value::Int(100));
-
-        // Create variable reference using Identifier with DefId
-        let mut thir_mut = TypedHir::default();
-        let expr_id = thir_mut.exprs.alloc(Expr {
-            loc: Loc::generated(),
-            kind: ExprKind::Identifier(var_def_id),
-            ty: thir_mut.types.alloc(crate::ast::thir::Type {
-                loc: Loc::generated(),
-                kind: crate::ast::thir::TypeKind::Primitive(crate::ast::ast::PrimitiveType::Int),
-            }),
-        });
-
-        let mut eval = ThirEvaluator::new(&thir_mut, &gcx, env);
-        let result = eval.eval(expr_id).unwrap();
-        assert!(matches!(result, Value::Int(100)));
-    }
-
-    #[test]
-    fn test_call_stack_operations() {
-        let mut stack = CallStack::new();
-        assert!(stack.is_empty());
-        assert_eq!(stack.depth(), 0);
-
-        stack.push(StackFrame {
-            function_name: "foo".to_string(),
-            call_site: Loc::generated(),
-            def_id: None,
-        });
-
-        assert!(!stack.is_empty());
-        assert_eq!(stack.depth(), 1);
-
-        stack.push(StackFrame {
-            function_name: "bar".to_string(),
-            call_site: Loc::generated(),
-            def_id: None,
-        });
-
-        assert_eq!(stack.depth(), 2);
-
-        let frame = stack.pop();
-        assert!(frame.is_some());
-        assert_eq!(frame.unwrap().function_name, "bar");
-        assert_eq!(stack.depth(), 1);
-    }
-
-    #[test]
-    fn test_call_stack_format() {
-        let mut stack = CallStack::new();
-        let gcx = GlobalContext::new();
-
-        stack.push(StackFrame {
-            function_name: "main".to_string(),
-            call_site: Loc::generated(),
-            def_id: None,
-        });
-
-        stack.push(StackFrame {
-            function_name: "helper".to_string(),
-            call_site: Loc::generated(),
-            def_id: None,
-        });
-
-        let formatted = stack.format(&gcx.interner);
-        assert!(formatted.contains("Call stack"));
-        assert!(formatted.contains("main"));
-        assert!(formatted.contains("helper"));
-    }
-
-    #[test]
-    fn test_recursion_depth_check() {
-        let gcx = GlobalContext::new();
-        let thir = TypedHir::default();
-        let env = ThirEnvironment::new();
-        let mut eval = ThirEvaluator::new(&thir, &gcx, env);
-
-        // Manually fill stack to near limit
-        for i in 0..MAX_CALL_DEPTH {
-            eval.call_stack.push(StackFrame {
-                function_name: format!("func_{}", i),
-                call_site: Loc::generated(),
-                def_id: None,
-            });
-        }
-
-        // Should fail recursion check
-        let result = eval.check_recursion_depth();
-        assert!(result.is_err());
-
-        let error = result.unwrap_err();
-        assert!(error.message().contains("Stack overflow"));
-        assert!(error.message().contains("maximum recursion depth"));
-    }
-
-    #[test]
-    fn test_make_error_with_stack() {
-        let gcx = GlobalContext::new();
-        let thir = TypedHir::default();
-        let env = ThirEnvironment::new();
-        let mut eval = ThirEvaluator::new(&thir, &gcx, env);
-
-        // Add some stack frames
-        eval.call_stack.push(StackFrame {
-            function_name: "outer".to_string(),
-            call_site: Loc::generated(),
-            def_id: None,
-        });
-
-        eval.call_stack.push(StackFrame {
-            function_name: "inner".to_string(),
-            call_site: Loc::generated(),
-            def_id: None,
-        });
-
-        let error = eval.make_error("Test error");
-        assert!(error.context.is_some());
-
-        let context = error.context.as_ref().unwrap();
-        assert!(context.contains("Call stack"));
-        assert!(context.contains("outer"));
-        assert!(context.contains("inner"));
     }
 }

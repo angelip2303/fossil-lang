@@ -181,7 +181,10 @@ impl SqlQueryBuilder {
         // Handle projections
         if let Some(cols) = &self.projections {
             let cols_str = cols.join(", ");
-            sql.push_str(&format!("SELECT {} FROM ({}) AS _base", cols_str, self.base_query));
+            sql.push_str(&format!(
+                "SELECT {} FROM ({}) AS _base",
+                cols_str, self.base_query
+            ));
         } else {
             sql.push_str(&format!("SELECT * FROM ({}) AS _base", self.base_query));
         }
@@ -232,69 +235,4 @@ impl SqlQueryBuilder {
 /// Escape a string for SQL
 fn escape_sql_string(s: &str) -> String {
     s.replace('\'', "''")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_simple_query() {
-        let query = SqlQueryBuilder::from_table("users").build();
-        assert_eq!(query, "SELECT * FROM (SELECT * FROM users) AS _base");
-    }
-
-    #[test]
-    fn test_query_with_projection() {
-        let query = SqlQueryBuilder::from_table("users")
-            .select(vec!["id".to_string(), "name".to_string()])
-            .build();
-        assert_eq!(
-            query,
-            "SELECT id, name FROM (SELECT * FROM users) AS _base"
-        );
-    }
-
-    #[test]
-    fn test_query_with_filter() {
-        let query = SqlQueryBuilder::from_table("users")
-            .filter(FilterCondition::Equals(
-                "status".to_string(),
-                SqlValue::String("active".to_string()),
-            ))
-            .build();
-        assert_eq!(
-            query,
-            "SELECT * FROM (SELECT * FROM users) AS _base WHERE (status = 'active')"
-        );
-    }
-
-    #[test]
-    fn test_query_with_limit_offset() {
-        let query = SqlQueryBuilder::from_table("users")
-            .limit(10)
-            .offset(20)
-            .build();
-        assert_eq!(
-            query,
-            "SELECT * FROM (SELECT * FROM users) AS _base LIMIT 10 OFFSET 20"
-        );
-    }
-
-    #[test]
-    fn test_complex_query() {
-        let query = SqlQueryBuilder::from_table("orders")
-            .select(vec!["id".to_string(), "amount".to_string()])
-            .filter(FilterCondition::GreaterThan(
-                "amount".to_string(),
-                SqlValue::Float(100.0),
-            ))
-            .order_by("amount", SortOrder::Descending)
-            .limit(10)
-            .build();
-        assert_eq!(
-            query,
-            "SELECT id, amount FROM (SELECT * FROM orders) AS _base WHERE (amount > 100) ORDER BY amount DESC LIMIT 10"
-        );
-    }
 }

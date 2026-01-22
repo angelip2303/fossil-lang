@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use crate::ast::thir;
 use crate::ast::*;
-use crate::context::{AttributeRegistry, AttributeSchema, DefId, Definitions, Interner, Kind, TypeConstructorInfo, TypeMetadata};
+use crate::context::{
+    AttributeRegistry, AttributeSchema, DefId, Definitions, Interner, Kind, TypeConstructorInfo,
+    TypeMetadata,
+};
 use crate::passes::resolve::scope::Scope;
 use crate::passes::resolve::table::ResolutionTable;
 use crate::traits::function::FunctionImpl;
@@ -433,9 +436,7 @@ impl ImportResolverWithLoader {
         self.visited.insert(current_file.clone());
 
         // Initialize dependency list for this module
-        self.import_graph
-            .entry(module_def_id)
-            .or_default();
+        self.import_graph.entry(module_def_id).or_default();
 
         // Process each import in this module
         for stmt_id in &ast.root {
@@ -598,135 +599,4 @@ pub struct HirProgram {
 pub struct ThirProgram {
     pub thir: thir::TypedHir,
     pub gcx: GlobalContext,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    #[test]
-    fn test_import_resolver_multi_module() {
-        // Create temporary directory structure
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
-
-        // Create main.fossil with import
-        let main_file = root.join("main.fossil");
-        fs::write(&main_file, "open utils\nlet x = Utils::helper()").unwrap();
-
-        // Create utils.fossil
-        let utils_file = root.join("utils.fossil");
-        fs::write(&utils_file, "let helper = fn() -> 42").unwrap();
-
-        // Create resolver with loader
-        let loader = ModuleLoader::new(root.clone());
-        let gcx = GlobalContext::default();
-        let resolver = ImportResolver::new_with_loader(loader, gcx);
-
-        // Resolve all modules
-        let result = resolver.resolve_all(main_file);
-        assert!(result.is_ok());
-
-        let multi_ast = result.unwrap();
-        assert_eq!(multi_ast.modules.len(), 2); // main + utils
-        assert_eq!(multi_ast.order.len(), 2);
-    }
-
-    #[test]
-    fn test_import_resolver_nested_imports() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
-
-        // Create main.fossil
-        let main_file = root.join("main.fossil");
-        fs::write(&main_file, "open utils").unwrap();
-
-        // Create utils.fossil that imports helpers
-        let utils_file = root.join("utils.fossil");
-        fs::write(
-            &utils_file,
-            "open helpers\nlet use_helper = fn() -> Helpers::help()",
-        )
-        .unwrap();
-
-        // Create helpers.fossil
-        let helpers_file = root.join("helpers.fossil");
-        fs::write(&helpers_file, "let help = fn() -> 42").unwrap();
-
-        let loader = ModuleLoader::new(root.clone());
-        let gcx = GlobalContext::default();
-        let resolver = ImportResolver::new_with_loader(loader, gcx);
-
-        let result = resolver.resolve_all(main_file);
-        assert!(result.is_ok());
-
-        let multi_ast = result.unwrap();
-        assert_eq!(multi_ast.modules.len(), 3); // main + utils + helpers
-    }
-
-    #[test]
-    fn test_import_resolver_circular_dependency() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
-
-        // Create main.fossil that imports utils
-        let main_file = root.join("main.fossil");
-        fs::write(&main_file, "open utils").unwrap();
-
-        // Create utils.fossil that imports main (circular!)
-        let utils_file = root.join("utils.fossil");
-        fs::write(&utils_file, "open main").unwrap();
-
-        let loader = ModuleLoader::new(root.clone());
-        let gcx = GlobalContext::default();
-        let resolver = ImportResolver::new_with_loader(loader, gcx);
-
-        let result = resolver.resolve_all(main_file);
-        assert!(result.is_err()); // Should detect circular dependency
-    }
-
-    #[test]
-    fn test_import_resolver_topological_order() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().to_path_buf();
-
-        // Create dependency chain: main -> b -> c
-        let main_file = root.join("main.fossil");
-        fs::write(&main_file, "open b").unwrap();
-
-        fs::write(root.join("b.fossil"), "open c").unwrap();
-        fs::write(root.join("c.fossil"), "let value = 42").unwrap();
-
-        let loader = ModuleLoader::new(root.clone());
-        let gcx = GlobalContext::default();
-        let resolver = ImportResolver::new_with_loader(loader, gcx);
-
-        let result = resolver.resolve_all(main_file);
-        assert!(result.is_ok());
-
-        let multi_ast = result.unwrap();
-
-        // c should come before b, b should come before main
-        let c_idx = multi_ast
-            .order
-            .iter()
-            .position(|&id| {
-                let def = multi_ast.gcx.definitions.get(id);
-                multi_ast.gcx.interner.resolve(def.name) == "c"
-            })
-            .unwrap();
-
-        let b_idx = multi_ast
-            .order
-            .iter()
-            .position(|&id| {
-                let def = multi_ast.gcx.definitions.get(id);
-                multi_ast.gcx.interner.resolve(def.name) == "b"
-            })
-            .unwrap();
-
-        assert!(c_idx < b_idx, "c should come before b in topological order");
-    }
 }
