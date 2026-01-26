@@ -3,6 +3,11 @@
 //! This module implements auto-generated constructor functions for record types.
 //! When a record type is defined like `type Person = { name: string, age: int }`,
 //! a constructor function `Person(name, age)` is automatically generated.
+//!
+//! # Lazy Execution
+//!
+//! When arguments are Expr values (from RowContext tracing), the constructor
+//! builds select expressions for lazy transformation instead of materializing data.
 
 use std::sync::Arc;
 
@@ -20,6 +25,9 @@ use crate::traits::function::{FunctionImpl, RuntimeContext};
 ///
 /// This is a runtime function that constructs record instances from field values.
 /// Each record type gets its own constructor with the appropriate signature.
+///
+/// When called with Expr arguments (from lazy tracing), builds a lazy transformation.
+/// When called with concrete values, creates a single-row DataFrame.
 pub struct RecordConstructorFunction {
     /// DefId of the type this constructor creates
     type_def_id: DefId,
@@ -79,6 +87,8 @@ impl FunctionImpl for RecordConstructorFunction {
     }
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
+        use crate::runtime::value::RecordsPlan;
+
         // Verify argument count matches field count
         if args.len() != self.field_names.len() {
             return Err(CompileError::new(
@@ -90,29 +100,55 @@ impl FunctionImpl for RecordConstructorFunction {
             ));
         }
 
-        // Build record as a LazyFrame with one row
-        // Each field becomes a column (Series) with a single value
-        let mut series_vec: Vec<Series> = Vec::new();
+        // Check if any argument is an expression (lazy path)
+        let has_exprs = args.iter().any(|v| matches!(v, Value::Expr(_)));
 
-        for (field_name, value) in self.field_names.iter().zip(args.iter()) {
-            let field_name_str = ctx.gcx.interner.resolve(*field_name);
-            let series = value_to_series(value, field_name_str)?;
-            series_vec.push(series);
+        if has_exprs {
+            // LAZY PATH: Build select expressions for transformation
+            let select_exprs: Vec<Expr> = self
+                .field_names
+                .iter()
+                .zip(args.into_iter())
+                .map(|(field_name, value)| {
+                    let name_str = ctx.gcx.interner.resolve(*field_name);
+                    match value {
+                        Value::Expr(expr) => expr.alias(name_str),
+                        Value::Int(i) => lit(i).alias(name_str),
+                        Value::String(s) => lit(s.as_ref()).alias(name_str),
+                        Value::Bool(b) => lit(b).alias(name_str),
+                        _ => lit(NULL).alias(name_str),
+                    }
+                })
+                .collect();
+
+            // Store expressions in the plan - they'll be applied to source by List::map
+            Ok(Value::Records(RecordsPlan::from_exprs(
+                select_exprs,
+                self.type_def_id,
+            )))
+        } else {
+            // CONCRETE PATH: Build single-row DataFrame
+            let mut series_vec: Vec<Series> = Vec::new();
+
+            for (field_name, value) in self.field_names.iter().zip(args.iter()) {
+                let field_name_str = ctx.gcx.interner.resolve(*field_name);
+                let series = value_to_series(value, field_name_str)?;
+                series_vec.push(series);
+            }
+
+            // Create DataFrame from series
+            let columns: Vec<Column> = series_vec.into_iter().map(Column::from).collect();
+
+            let df = DataFrame::new(columns).map_err(|e| {
+                CompileError::new(
+                    CompileErrorKind::Runtime(format!("Failed to create record: {}", e)),
+                    Loc::generated(),
+                )
+            })?;
+
+            // Return as RecordsPlan with type information
+            Ok(Value::Records(RecordsPlan::with_type(df.lazy(), self.type_def_id)))
         }
-
-        // Create DataFrame from series
-        // Convert Series to Column
-        let columns: Vec<Column> = series_vec.into_iter().map(Column::from).collect();
-
-        let df = DataFrame::new(columns).map_err(|e| {
-            CompileError::new(
-                CompileErrorKind::Runtime(format!("Failed to create record: {}", e)),
-                Loc::generated(),
-            )
-        })?;
-
-        // Return as LazyFrame for consistency with record literals
-        Ok(Value::Records(df.lazy()))
     }
 }
 
@@ -122,30 +158,6 @@ fn value_to_series(value: &Value, name: &str) -> Result<Series, RuntimeError> {
         Value::Int(i) => Ok(Series::new(name.into(), &[*i])),
         Value::String(s) => Ok(Series::new(name.into(), &[s.as_ref()])),
         Value::Bool(b) => Ok(Series::new(name.into(), &[*b])),
-        Value::Records(lf) => {
-            // If the value is already a LazyFrame (nested record), collect it
-            let df = lf.clone().collect().map_err(|e| {
-                CompileError::new(
-                    CompileErrorKind::Runtime(format!("Failed to collect nested record: {}", e)),
-                    Loc::generated(),
-                )
-            })?;
-
-            // Convert to Series (TODO: handle multi-row DataFrames)
-            if df.height() != 1 {
-                return Err(CompileError::new(
-                    CompileErrorKind::Runtime(
-                        "Nested records with multiple rows not yet supported in constructors"
-                            .to_string(),
-                    ),
-                    Loc::generated(),
-                ));
-            }
-
-            // For now, we'll create a struct column
-            // This is a placeholder - proper implementation would preserve the full record structure
-            Ok(Series::new(name.into(), &[df.height() as i64]))
-        }
         _ => Err(CompileError::new(
             CompileErrorKind::Runtime("Unsupported value type in record constructor".to_string()),
             Loc::generated(),

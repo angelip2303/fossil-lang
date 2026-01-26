@@ -23,7 +23,7 @@
 use ariadne::{Label, Report, ReportKind};
 
 use crate::{
-    ast::{ast::Path, Loc},
+    ast::{Loc, ast::Path},
     context::{Interner, Symbol},
     ir::TypeId,
 };

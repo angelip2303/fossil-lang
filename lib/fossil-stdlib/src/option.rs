@@ -4,6 +4,13 @@
 //! values that may or may not be present. Option is used in conjunction with
 //! ShEx type providers to handle optional fields (cardinality ?).
 //!
+//! At runtime, Option values are simplified:
+//! - Option::some(x) returns x directly
+//! - Option::none() returns Unit
+//!
+//! This keeps the type system expressive while leveraging DataFrame's native
+//! null handling for actual data processing.
+//!
 //! # Example
 //!
 //! ```fossil
@@ -15,20 +22,16 @@
 //! let person2 = { name = "Bob", age = Option::none() }
 //! ```
 
-use std::any::Any;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use fossil_lang::ast::Loc;
-use fossil_lang::ir::{Ident, Ir, Polytype, Type, TypeKind, TypeVar};
 use fossil_lang::context::DefId;
 use fossil_lang::error::RuntimeError;
+use fossil_lang::ir::{Ident, Ir, Polytype, Type, TypeKind, TypeVar};
 use fossil_lang::passes::GlobalContext;
-use fossil_lang::runtime::value::{ExtensionMetadata, ExtensionTypeId, Value};
+use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 use once_cell::sync::Lazy;
-
-/// Unique identifier for the Option extension type
-pub const OPTION_TYPE_ID: ExtensionTypeId = ExtensionTypeId(3);
 
 /// Global storage for Option type constructor DefId
 ///
@@ -66,105 +69,12 @@ pub fn get_option_ctor_def_id() -> DefId {
         .expect("Option type constructor not registered. Call register_option_type() first.")
 }
 
-/// Metadata for Option values
-///
-/// Stores whether the Option contains a value (Some) or not (None).
-#[derive(Debug, Clone)]
-pub struct OptionMetadata {
-    /// Whether this Option contains a value
-    pub is_some: bool,
-}
-
-impl ExtensionMetadata for OptionMetadata {
-    fn type_name(&self) -> &str {
-        "Option"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-/// Create an Option::none() value
-///
-/// Returns an Option extension with no inner value.
-pub fn option_none() -> Value {
-    Value::Extension {
-        type_id: OPTION_TYPE_ID,
-        value: Box::new(Value::Unit),
-        metadata: Arc::new(OptionMetadata { is_some: false }),
-    }
-}
-
-/// Create an Option::some(value) value
-///
-/// Wraps a value in an Option extension.
-pub fn option_some(value: Value) -> Value {
-    Value::Extension {
-        type_id: OPTION_TYPE_ID,
-        value: Box::new(value),
-        metadata: Arc::new(OptionMetadata { is_some: true }),
-    }
-}
-
-/// Unwrap an Option value
-///
-/// Returns Some(&inner_value) if the Option is Some, None otherwise.
-pub fn option_unwrap(opt: &Value) -> Option<&Value> {
-    match opt {
-        Value::Extension {
-            type_id,
-            value,
-            metadata,
-        } if *type_id == OPTION_TYPE_ID => {
-            let meta = metadata.as_any().downcast_ref::<OptionMetadata>()?;
-            if meta.is_some {
-                Some(value.as_ref())
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Check if a Value is an Option::some
-pub fn is_option_some(opt: &Value) -> bool {
-    match opt {
-        Value::Extension {
-            type_id, metadata, ..
-        } if *type_id == OPTION_TYPE_ID => {
-            if let Some(meta) = metadata.as_any().downcast_ref::<OptionMetadata>() {
-                meta.is_some
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
-}
-
-/// Check if a Value is an Option::none
-pub fn is_option_none(opt: &Value) -> bool {
-    match opt {
-        Value::Extension {
-            type_id, metadata, ..
-        } if *type_id == OPTION_TYPE_ID => {
-            if let Some(meta) = metadata.as_any().downcast_ref::<OptionMetadata>() {
-                !meta.is_some
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
-}
-
 /// Option::some function implementation
 ///
 /// Signature: forall T. (T) -> Option<T>
 ///
-/// Wraps a value in an Option.
+/// At runtime, simply returns the value (pass-through).
+/// The type system handles the Option<T> wrapping.
 pub struct OptionSomeFunction;
 
 impl FunctionImpl for OptionSomeFunction {
@@ -212,14 +122,13 @@ impl FunctionImpl for OptionSomeFunction {
     fn call(&self, args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
         use fossil_lang::error::{CompileError, CompileErrorKind};
 
-        let value = args.into_iter().next().ok_or_else(|| {
+        // Pass through the value - type system handles Option wrapping
+        args.into_iter().next().ok_or_else(|| {
             CompileError::new(
                 CompileErrorKind::Runtime("Option::some requires a value".to_string()),
                 Loc::generated(),
             )
-        })?;
-
-        Ok(option_some(value))
+        })
     }
 }
 
@@ -227,7 +136,8 @@ impl FunctionImpl for OptionSomeFunction {
 ///
 /// Signature: forall T. () -> Option<T>
 ///
-/// Creates an empty Option.
+/// At runtime, returns Unit to represent absence.
+/// In DataFrame context, this corresponds to null values.
 pub struct OptionNoneFunction;
 
 impl FunctionImpl for OptionNoneFunction {
@@ -267,6 +177,8 @@ impl FunctionImpl for OptionNoneFunction {
     }
 
     fn call(&self, _args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
-        Ok(option_none())
+        // Return Unit to represent absence
+        // In DataFrame context, this maps to null
+        Ok(Value::Unit)
     }
 }

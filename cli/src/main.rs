@@ -76,8 +76,7 @@ fn run_script(script: &PathBuf) -> Result<(), RunError> {
     let mut gcx = GlobalContext::new();
     gcx.register_provider("csv", fossil_providers::csv::CsvProvider);
     gcx.register_provider("sql", fossil_providers::sql::SqlProvider);
-    gcx.register_provider("shex", fossil_providers::shex::ShexProvider);
-    gcx.register_provider("shacl", fossil_providers::shacl::ShaclProvider);
+    gcx.register_provider("shex", fossil_providers::shapes::shex::ShexProvider);
     fossil_stdlib::init(&mut gcx);
 
     // 5. Compile using File mode

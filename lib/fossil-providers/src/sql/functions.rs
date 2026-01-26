@@ -104,9 +104,10 @@ impl FunctionImpl for SqlLoadFunction {
 
         match result {
             Ok(df) => {
+                use fossil_lang::runtime::value::RecordsPlan;
                 // Convert DataFrame to LazyFrame for consistency with fossil's lazy evaluation model
                 let lf = df.lazy();
-                Ok(Value::Records(lf))
+                Ok(Value::Records(RecordsPlan::new(lf)))
             }
             Err(e) => Err(RuntimeError::from(polars::prelude::PolarsError::ComputeError(
                 format!("SQL query error: {}", e).into(),
@@ -185,8 +186,9 @@ impl FunctionImpl for SqlQueryFunction {
 
         match result {
             Ok(df) => {
+                use fossil_lang::runtime::value::RecordsPlan;
                 let lf = df.lazy();
-                Ok(Value::Records(lf))
+                Ok(Value::Records(RecordsPlan::new(lf)))
             }
             Err(e) => Err(RuntimeError::from(polars::prelude::PolarsError::ComputeError(
                 format!("SQL query error: {}", e).into(),

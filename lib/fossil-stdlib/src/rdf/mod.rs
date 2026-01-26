@@ -1,14 +1,7 @@
 //! RDF (Resource Description Framework) serialization for knowledge graphs
 //!
-//! This module provides functionality to serialize Entity-wrapped records
-//! to RDF formats (Turtle and N-Triples). It uses attributes on record fields
-//! to extract RDF predicates.
-//!
-//! # Supported Destinations
-//!
-//! The serialization destination is determined by the URI:
-//! - Local file: `Rdf::serialize(entities, "results.ttl")`
-//! - HTTP POST: `Rdf::serialize(entities, "https://api.example.com/upload")`
+//! This module provides functionality to serialize record plans to RDF formats.
+//! Uses Polars' streaming capabilities for memory-efficient processing.
 //!
 //! # Example
 //!
@@ -16,14 +9,14 @@
 //! type Person = {
 //!     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
 //!     name: string,
-//!
-//!     #[rdf(uri = "http://xmlns.com/foaf/0.1/age")]
 //!     age: int
 //! }
 //!
-//! let alice = { name = "Alice", age = 30 }
-//! let entity = Entity::wrap(alice)
-//! let ttl = Rdf::serialize_turtle(entity, "http://example.com/alice")
+//! let people = Person::load()
+//! let entities = List::map(people, fn(p) ->
+//!     p |> Entity::with_id("http://example.com/person/${p.id}")
+//! )
+//! Rdf::serialize(entities, "output.nt")
 //! ```
 
 pub mod metadata;
@@ -31,142 +24,19 @@ pub mod metadata;
 pub use metadata::RdfMetadata;
 
 use fossil_lang::ast::Loc;
-use fossil_lang::ir::{Ir, Polytype, PrimitiveType, Type, TypeKind, TypeVar};
 use fossil_lang::error::RuntimeError;
+use fossil_lang::ir::{Ir, Polytype, PrimitiveType, Type, TypeKind, TypeVar};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
-use fossil_providers::source::{DataSource, WritableSource};
-
-use crate::entity::EntityMetadata;
-
-/// Output destination for RDF serialization
-///
-/// Supports both local file output and HTTP POST for remote destinations.
-enum OutputDestination {
-    /// Local file - writes directly to disk
-    File(std::io::BufWriter<std::fs::File>),
-    /// HTTP destination - collects data in buffer, POSTs on finalize
-    Http {
-        buffer: Vec<u8>,
-        url: String,
-    },
-}
-
-impl OutputDestination {
-    /// Creates a new output destination based on the URI
-    fn new(uri: &str) -> Result<Self, RuntimeError> {
-        use fossil_lang::error::{CompileError, CompileErrorKind};
-
-        let source = DataSource::detect(uri).map_err(|e| {
-            CompileError::new(
-                CompileErrorKind::Runtime(format!("Invalid destination URI: {}", e)),
-                Loc::generated(),
-            )
-        })?;
-
-        match source {
-            DataSource::Local(path) => {
-                // Create parent directories if needed
-                if let Some(parent) = path.parent()
-                    && !parent.exists() {
-                        std::fs::create_dir_all(parent).map_err(|e| {
-                            CompileError::new(
-                                CompileErrorKind::Runtime(format!("Failed to create directory: {}", e)),
-                                Loc::generated(),
-                            )
-                        })?;
-                    }
-
-                let file = std::fs::File::create(&path).map_err(|e| {
-                    CompileError::new(
-                        CompileErrorKind::Runtime(format!("Failed to create file: {}", e)),
-                        Loc::generated(),
-                    )
-                })?;
-                Ok(OutputDestination::File(std::io::BufWriter::with_capacity(512 * 1024, file)))
-            }
-            DataSource::Http(url) => {
-                Ok(OutputDestination::Http {
-                    buffer: Vec::with_capacity(64 * 1024),
-                    url,
-                })
-            }
-        }
-    }
-
-    /// Finalizes the output (flushes file or POSTs HTTP data)
-    fn finalize(self) -> Result<(), RuntimeError> {
-        use fossil_lang::error::{CompileError, CompileErrorKind};
-        use std::io::Write;
-
-        match self {
-            OutputDestination::File(mut writer) => {
-                writer.flush().map_err(|e| {
-                    CompileError::new(
-                        CompileErrorKind::Runtime(format!("Flush error: {}", e)),
-                        Loc::generated(),
-                    )
-                })?;
-                Ok(())
-            }
-            OutputDestination::Http { buffer, url } => {
-                let source = DataSource::Http(url.clone());
-                source.write_all(&buffer).map_err(|e| {
-                    CompileError::new(
-                        CompileErrorKind::Runtime(format!("Failed to POST to '{}': {}", url, e)),
-                        Loc::generated(),
-                    )
-                })?;
-                Ok(())
-            }
-        }
-    }
-}
-
-impl std::io::Write for OutputDestination {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self {
-            OutputDestination::File(writer) => writer.write(buf),
-            OutputDestination::Http { buffer, .. } => {
-                buffer.extend_from_slice(buf);
-                Ok(buf.len())
-            }
-        }
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            OutputDestination::File(writer) => writer.flush(),
-            OutputDestination::Http { .. } => Ok(()),
-        }
-    }
-}
+use polars::prelude::{PlPath, PlPathRef};
 
 /// Rdf::serialize function implementation
 ///
-/// Signature: (List<Entity<T>>, string) -> Unit
+/// Signature: (Records, string) -> Unit
 ///
-/// Serializes a list of Entity-wrapped values to an RDF destination.
-/// The destination can be a local file or an HTTP endpoint.
-/// The format is determined by the file extension (.ttl for Turtle, .nt for N-Triples).
-///
-/// Prefixes are written once (Turtle format) and the data is written once
-/// instead of appending, making this efficient for batch operations.
-///
-/// # Supported Destinations
-/// - Local file: `"results.ttl"`, `"./output/data.nt"`
-/// - HTTP POST: `"https://api.example.com/upload"`
-///
-/// # Example
-/// ```fossil
-/// let people = csv::load("people.csv")
-/// let entities = map(people, fn(row) ->
-///     row |> Entity::with_id(String::concat("http://example.com/person/", to_string(row.id)))
-/// )
-/// Rdf::serialize(entities, "people.ttl")
-/// Rdf::serialize(entities, "https://api.example.com/rdf")
-/// ```
+/// Serializes a RecordsPlan with subject pattern to an RDF file.
+/// Uses Polars' sink_batches for true streaming serialization.
 pub struct RdfSerializeFunction;
 
 impl FunctionImpl for RdfSerializeFunction {
@@ -176,47 +46,41 @@ impl FunctionImpl for RdfSerializeFunction {
         next_type_var: &mut dyn FnMut() -> TypeVar,
         _gcx: &GlobalContext,
     ) -> Polytype {
-        // forall T. (List<T>, string) -> Unit
         let t_var = next_type_var();
 
-        // First parameter: List<Entity<T>> (represented as List in type system)
-        // For now, just use a type variable
         let list_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Var(t_var),
         });
 
-        // Second parameter: string (filename)
         let filename_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Primitive(PrimitiveType::String),
         });
 
-        // Output type: Unit
         let output_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Primitive(PrimitiveType::Unit),
         });
 
-        // Function type: (List<T>, string) -> Unit
         let fn_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Function(vec![list_ty, filename_ty], output_ty),
         });
 
-        // Polymorphic type: forall T. (List<T>, string) -> Unit
         Polytype::poly(vec![t_var], fn_ty)
     }
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
-        use crate::entity::{LazyStreamingEntityBatch, LAZY_ENTITY_STREAM_TYPE_ID};
         use fossil_lang::error::{CompileError, CompileErrorKind};
 
         let mut args_iter = args.into_iter();
 
-        let entities_value = args_iter.next().ok_or_else(|| {
+        let records_value = args_iter.next().ok_or_else(|| {
             CompileError::new(
-                CompileErrorKind::Runtime("Rdf::serialize requires entities and filename".to_string()),
+                CompileErrorKind::Runtime(
+                    "Rdf::serialize requires records and filename".to_string(),
+                ),
                 Loc::generated(),
             )
         })?;
@@ -225,350 +89,196 @@ impl FunctionImpl for RdfSerializeFunction {
             Some(Value::String(s)) => s,
             _ => {
                 return Err(CompileError::new(
-                    CompileErrorKind::Runtime("Rdf::serialize filename must be a string".to_string()),
+                    CompileErrorKind::Runtime(
+                        "Rdf::serialize filename must be a string".to_string(),
+                    ),
                     Loc::generated(),
                 ));
             }
         };
 
-        // Main path: LazyStreamingEntityBatch (from List::map with Entity)
-        if let Value::Extension { type_id, metadata, .. } = &entities_value
-            && *type_id == LAZY_ENTITY_STREAM_TYPE_ID
-                && let Some(batch) = metadata.as_any().downcast_ref::<LazyStreamingEntityBatch>() {
-                    return serialize_lazy_streaming_batch(batch, filename.as_ref(), ctx);
-                }
-
-        // Fallback: List of Entity values (for small lists from non-streaming path)
-        if let Value::List(entities) = &entities_value {
-            if entities.is_empty() {
-                return Ok(Value::Unit);
+        // Extract RecordsPlan
+        let plan = match records_value {
+            Value::Records(plan) => plan,
+            _ => {
+                return Err(CompileError::new(
+                    CompileErrorKind::Runtime("Rdf::serialize expects records".to_string()),
+                    Loc::generated(),
+                ));
             }
-            return serialize_entities_streaming(entities, filename.as_ref(), &ctx.gcx.interner);
-        }
+        };
 
-        Err(CompileError::new(
-            CompileErrorKind::Runtime("Rdf::serialize expects Entity stream or list".to_string()),
-            Loc::generated(),
-        ))
-    }
-}
+        // Verify we have a subject pattern
+        let subject_pattern = plan.subject_pattern.as_ref().ok_or_else(|| {
+            CompileError::new(
+                CompileErrorKind::Runtime(
+                    "Rdf::serialize requires records with Entity::with_id applied".to_string(),
+                ),
+                Loc::generated(),
+            )
+        })?;
 
-/// Streaming serialization for large entity lists
-/// Writes directly to destination without collecting all data in memory
-///
-/// OPTIMIZATION: Detects when entities share the same DataFrame (via DataFrameRow)
-/// and uses fully columnar serialization - no per-entity collection needed.
-fn serialize_entities_streaming(
-    entities: &[Value],
-    destination: &str,
-    interner: &fossil_lang::context::Interner,
-) -> Result<Value, RuntimeError> {
-    use crate::entity::{EntityMetadata, ENTITY_TYPE_ID};
-    use fossil_lang::error::{CompileError, CompileErrorKind};
-    use std::io::Write;
-
-    // First pass: check if all entities share the same DataFrame (DataFrameRow optimization)
-    // This is the common case from List::map with DataFrameRow
-    let first_entity = entities.first().ok_or_else(|| {
-        CompileError::new(
-            CompileErrorKind::Runtime("Empty entity list".to_string()),
-            Loc::generated(),
-        )
-    })?;
-
-    // Extract first entity's metadata and check if it's DataFrameRow
-    let (first_meta, first_inner) = match first_entity {
-        Value::Extension { type_id, metadata, value } if *type_id == ENTITY_TYPE_ID => {
-            let meta = metadata.as_any().downcast_ref::<EntityMetadata>().ok_or_else(|| {
+        // Get RDF metadata from type
+        let rdf_metadata = plan
+            .type_def_id
+            .and_then(|def_id| {
+                ctx.gcx
+                    .type_metadata
+                    .get(&def_id)
+                    .and_then(|tm| RdfMetadata::from_type_metadata(tm, &ctx.gcx.interner))
+            })
+            .ok_or_else(|| {
                 CompileError::new(
-                    CompileErrorKind::Runtime("Invalid Entity metadata".to_string()),
+                    CompileErrorKind::Runtime(
+                        "Rdf::serialize requires a typed record with #[rdf(...)] attributes"
+                            .to_string(),
+                    ),
                     Loc::generated(),
                 )
             })?;
-            (meta, value.as_ref())
+
+        serialize_streaming(
+            &plan,
+            subject_pattern,
+            &rdf_metadata,
+            filename.as_ref(),
+            ctx,
+        )
+    }
+}
+
+/// RDF serialization using sink_batches callback
+///
+/// Uses Polars' sink_batches with the new streaming engine (`with_new_streaming(true)`).
+/// The old `Engine::Streaming` API has bugs with sink_batches that drop rows.
+fn serialize_streaming(
+    plan: &fossil_lang::runtime::value::RecordsPlan,
+    subject_pattern: &fossil_lang::runtime::value::SubjectPattern,
+    rdf_metadata: &RdfMetadata,
+    destination: &str,
+    ctx: &RuntimeContext,
+) -> Result<Value, RuntimeError> {
+    use fossil_lang::error::{CompileError, CompileErrorKind};
+    use polars::prelude::PlanCallback;
+    use std::io::{BufWriter, Write};
+    use std::sync::Mutex;
+
+    let path = PlPath::from_str(destination);
+
+    // Create buffered writer
+    let writer: Box<dyn Write + Send> = match path.as_ref() {
+        PlPathRef::Local(local_path) => {
+            let file = std::fs::File::create(local_path).map_err(|e| {
+                CompileError::new(
+                    CompileErrorKind::Runtime(format!("Failed to create file: {}", e)),
+                    Loc::generated(),
+                )
+            })?;
+            Box::new(BufWriter::with_capacity(64 * 1024, file))
         }
-        _ => {
+        PlPathRef::Cloud(_) => {
             return Err(CompileError::new(
-                CompileErrorKind::Runtime("Rdf::serialize requires Entity values".to_string()),
+                CompileErrorKind::Runtime("Cloud storage not yet implemented".to_string()),
                 Loc::generated(),
             ));
         }
     };
 
-    // Check if first entity uses DataFrameRow - if so, use columnar path
-    if let Value::Record(shared_df, _) = first_inner {
-        return serialize_dataframe_row_entities(entities, shared_df, first_meta, destination, interner);
-    }
+    let writer = std::sync::Arc::new(Mutex::new(writer));
+    let writer_for_flush = writer.clone();
 
-    // Fallback: per-entity streaming for LazyFrame entities
-    let mut writer = OutputDestination::new(destination)?;
+    // Capture for callback
+    let subject_prefix = subject_pattern.prefix.clone();
+    let id_column = subject_pattern.id_column.clone();
+    let rdf_meta = rdf_metadata.clone();
+    let interner = ctx.gcx.interner.clone();
 
-    let mut rdf_metadata: Option<RdfMetadata> = None;
-    let mut predicate_cache: Option<Vec<(String, String)>> = None;
+    let callback = PlanCallback::new(move |df: polars::prelude::DataFrame| {
+        let mut writer = writer.lock().unwrap();
 
-    for entity_value in entities {
-        let (entity_meta, inner_value) = match entity_value {
-            Value::Extension {
-                type_id,
-                metadata,
-                value,
-            } if *type_id == ENTITY_TYPE_ID => {
-                let meta = metadata
-                    .as_any()
-                    .downcast_ref::<EntityMetadata>()
-                    .ok_or_else(|| {
-                        CompileError::new(
-                            CompileErrorKind::Runtime("Invalid Entity metadata".to_string()),
-                            Loc::generated(),
-                        )
-                    })?;
-                (meta, value)
-            }
-            _ => {
-                return Err(CompileError::new(
-                    CompileErrorKind::Runtime("Rdf::serialize requires Entity values".to_string()),
-                    Loc::generated(),
-                ));
-            }
+        // Build predicate mappings for this batch
+        // Note: id_column is included if it has an RDF predicate attribute
+        let columns_with_predicates: Vec<_> = df
+            .get_column_names()
+            .iter()
+            .filter_map(|&col_name| {
+                let col_sym = interner.lookup(col_name)?;
+                let predicate = rdf_meta.get_predicate(col_sym)?;
+                let column = df.column(col_name).ok()?;
+                let series = column.as_materialized_series().clone();
+                Some((predicate.to_string(), series))
+            })
+            .collect();
+
+        // Get ID column
+        let id_col = match df.column(&id_column) {
+            Ok(col) => col.as_materialized_series(),
+            Err(_) => return Ok(true),
         };
 
-        if rdf_metadata.is_none() {
-            rdf_metadata = entity_meta.rdf_metadata.clone();
+        // Pre-cast typed columns
+        let typed_columns: Vec<_> = columns_with_predicates
+            .iter()
+            .map(|(pred, series)| (pred.as_str(), TypedColumn::from_series(series)))
+            .collect();
+        let typed_id = TypedColumn::from_series(id_col);
+
+        let mut subject_buf = String::with_capacity(subject_prefix.len() + 32);
+
+        // Write triples for each row
+        for row_idx in 0..df.height() {
+            subject_buf.clear();
+            subject_buf.push_str(&subject_prefix);
+            typed_id.append_value(&mut subject_buf, row_idx);
+
+            for (predicate, typed_col) in &typed_columns {
+                let _ = typed_col.write_triple(&mut *writer, &subject_buf, predicate, row_idx);
+            }
         }
 
-        let df = match inner_value.as_ref() {
-            Value::Records(lf) => lf.clone().collect().map_err(|e| {
-                CompileError::new(
-                    CompileErrorKind::Runtime(format!("Failed to collect: {}", e)),
-                    Loc::generated(),
-                )
-            })?,
-            Value::Record(df_arc, row_idx) => {
-                // Extract single row as DataFrame
-                df_arc.slice(*row_idx as i64, 1)
-            }
-            _ => {
-                return Err(CompileError::new(
-                    CompileErrorKind::Runtime("Entity value must be a record".to_string()),
-                    Loc::generated(),
-                ));
-            }
-        };
+        Ok(true)
+    });
 
-        if predicate_cache.is_none()
-            && let Some(ref meta) = rdf_metadata {
-                let cache: Vec<_> = df
-                    .get_column_names()
-                    .iter()
-                    .filter_map(|&col_name| {
-                        let col_sym = interner.lookup(col_name)?;
-                        let predicate = meta.get_predicate(col_sym)?;
-                        Some((col_name.to_string(), predicate.to_string()))
-                    })
-                    .collect();
-                predicate_cache = Some(cache);
-            }
-
-        let subject = entity_meta.id.as_ref();
-        let predicates = predicate_cache.as_ref().ok_or_else(|| {
+    // Create sink plan and execute with streaming engine
+    let sink_lf = plan
+        .lf
+        .clone()
+        .sink_batches(callback, true, None)
+        .map_err(|e| {
             CompileError::new(
-                CompileErrorKind::Runtime("No RDF metadata found".to_string()),
+                CompileErrorKind::Runtime(format!("Failed to create sink: {}", e)),
                 Loc::generated(),
             )
         })?;
 
-        for (col_name, predicate) in predicates {
-            if let Ok(column) = df.column(col_name) {
-                let series = column.as_materialized_series();
-                if let Some(literal) = format_literal_streaming(series, 0)? {
-                    writeln!(writer, "<{}> <{}> {} .", subject, predicate, literal)
-                        .map_err(|e| {
-                            CompileError::new(
-                                CompileErrorKind::Runtime(format!("Write error: {}", e)),
-                                Loc::generated(),
-                            )
-                        })?;
-                }
-            }
-        }
-    }
+    // Execute the sink plan using the new streaming engine
+    // Note: The old Engine::Streaming API has bugs with sink_batches (drops rows).
+    // Using with_new_streaming(true) which works correctly.
+    sink_lf
+        .with_new_streaming(true)
+        .collect()
+        .map_err(|e| {
+            CompileError::new(
+                CompileErrorKind::Runtime(format!("Streaming serialization failed: {}", e)),
+                Loc::generated(),
+            )
+        })?;
 
-    writer.finalize()?;
+    // Flush the writer
+    {
+        let mut writer = writer_for_flush.lock().unwrap();
+        writer.flush().map_err(|e| {
+            CompileError::new(
+                CompileErrorKind::Runtime(format!("Failed to flush output: {}", e)),
+                Loc::generated(),
+            )
+        })?;
+    }
 
     Ok(Value::Unit)
 }
 
-/// Fully columnar serialization for DataFrameRow entities
-///
-/// This is the fast path when List::map creates entities with DataFrameRow values.
-/// All entities share the same Arc<DataFrame>, so we:
-/// 1. Collect subject URIs from entity metadata
-/// 2. Iterate the shared DataFrame once
-/// 3. Write triples directly - no per-entity collection needed
-fn serialize_dataframe_row_entities(
-    entities: &[Value],
-    shared_df: &std::sync::Arc<polars::prelude::DataFrame>,
-    first_meta: &EntityMetadata,
-    destination: &str,
-    interner: &fossil_lang::context::Interner,
-) -> Result<Value, RuntimeError> {
-    use crate::entity::{EntityMetadata, ENTITY_TYPE_ID};
-    use fossil_lang::error::{CompileError, CompileErrorKind};
-    use std::io::Write;
-
-    // Collect all subject URIs (cheap - just Arc<str> refs)
-    let mut subjects: Vec<&str> = Vec::with_capacity(entities.len());
-    let mut row_indices: Vec<usize> = Vec::with_capacity(entities.len());
-
-    for entity in entities {
-        match entity {
-            Value::Extension { type_id, metadata, value } if *type_id == ENTITY_TYPE_ID => {
-                let meta = metadata.as_any().downcast_ref::<EntityMetadata>().ok_or_else(|| {
-                    CompileError::new(
-                        CompileErrorKind::Runtime("Invalid Entity metadata".to_string()),
-                        Loc::generated(),
-                    )
-                })?;
-                subjects.push(meta.id.as_ref());
-
-                // Get row index from DataFrameRow
-                if let Value::Record(_, idx) = value.as_ref() {
-                    row_indices.push(*idx);
-                }
-            }
-            _ => {
-                return Err(CompileError::new(
-                    CompileErrorKind::Runtime("Expected Entity value".to_string()),
-                    Loc::generated(),
-                ));
-            }
-        }
-    }
-
-    // Get RDF metadata
-    let rdf_metadata = first_meta.rdf_metadata.as_ref().ok_or_else(|| {
-        CompileError::new(
-            CompileErrorKind::Runtime("No RDF metadata found".to_string()),
-            Loc::generated(),
-        )
-    })?;
-
-    // Build predicate cache from shared DataFrame
-    let predicates: Vec<_> = shared_df
-        .get_column_names()
-        .iter()
-        .filter_map(|&col_name| {
-            let col_sym = interner.lookup(col_name)?;
-            let predicate = rdf_metadata.get_predicate(col_sym)?;
-            Some((col_name.to_string(), predicate.to_string()))
-        })
-        .collect();
-
-    // Create output destination (local file or HTTP)
-    let mut writer = OutputDestination::new(destination)?;
-
-    // Columnar serialization: iterate subjects with row indices
-    for (subject, row_idx) in subjects.iter().zip(row_indices.iter()) {
-        for (col_name, predicate) in &predicates {
-            if let Ok(column) = shared_df.column(col_name) {
-                let series = column.as_materialized_series();
-                if let Some(literal) = format_literal_streaming(series, *row_idx)? {
-                    writeln!(writer, "<{}> <{}> {} .", subject, predicate, literal)
-                        .map_err(|e| {
-                            CompileError::new(
-                                CompileErrorKind::Runtime(format!("Write error: {}", e)),
-                                Loc::generated(),
-                            )
-                        })?;
-                }
-            }
-        }
-    }
-
-    writer.finalize()?;
-
-    Ok(Value::Unit)
-}
-
-/// Streaming serialization for LazyStreamingEntityBatch
-///
-/// Collects LazyFrame once into DataFrame, then uses optimized columnar serialization.
-/// Same performance as StreamingEntityBatch but with lazy loading.
-fn serialize_lazy_streaming_batch(
-    batch: &crate::entity::LazyStreamingEntityBatch,
-    destination: &str,
-    ctx: &RuntimeContext,
-) -> Result<Value, RuntimeError> {
-    use fossil_lang::error::{CompileError, CompileErrorKind};
-
-    // Collect LazyFrame once (lazy loading from CSV)
-    let df = batch.lf.clone().collect().map_err(|e| {
-        CompileError::new(
-            CompileErrorKind::Runtime(format!("Failed to collect: {}", e)),
-            Loc::generated(),
-        )
-    })?;
-
-    let row_count = df.height();
-
-    // Pre-extract column series ONCE
-    let columns_with_predicates: Vec<_> = df
-        .get_column_names()
-        .iter()
-        .filter_map(|&col_name| {
-            if col_name == batch.id_column.as_str() {
-                return None;
-            }
-            let col_sym = ctx.gcx.interner.lookup(col_name)?;
-            let predicate = batch.rdf_metadata.get_predicate(col_sym)?;
-            let column = df.column(col_name).ok()?;
-            let series = column.as_materialized_series().clone();
-            Some((predicate.to_string(), series))
-        })
-        .collect();
-
-    // Get ID series
-    let id_column = df.column(&batch.id_column).map_err(|e| {
-        CompileError::new(
-            CompileErrorKind::Runtime(format!("ID column not found: {}", e)),
-            Loc::generated(),
-        )
-    })?;
-    let id_series = id_column.as_materialized_series();
-
-    // Create output destination (local file or HTTP)
-    let mut writer = OutputDestination::new(destination)?;
-
-    // Reusable string buffer for subject URIs
-    let mut subject_buf = String::with_capacity(batch.subject_prefix.len() + 20);
-
-    // Pre-cast typed columns
-    let typed_columns: Vec<_> = columns_with_predicates
-        .iter()
-        .map(|(predicate, series)| {
-            let typed = TypedColumn::from_series(series);
-            (predicate.as_str(), typed)
-        })
-        .collect();
-    let typed_id = TypedColumn::from_series(id_series);
-
-    // Fast columnar serialization
-    for row_idx in 0..row_count {
-        subject_buf.clear();
-        subject_buf.push_str(&batch.subject_prefix);
-        typed_id.append_value(&mut subject_buf, row_idx);
-
-        for (predicate, typed_col) in &typed_columns {
-            let _ = typed_col.write_triple(&mut writer, &subject_buf, predicate, row_idx);
-        }
-    }
-
-    writer.finalize()?;
-
-    Ok(Value::Unit)
-}
-
-/// Pre-cast typed column for zero-overhead access during iteration
+/// Pre-cast typed column for zero-overhead access
 enum TypedColumn<'a> {
     String(polars::prelude::StringChunked),
     Int64(&'a polars::prelude::Int64Chunked),
@@ -584,60 +294,38 @@ impl<'a> TypedColumn<'a> {
     fn from_series(series: &'a polars::prelude::Series) -> Self {
         use polars::prelude::*;
         match series.dtype() {
-            DataType::String => {
-                if let Ok(ca) = series.str() {
-                    TypedColumn::String(ca.clone())
-                } else {
-                    TypedColumn::Unknown
-                }
-            }
-            DataType::Int64 => {
-                if let Ok(ca) = series.i64() {
-                    TypedColumn::Int64(ca)
-                } else {
-                    TypedColumn::Unknown
-                }
-            }
-            DataType::Int32 => {
-                if let Ok(ca) = series.i32() {
-                    TypedColumn::Int32(ca)
-                } else {
-                    TypedColumn::Unknown
-                }
-            }
-            DataType::UInt64 => {
-                if let Ok(ca) = series.u64() {
-                    TypedColumn::UInt64(ca)
-                } else {
-                    TypedColumn::Unknown
-                }
-            }
-            DataType::UInt32 => {
-                if let Ok(ca) = series.u32() {
-                    TypedColumn::UInt32(ca)
-                } else {
-                    TypedColumn::Unknown
-                }
-            }
-            DataType::Float64 => {
-                if let Ok(ca) = series.f64() {
-                    TypedColumn::Float64(ca)
-                } else {
-                    TypedColumn::Unknown
-                }
-            }
-            DataType::Boolean => {
-                if let Ok(ca) = series.bool() {
-                    TypedColumn::Boolean(ca)
-                } else {
-                    TypedColumn::Unknown
-                }
-            }
+            DataType::String => series
+                .str()
+                .map(|ca| TypedColumn::String(ca.clone()))
+                .unwrap_or(TypedColumn::Unknown),
+            DataType::Int64 => series
+                .i64()
+                .map(TypedColumn::Int64)
+                .unwrap_or(TypedColumn::Unknown),
+            DataType::Int32 => series
+                .i32()
+                .map(TypedColumn::Int32)
+                .unwrap_or(TypedColumn::Unknown),
+            DataType::UInt64 => series
+                .u64()
+                .map(TypedColumn::UInt64)
+                .unwrap_or(TypedColumn::Unknown),
+            DataType::UInt32 => series
+                .u32()
+                .map(TypedColumn::UInt32)
+                .unwrap_or(TypedColumn::Unknown),
+            DataType::Float64 => series
+                .f64()
+                .map(TypedColumn::Float64)
+                .unwrap_or(TypedColumn::Unknown),
+            DataType::Boolean => series
+                .bool()
+                .map(TypedColumn::Boolean)
+                .unwrap_or(TypedColumn::Unknown),
             _ => TypedColumn::Unknown,
         }
     }
 
-    /// Append value to buffer (for subject URIs)
     fn append_value(&self, buf: &mut String, idx: usize) {
         use std::fmt::Write;
         match self {
@@ -670,8 +358,7 @@ impl<'a> TypedColumn<'a> {
         }
     }
 
-    /// Write complete triple directly to writer (avoids intermediate String allocations)
-    fn write_triple<W: std::io::Write>(
+    fn write_triple<W: std::io::Write + ?Sized>(
         &self,
         writer: &mut W,
         subject: &str,
@@ -681,49 +368,79 @@ impl<'a> TypedColumn<'a> {
         match self {
             TypedColumn::String(ca) => {
                 if let Some(v) = ca.get(idx) {
-                    writeln!(writer, "<{}> <{}> \"{}\" .", subject, predicate, escape_rdf_string(v))
+                    writeln!(
+                        writer,
+                        "<{}> <{}> \"{}\" .",
+                        subject,
+                        predicate,
+                        escape_rdf_string(v)
+                    )
                 } else {
                     Ok(())
                 }
             }
             TypedColumn::Int64(ca) => {
                 if let Some(v) = ca.get(idx) {
-                    writeln!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .", subject, predicate, v)
+                    writeln!(
+                        writer,
+                        "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
+                        subject, predicate, v
+                    )
                 } else {
                     Ok(())
                 }
             }
             TypedColumn::Int32(ca) => {
                 if let Some(v) = ca.get(idx) {
-                    writeln!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .", subject, predicate, v)
+                    writeln!(
+                        writer,
+                        "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
+                        subject, predicate, v
+                    )
                 } else {
                     Ok(())
                 }
             }
             TypedColumn::UInt64(ca) => {
                 if let Some(v) = ca.get(idx) {
-                    writeln!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .", subject, predicate, v)
+                    writeln!(
+                        writer,
+                        "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
+                        subject, predicate, v
+                    )
                 } else {
                     Ok(())
                 }
             }
             TypedColumn::UInt32(ca) => {
                 if let Some(v) = ca.get(idx) {
-                    writeln!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .", subject, predicate, v)
+                    writeln!(
+                        writer,
+                        "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
+                        subject, predicate, v
+                    )
                 } else {
                     Ok(())
                 }
             }
             TypedColumn::Float64(ca) => {
                 if let Some(v) = ca.get(idx) {
-                    writeln!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#double> .", subject, predicate, v)
+                    writeln!(
+                        writer,
+                        "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#double> .",
+                        subject, predicate, v
+                    )
                 } else {
                     Ok(())
                 }
             }
             TypedColumn::Boolean(ca) => {
                 if let Some(v) = ca.get(idx) {
-                    writeln!(writer, "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#boolean> .", subject, predicate, v)
+                    writeln!(
+                        writer,
+                        "<{}> <{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#boolean> .",
+                        subject, predicate, v
+                    )
                 } else {
                     Ok(())
                 }
@@ -733,57 +450,6 @@ impl<'a> TypedColumn<'a> {
     }
 }
 
-/// Format a literal value for streaming serialization
-fn format_literal_streaming(
-    series: &polars::prelude::Series,
-    idx: usize,
-) -> Result<Option<String>, RuntimeError> {
-    use fossil_lang::error::{CompileError, CompileErrorKind};
-    use polars::prelude::*;
-
-    match series.dtype() {
-        DataType::String => {
-            let values = series.str().map_err(|e| {
-                CompileError::new(
-                    CompileErrorKind::Runtime(format!("Cast error: {}", e)),
-                    Loc::generated(),
-                )
-            })?;
-            Ok(values.get(idx).map(|s| format!("\"{}\"", escape_rdf_string(s))))
-        }
-        DataType::Int64 | DataType::Int32 | DataType::UInt32 | DataType::UInt64 => {
-            let values = series.cast(&DataType::Int64).map_err(|e| {
-                CompileError::new(
-                    CompileErrorKind::Runtime(format!("Cast error: {}", e)),
-                    Loc::generated(),
-                )
-            })?;
-            let i64_values = values.i64().map_err(|e| {
-                CompileError::new(
-                    CompileErrorKind::Runtime(format!("Cast error: {}", e)),
-                    Loc::generated(),
-                )
-            })?;
-            Ok(i64_values
-                .get(idx)
-                .map(|v| format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>", v)))
-        }
-        DataType::Boolean => {
-            let values = series.bool().map_err(|e| {
-                CompileError::new(
-                    CompileErrorKind::Runtime(format!("Cast error: {}", e)),
-                    Loc::generated(),
-                )
-            })?;
-            Ok(values
-                .get(idx)
-                .map(|v| format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#boolean>", v)))
-        }
-        _ => Ok(None),
-    }
-}
-
-/// Escape special characters in RDF string literals
 fn escape_rdf_string(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     for c in s.chars() {

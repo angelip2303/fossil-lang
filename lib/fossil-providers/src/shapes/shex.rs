@@ -43,6 +43,7 @@ use fossil_lang::error::{CompileErrorKind, ProviderError};
 use fossil_lang::traits::provider::{ProviderOutput, ProviderParamInfo, TypeProviderImpl};
 
 use iri_s::IriS;
+use polars::prelude::PlPath;
 use shex_ast::ast::{Schema, ShapeExpr, ShapeExprLabel, TripleExpr};
 use shex_ast::compact::ShExParser;
 
@@ -77,15 +78,11 @@ impl TypeProviderImpl for ShexProvider {
         interner: &mut Interner,
         _type_name: &str,
     ) -> Result<ProviderOutput, ProviderError> {
-        // Parse arguments
-        let (path_str, shape_name) = parse_shex_args(args, interner)?;
+        let (path, shape_name) = parse_shex_args(args, interner)?;
+        validate_extension(path.as_ref(), &["shex"], interner)?;
+        validate_path(path.as_ref(), interner)?;
 
-        // Validate file
-        validate_extension(&path_str, &["shex"], interner)?;
-        validate_local_file(&path_str, interner)?;
-
-        // Read and parse ShEx file
-        let shex_content = fs::read_to_string(&path_str).map_err(|e| {
+        let shex_content = fs::read_to_string(path.to_str()).map_err(|e| {
             ProviderError::new(
                 CompileErrorKind::ProviderError(
                     interner.intern(&format!("Failed to read ShEx file: {}", e)),
@@ -119,60 +116,67 @@ impl TypeProviderImpl for ShexProvider {
 fn parse_shex_args(
     args: &[ProviderArgument],
     interner: &mut Interner,
-) -> Result<(String, String), ProviderError> {
-    let path_sym = interner.intern("path");
-    let shape_sym = interner.intern("shape");
+) -> Result<(PlPath, String), ProviderError> {
+    let mut iter = args.iter().take(2);
+    let path = iter.next();
+    let shape = iter.next();
 
-    let mut path = None;
-    let mut shape = None;
-
-    // Named arguments
-    for arg in args {
-        if let ProviderArgument::Named { name, value } = arg {
-            if *name == path_sym {
-                if let Literal::String(s) = value {
-                    path = Some(interner.resolve(*s).to_string());
+    if let (Some(arg), Some(shape)) = (path, shape) {
+        let path = match arg {
+            ProviderArgument::Positional(lit) => match lit {
+                Literal::String(sym) => PlPath::from_str(interner.resolve(*sym)),
+                _ => {
+                    return Err(ProviderError::new(
+                        CompileErrorKind::ProviderError(
+                            interner.intern("path argument must be of type string"),
+                        ),
+                        Loc::generated(),
+                    ));
                 }
-            } else if *name == shape_sym
-                && let Literal::String(s) = value
-            {
-                shape = Some(interner.resolve(*s).to_string());
+            },
+            _ => {
+                return Err(ProviderError::new(
+                    CompileErrorKind::ProviderError(
+                        interner.intern("CSV provider requires a file path"),
+                    ),
+                    Loc::generated(),
+                ));
             }
-        }
-    }
+        };
 
-    // Positional arguments fallback (path, shape)
-    let mut positional_idx = 0;
-    for arg in args {
-        if let ProviderArgument::Positional(Literal::String(s)) = arg {
-            match positional_idx {
-                0 if path.is_none() => path = Some(interner.resolve(*s).to_string()),
-                1 if shape.is_none() => shape = Some(interner.resolve(*s).to_string()),
-                _ => {}
+        let shape = match shape {
+            ProviderArgument::Named { name, value } => {
+                if *name == interner.intern("shape")
+                    && let Literal::String(shape) = value
+                {
+                    interner.resolve(*shape).to_string()
+                } else {
+                    return Err(ProviderError::new(
+                        CompileErrorKind::ProviderError(
+                            interner.intern("shape argument must be a string"),
+                        ),
+                        Loc::generated(),
+                    ));
+                }
             }
-            positional_idx += 1;
-        }
-    }
-
-    let path = path.ok_or_else(|| {
-        ProviderError::new(
+            _ => {
+                return Err(ProviderError::new(
+                    CompileErrorKind::ProviderError(
+                        interner.intern("CSV provider requires a shape argument"),
+                    ),
+                    Loc::generated(),
+                ));
+            }
+        };
+        return Ok((path, shape));
+    } else {
+        Err(ProviderError::new(
             CompileErrorKind::ProviderError(
-                interner.intern("ShEx provider requires 'path' argument"),
+                interner.intern("CSV provider requires at least a file path argument"),
             ),
             Loc::generated(),
-        )
-    })?;
-
-    let shape = shape.ok_or_else(|| {
-        ProviderError::new(
-            CompileErrorKind::ProviderError(
-                interner.intern("ShEx provider requires 'shape' argument"),
-            ),
-            Loc::generated(),
-        )
-    })?;
-
-    Ok((path, shape))
+        ))
+    }
 }
 
 /// Parse ShEx schema content

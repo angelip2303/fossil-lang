@@ -216,6 +216,9 @@ impl<'a> IrEvaluator<'a> {
     }
 
     /// Evaluate a string interpolation expression
+    ///
+    /// When interpolating Expr values (from RowContext tracing), preserves the
+    /// column reference as a template `${column_name}` for lazy processing.
     fn eval_string_interpolation(
         &mut self,
         parts: &[Symbol],
@@ -232,6 +235,19 @@ impl<'a> IrEvaluator<'a> {
             if i < exprs.len() {
                 let expr_id = exprs[i];
                 let value = self.eval(expr_id)?;
+
+                // Special handling for Expr values: preserve as template
+                // This allows Entity::with_id to extract column names for lazy processing
+                if let Value::Expr(ref expr) = value {
+                    // Extract column name from col("name") expression
+                    if let Some(col_name) = extract_column_name(expr) {
+                        result.push_str("${");
+                        result.push_str(&col_name);
+                        result.push('}');
+                        continue;
+                    }
+                }
+
                 // Dispatch through the registered string conversion trait (if any)
                 let string_value = if let Some(trait_def_id) = self.gcx.builtin_traits.to_string {
                     self.dispatch_trait_to_string(&value, expr_id, trait_def_id)?
@@ -360,86 +376,101 @@ impl<'a> IrEvaluator<'a> {
             Value::String(s) => Ok(s.to_string()),
             Value::Bool(b) => Ok(b.to_string()),
             Value::Unit => Ok("()".to_string()),
-            Value::Column(series) => {
-                // For a single-element series, return the value
-                if series.len() == 1 {
-                    use polars::datatypes::AnyValue;
-                    match series
-                        .get(0)
-                        .map_err(|e| self.make_error(format!("Series access error: {}", e)))?
-                    {
-                        AnyValue::Int64(i) => Ok(i.to_string()),
-                        AnyValue::String(s) => Ok(s.to_string()),
-                        AnyValue::Boolean(b) => Ok(b.to_string()),
-                        _ => Ok(format!("{:?}", series)),
-                    }
-                } else {
-                    Ok(format!("{:?}", series))
-                }
-            }
-            Value::Records(lf) => {
+            Value::Expr(expr) => Ok(format!("{:?}", expr)),
+            Value::Records(plan) => {
                 // Collect and format the DataFrame
-                match lf.clone().collect() {
+                match plan.lf.clone().collect() {
                     Ok(df) => Ok(format!("{}", df)),
                     Err(_) => Ok("<records>".to_string()),
                 }
             }
-            Value::List(items) => {
-                let strs: Result<Vec<_>, _> =
-                    items.iter().map(|v| self.value_to_string(v)).collect();
-                Ok(format!("[{}]", strs?.join(", ")))
-            }
+            Value::RowContext { .. } => Ok("<row-context>".to_string()),
             Value::Closure { .. } => Ok("<function>".to_string()),
             Value::Function(_) => Ok("<function>".to_string()),
             Value::BuiltinFunction(_, _) => Ok("<builtin>".to_string()),
-            Value::Record(df, idx) => {
-                // Format a single row
-                Ok(format!("row {} of {}", idx, df.height()))
-            }
-            Value::Extension { metadata, .. } => Ok(format!("<{}>", metadata.type_name())),
             Value::FieldSelector(field) => Ok(field.to_string()),
             Value::RecordConstructor(_) => Ok("<record-constructor>".to_string()),
         }
     }
 
     /// Evaluate a record expression
+    ///
+    /// When fields are Expr values, returns a record of expressions (lazy).
+    /// When fields are primitives, creates a single-row DataFrame.
     fn eval_record(&mut self, fields: &[(Symbol, ExprId)]) -> Result<Value, RuntimeError> {
+        use crate::runtime::value::RecordsPlan;
+
         if fields.is_empty() {
-            return Ok(Value::Records(LazyFrame::default()));
+            return Ok(Value::Records(RecordsPlan::new(LazyFrame::default())));
         }
 
-        let mut series_vec = Vec::new();
-
+        // Evaluate all fields first
+        let mut field_values: Vec<(Symbol, Value)> = Vec::with_capacity(fields.len());
         for (name, expr_id) in fields {
             let value = self.eval(*expr_id)?;
-            let name_str = PlSmallStr::from_str(self.gcx.interner.resolve(*name));
-
-            let series = match value {
-                Value::Int(i) => Series::new(name_str, &[i]).into_column(),
-                Value::String(s) => Series::new(name_str, &[s.as_ref()]).into_column(),
-                Value::Bool(b) => Series::new(name_str, &[b]).into_column(),
-                Value::Column(mut s) => {
-                    s.rename(name_str);
-                    s.into_column()
-                }
-                _ => {
-                    return Err(self.make_error("Unsupported value type in record field"));
-                }
-            };
-
-            series_vec.push(series);
+            field_values.push((*name, value));
         }
 
-        let df = DataFrame::new(series_vec)
-            .map_err(|e| self.make_error(format!("Failed to create DataFrame: {}", e)))?;
+        // Check if any field is an expression (lazy path)
+        let has_exprs = field_values.iter().any(|(_, v)| matches!(v, Value::Expr(_)));
 
-        Ok(Value::Records(df.lazy()))
+        if has_exprs {
+            // LAZY PATH: Build select expressions
+            // This creates a record of named expressions for lazy transformation
+            let select_exprs: Vec<Expr> = field_values
+                .into_iter()
+                .map(|(name, value)| {
+                    let name_str = self.gcx.interner.resolve(name);
+                    match value {
+                        Value::Expr(expr) => expr.alias(name_str),
+                        Value::Int(i) => lit(i).alias(name_str),
+                        Value::String(s) => lit(s.as_ref()).alias(name_str),
+                        Value::Bool(b) => lit(b).alias(name_str),
+                        _ => lit(NULL).alias(name_str), // Fallback for unsupported
+                    }
+                })
+                .collect();
+
+            // Store the expressions as a lazy plan that will be applied later
+            // We need a base LazyFrame - use an empty one with the expressions
+            // The actual data comes from the source in List::map
+            let lf = LazyFrame::default().select(select_exprs);
+            Ok(Value::Records(RecordsPlan::new(lf)))
+        } else {
+            // CONCRETE PATH: All primitives - create single-row DataFrame
+            let mut series_vec = Vec::new();
+
+            for (name, value) in field_values {
+                let name_str = PlSmallStr::from_str(self.gcx.interner.resolve(name));
+
+                let series = match value {
+                    Value::Int(i) => Series::new(name_str, &[i]).into_column(),
+                    Value::String(s) => Series::new(name_str, &[s.as_ref()]).into_column(),
+                    Value::Bool(b) => Series::new(name_str, &[b]).into_column(),
+                    _ => {
+                        return Err(self.make_error("Unsupported value type in record field"));
+                    }
+                };
+
+                series_vec.push(series);
+            }
+
+            let df = DataFrame::new(series_vec)
+                .map_err(|e| self.make_error(format!("Failed to create DataFrame: {}", e)))?;
+
+            Ok(Value::Records(RecordsPlan::new(df.lazy())))
+        }
     }
 
     /// Evaluate a list expression
+    ///
+    /// Lists of primitives become a single-column DataFrame.
+    /// Lists of records get concatenated lazily.
     fn eval_list(&mut self, items: &[ExprId]) -> Result<Value, RuntimeError> {
+        use crate::runtime::value::RecordsPlan;
+
         if items.is_empty() {
-            return Ok(Value::Column(Series::default()));
+            return Ok(Value::Records(RecordsPlan::new(LazyFrame::default())));
         }
 
         let values: Vec<Value> = items
@@ -456,7 +487,10 @@ impl<'a> IrEvaluator<'a> {
                         _ => unreachable!("Type checker ensures homogeneous lists"),
                     })
                     .collect();
-                Ok(Value::Column(Series::from_iter(ints)))
+                let series = Series::from_iter(ints);
+                let df = DataFrame::new(vec![series.into_column()])
+                    .map_err(|e| self.make_error(format!("Failed to create list: {}", e)))?;
+                Ok(Value::Records(RecordsPlan::new(df.lazy())))
             }
 
             Value::String(_) => {
@@ -467,7 +501,10 @@ impl<'a> IrEvaluator<'a> {
                         _ => unreachable!("Type checker ensures homogeneous lists"),
                     })
                     .collect();
-                Ok(Value::Column(Series::from_iter(strings)))
+                let series = Series::from_iter(strings);
+                let df = DataFrame::new(vec![series.into_column()])
+                    .map_err(|e| self.make_error(format!("Failed to create list: {}", e)))?;
+                Ok(Value::Records(RecordsPlan::new(df.lazy())))
             }
 
             Value::Bool(_) => {
@@ -478,26 +515,34 @@ impl<'a> IrEvaluator<'a> {
                         _ => unreachable!("Type checker ensures homogeneous lists"),
                     })
                     .collect();
-                Ok(Value::Column(Series::from_iter(bools)))
+                let series = Series::from_iter(bools);
+                let df = DataFrame::new(vec![series.into_column()])
+                    .map_err(|e| self.make_error(format!("Failed to create list: {}", e)))?;
+                Ok(Value::Records(RecordsPlan::new(df.lazy())))
             }
 
             Value::Records(_) => {
-                let dfs: Vec<LazyFrame> = values
+                let plans: Vec<_> = values
                     .into_iter()
                     .map(|v| match v {
-                        Value::Records(lf) => lf,
+                        Value::Records(plan) => plan,
                         _ => unreachable!("Type checker ensures homogeneous lists"),
                     })
                     .collect();
-                let concatenated = concat(dfs, UnionArgs::default())
-                    .map_err(|e| self.make_error(format!("Failed to concatenate lists: {}", e)))?;
-                Ok(Value::Records(concatenated))
-            }
 
-            Value::Extension { .. } => {
-                // For extensions (like Entity), return as List
-                // Serialization layer will handle batch optimization
-                Ok(Value::List(values))
+                // Concatenate all LazyFrames, preserving metadata from first plan
+                let lfs: Vec<LazyFrame> = plans.iter().map(|p| p.lf.clone()).collect();
+                let concatenated = concat(lfs, UnionArgs::default())
+                    .map_err(|e| self.make_error(format!("Failed to concatenate lists: {}", e)))?;
+
+                // Preserve metadata from first plan
+                let mut result_plan = RecordsPlan::new(concatenated);
+                if let Some(first) = plans.first() {
+                    result_plan.type_def_id = first.type_def_id;
+                    result_plan.subject_pattern = first.subject_pattern.clone();
+                }
+
+                Ok(Value::Records(result_plan))
             }
 
             _ => Err(self.make_error("Unsupported list element type")),
@@ -617,9 +662,13 @@ impl<'a> IrEvaluator<'a> {
             }
 
             Value::RecordConstructor(ctor_def_id) => {
-                // Get the constructor's name (same as the type name)
+                use crate::runtime::value::RecordsPlan;
+
+                // Get the constructor's definition to find the parent (type) DefId
                 let ctor_def = self.gcx.definitions.get(ctor_def_id);
                 let type_name = ctor_def.name;
+                // The parent DefId is the type's DefId (where metadata is stored)
+                let type_def_id = ctor_def.parent().unwrap_or(ctor_def_id);
 
                 // Find the type definition with this name in the IR
                 let field_names = self.get_record_field_names(type_name)?;
@@ -633,33 +682,54 @@ impl<'a> IrEvaluator<'a> {
                     )));
                 }
 
-                // Create series for each field
-                let mut series_vec = Vec::new();
-                for (field_name, value) in field_names.iter().zip(arg_values.into_iter()) {
-                    let name_str = PlSmallStr::from_str(self.gcx.interner.resolve(*field_name));
+                // Check if any argument is an expression (lazy path)
+                let has_exprs = arg_values.iter().any(|v| matches!(v, Value::Expr(_)));
 
-                    let series = match value {
-                        Value::Int(i) => Series::new(name_str, &[i]).into_column(),
-                        Value::String(s) => Series::new(name_str, &[s.as_ref()]).into_column(),
-                        Value::Bool(b) => Series::new(name_str, &[b]).into_column(),
-                        Value::Column(mut s) => {
-                            s.rename(name_str);
-                            s.into_column()
-                        }
-                        _ => {
-                            return Err(
-                                self.make_error("Unsupported value type in record constructor")
-                            );
-                        }
-                    };
+                if has_exprs {
+                    // LAZY PATH: Build select expressions for transformation
+                    let select_exprs: Vec<Expr> = field_names
+                        .iter()
+                        .zip(arg_values.into_iter())
+                        .map(|(field_name, value)| {
+                            let name_str = self.gcx.interner.resolve(*field_name);
+                            match value {
+                                Value::Expr(expr) => expr.alias(name_str),
+                                Value::Int(i) => lit(i).alias(name_str),
+                                Value::String(s) => lit(s.as_ref()).alias(name_str),
+                                Value::Bool(b) => lit(b).alias(name_str),
+                                _ => lit(NULL).alias(name_str),
+                            }
+                        })
+                        .collect();
 
-                    series_vec.push(series);
+                    // Store expressions in the plan - they'll be applied to source by List::map
+                    Ok(Value::Records(RecordsPlan::from_exprs(select_exprs, type_def_id)))
+                } else {
+                    // CONCRETE PATH: All primitives - create single-row DataFrame
+                    let mut series_vec = Vec::new();
+                    for (field_name, value) in field_names.iter().zip(arg_values.into_iter()) {
+                        let name_str = PlSmallStr::from_str(self.gcx.interner.resolve(*field_name));
+
+                        let series = match value {
+                            Value::Int(i) => Series::new(name_str, &[i]).into_column(),
+                            Value::String(s) => Series::new(name_str, &[s.as_ref()]).into_column(),
+                            Value::Bool(b) => Series::new(name_str, &[b]).into_column(),
+                            _ => {
+                                return Err(
+                                    self.make_error("Unsupported value type in record constructor")
+                                );
+                            }
+                        };
+
+                        series_vec.push(series);
+                    }
+
+                    let df = DataFrame::new(series_vec)
+                        .map_err(|e| self.make_error(format!("Failed to create record: {}", e)))?;
+
+                    // Create plan with type information (use type's DefId for metadata lookup)
+                    Ok(Value::Records(RecordsPlan::with_type(df.lazy(), type_def_id)))
                 }
-
-                let df = DataFrame::new(series_vec)
-                    .map_err(|e| self.make_error(format!("Failed to create record: {}", e)))?;
-
-                Ok(Value::Records(df.lazy()))
             }
 
             _ => Err(self.make_error("Attempt to call non-function value")),
@@ -667,50 +737,33 @@ impl<'a> IrEvaluator<'a> {
     }
 
     /// Evaluate field access (e.g., `row.id`)
+    ///
+    /// On RowContext: returns Value::Expr(col("field")) for lazy column access
+    /// On Records: returns Value::Expr(col("field")) - field access is lazy
     fn eval_field_access(&mut self, expr: ExprId, field: Symbol) -> Result<Value, RuntimeError> {
         let value = self.eval(expr)?;
+        let field_name = self.gcx.interner.resolve(field);
 
         match value {
-            // Optimized path: direct row access without collection
-            Value::Record(df, row_idx) => {
-                let field_name = self.gcx.interner.resolve(field);
-
-                let column = df.column(field_name).map_err(|e| {
-                    self.make_error(format!("Field '{}' not found: {}", field_name, e))
-                })?;
-
-                let series = column.as_materialized_series();
-                self.series_value_at(series, row_idx)
+            // LAZY: RowContext field access returns an expression
+            Value::RowContext { schema } => {
+                // Validate field exists in schema
+                if !schema.contains(field_name) {
+                    return Err(self.make_error(format!(
+                        "Field '{}' not found in schema. Available: {:?}",
+                        field_name,
+                        schema.iter_names().collect::<Vec<_>>()
+                    )));
+                }
+                // Return lazy column expression
+                Ok(Value::Expr(col(field_name)))
             }
 
-            Value::Records(lf) => {
-                // Extract field from LazyFrame
-                let field_name = self.gcx.interner.resolve(field);
-
-                // Optimization: Use select() to only collect the column we need
-                // This avoids materializing all columns when we only need one
-                let lf_selected = lf.select([col(field_name)]).with_projection_pushdown(true);
-
-                // Collect only the selected column
-                let df = lf_selected
-                    .collect()
-                    .map_err(|e| self.make_error(format!("Failed to access field: {}", e)))?;
-
-                // Get the column (should be the only one)
-                let column = df.column(field_name).map_err(|e| {
-                    self.make_error(format!("Field '{}' not found: {}", field_name, e))
-                })?;
-
-                // Convert Column to Series
-                let series = column.as_materialized_series().clone();
-
-                // If it's a single row, return scalar value
-                if df.height() == 1 {
-                    self.series_to_scalar(&series)
-                } else {
-                    // Multiple rows, return Series
-                    Ok(Value::Column(series))
-                }
+            // LAZY: Records field access returns an expression
+            // The actual selection happens at sink time (serialize)
+            Value::Records(_plan) => {
+                // Return lazy column expression
+                Ok(Value::Expr(col(field_name)))
             }
 
             _ => Err(self.make_error("Field access on non-record value")),
@@ -754,33 +807,6 @@ impl<'a> IrEvaluator<'a> {
         }
 
         Ok(last_value)
-    }
-
-    /// Convert a single-value Series to a scalar Value
-    fn series_to_scalar(&self, series: &Series) -> Result<Value, RuntimeError> {
-        self.series_value_at(series, 0)
-    }
-
-    /// Get a scalar Value from a Series at a specific index
-    fn series_value_at(&self, series: &Series, idx: usize) -> Result<Value, RuntimeError> {
-        use polars::datatypes::AnyValue;
-
-        let any_value = series.get(idx).map_err(|e| {
-            self.make_error(format!(
-                "Failed to get value from series at index {}: {}",
-                idx, e
-            ))
-        })?;
-
-        match any_value {
-            AnyValue::Int64(i) => Ok(Value::Int(i)),
-            AnyValue::String(s) => Ok(Value::String(Arc::from(s))),
-            AnyValue::Boolean(b) => Ok(Value::Bool(b)),
-            AnyValue::UInt32(u) => Ok(Value::Int(u as i64)),
-            AnyValue::UInt64(u) => Ok(Value::Int(u as i64)),
-            AnyValue::Int32(i) => Ok(Value::Int(i as i64)),
-            _ => Err(self.make_error(format!("Unsupported series type: {:?}", any_value))),
-        }
     }
 
     /// Get the field names for a record type by its name
@@ -841,5 +867,19 @@ impl<'a> IrEvaluator<'a> {
         }
 
         error
+    }
+}
+
+/// Extract column name from a Polars Expr if it's a simple column reference
+///
+/// Returns Some("column_name") for col("column_name") expressions,
+/// None for complex expressions that can't be represented as a template.
+fn extract_column_name(expr: &polars::prelude::Expr) -> Option<String> {
+    use polars::prelude::Expr;
+
+    match expr {
+        Expr::Column(name) => Some(name.to_string()),
+        Expr::Alias(inner, _) => extract_column_name(inner),
+        _ => None,
     }
 }

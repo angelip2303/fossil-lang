@@ -5,6 +5,8 @@
 
 use fossil_lang::ast::ast::PrimitiveType;
 
+pub mod shex;
+
 /// Field extracted from a shape definition
 #[derive(Debug)]
 pub struct ShapeField {

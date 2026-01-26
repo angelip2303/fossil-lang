@@ -3,12 +3,8 @@ const ROOT = "lib/fossil-stdlib/examples/shex-provider"
 type PersonData = csv!("${ROOT}/people.csv")
 type Person = shex!("${ROOT}/person.shex", shape: "PersonShape")
 
-impl ToString for PersonData {
-    to_string = fn(self) -> "PersonData"
-}
-
 let csv_to_rdf = fn(row) -> {
-    Person(row.name, row.age, row.name)
+    Person(row.name, row.age, row.email)
         |> Entity::with_id("http://example.com/person/${row.name}")
 }
 

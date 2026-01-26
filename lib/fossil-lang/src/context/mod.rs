@@ -176,7 +176,6 @@ impl DefId {
 #[derive(Clone)]
 pub struct Def {
     id: DefId,
-    #[allow(dead_code)]
     parent: Option<DefId>,
     pub name: Symbol,
     pub kind: DefKind,
@@ -216,6 +215,10 @@ impl Def {
 
     pub fn id(&self) -> DefId {
         self.id
+    }
+
+    pub fn parent(&self) -> Option<DefId> {
+        self.parent
     }
 }
 

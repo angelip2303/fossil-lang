@@ -221,7 +221,9 @@ impl IrResolver {
                 self.resolve_type(*ty, errors);
 
                 // Generate constructor for record types
-                self.generate_record_constructor(*name, *ty);
+                // Look up the type's DefId to use as the constructor's parent
+                let type_def_id = self.scopes.lookup_type(*name);
+                self.generate_record_constructor(*name, *ty, type_def_id);
             }
 
             StmtKind::Trait { name, methods, .. } => {
@@ -532,7 +534,7 @@ impl IrResolver {
         }
     }
 
-    fn generate_record_constructor(&mut self, type_name: Symbol, type_id: TypeId) {
+    fn generate_record_constructor(&mut self, type_name: Symbol, type_id: TypeId, type_def_id: Option<DefId>) {
         let ty = self.ir.types.get(type_id);
         if let TypeKind::Record(_) = &ty.kind {
             // Check if constructor name already exists
@@ -540,8 +542,8 @@ impl IrResolver {
                 return;
             }
 
-            // Register constructor
-            let ctor_def_id = self.gcx.definitions.insert(None, type_name, DefKind::Func(None));
+            // Register constructor with type's DefId as parent (for metadata lookup)
+            let ctor_def_id = self.gcx.definitions.insert(type_def_id, type_name, DefKind::Func(None));
             self.scopes.current_mut().values.insert(type_name, ctor_def_id);
         }
     }

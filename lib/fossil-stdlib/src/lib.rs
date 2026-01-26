@@ -7,13 +7,12 @@ pub mod string;
 // DataFrame iteration and transformation
 pub use list::{JoinFunction, MapFunction};
 
-// Entity extension system
-pub use entity::{ENTITY_TYPE_ID, EntityMetadata, EntityWithIdFunction, register_entity_type};
+// Entity functions
+pub use entity::EntityWithIdFunction;
 
-// Option extension system
+// Option type system
 pub use option::{
-    OPTION_TYPE_ID, OptionMetadata, OptionNoneFunction, OptionSomeFunction, get_option_ctor_def_id,
-    is_option_none, is_option_some, option_none, option_some, option_unwrap, register_option_type,
+    OptionNoneFunction, OptionSomeFunction, get_option_ctor_def_id, register_option_type,
 };
 
 // RDF serialization
@@ -28,7 +27,7 @@ use fossil_lang::passes::GlobalContext;
 /// Initialize the fossil-stdlib by registering all types and functions
 ///
 /// This function should be called before using any stdlib functionality
-/// to ensure that generic types like Entity are properly registered in
+/// to ensure that generic types like Option are properly registered in
 /// the type system.
 ///
 /// # Arguments
@@ -45,13 +44,10 @@ use fossil_lang::passes::GlobalContext;
 /// fossil_stdlib::init(&mut gcx);
 /// ```
 pub fn init(gcx: &mut GlobalContext) {
-    // Register Entity as a type constructor
-    register_entity_type(gcx);
-
     // Register Option as a type constructor
     register_option_type(gcx);
 
-    // Register Entity functions
+    // Register Entity functions (Entity::with_id adds subject pattern to plans)
     gcx.register_function("Entity", "with_id", EntityWithIdFunction);
 
     // Register Option functions
@@ -114,16 +110,5 @@ fn register_attribute_schemas(gcx: &mut GlobalContext) {
                 ArgSpec::optional(ArgType::Bool).describe("Whether the column can be NULL"),
             )
             .description("Maps a field to a SQL column"),
-    );
-
-    // #[deprecated(message = "...")]
-    // Used to mark types or fields as deprecated
-    gcx.register_attribute(
-        AttributeSchema::new("deprecated", AttributeTarget::Any)
-            .arg(
-                "message",
-                ArgSpec::optional(ArgType::String).describe("Deprecation message"),
-            )
-            .description("Marks an item as deprecated"),
     );
 }

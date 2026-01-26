@@ -1,6 +1,23 @@
 - [ ] Debe existir esto en Value? List(Vec<Value>), como una variante
 
-- [ ] Mejorar la forma en la que manejamos los metadatos. - [ ] Quizás con el concepto de atributos, la noción de entity pierde sentido? El problema es que en el caso de ShEx, como obtiene como debes serializar los sujetos?
+- [ ] /// Identificador único para el tipo Extension Entity
+pub const ENTITY_TYPE_ID: ExtensionTypeId = ExtensionTypeId(1);
+
+/// Identificador para streams perezosos de entidades
+pub const LAZY_ENTITY_STREAM_TYPE_ID: ExtensionTypeId = ExtensionTypeId(2);
+
+Tienen que existir los dos? Seguro? Esta es la mejor manera de manejar extensiones? En general, creo que el tema de streaming se puede mejorar, ya que realmente no somos 100% capaces de trabajar con larger than ram datasets
+
+- [ ] Quizás el concepto de un único Record suelto va fuera?
+- [ ] Todo lo de extensiones también va fuera
+- [ ] fn parse_subject_pattern(subject_uri: &str) parece que hardcodea el transformar string interpolation, string interpolation deberia de ser syntax sugar para String::concat, no?
+
+
+- [ ] Con una embedding API puede ser que pudiesemos quitar fossil-stdlib como un crate de Rust, y trabajar directamente con archivos .fossil?
+
+- [ ] En general el tema de los errores se puede mejorar usando thiserror. Además, no sé si lo de internar los errores es la mejorar manera de manejarlo (al menos con los mensajes)
+
+- [ ] Mejorar la forma en la que manejamos los metadatos. Quizás con el concepto de atributos, la noción de entity pierde sentido? El problema es que en el caso de ShEx, como obtiene como debes serializar los sujetos?
 
 - [ ] Tenemos que soportar alguna forma de especificar tipos para los distintos elementos, quizás algo así:
   ```
