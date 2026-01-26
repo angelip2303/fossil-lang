@@ -40,7 +40,8 @@ impl SqlSchema {
 /// - Querying the information_schema for table sources
 /// - Executing a LIMIT 0 query for custom queries
 pub async fn infer_schema(config: &SqlConfig) -> Result<SqlSchema, SqlError> {
-    let pool = ConnectionPool::get_or_create(&config.connection_string, config.connect_timeout).await?;
+    let pool =
+        ConnectionPool::get_or_create(&config.connection_string, config.connect_timeout).await?;
 
     match &config.source {
         SqlSource::Table(table_name) => infer_table_schema(&pool, table_name, config.db_type).await,
@@ -70,14 +71,11 @@ async fn infer_sqlite_table_schema(
     table_name: &str,
 ) -> Result<SqlSchema, SqlError> {
     let pragma_query = format!("PRAGMA table_info({})", table_name);
-    eprintln!("[SQL Schema] SQLite PRAGMA query: {}", pragma_query);
 
     let rows: Vec<AnyRow> = sqlx::query(&pragma_query)
         .fetch_all(&pool.pool)
         .await
         .map_err(|e| SqlError::QueryError(e.to_string()))?;
-
-    eprintln!("[SQL Schema] PRAGMA returned {} rows", rows.len());
 
     if rows.is_empty() {
         return Err(SqlError::SchemaInferenceError(format!(
@@ -93,7 +91,6 @@ async fn infer_sqlite_table_schema(
             let name: String = row.try_get(1).unwrap_or_default();
             let sql_type: String = row.try_get(2).unwrap_or_default();
             let polars_dtype = sql_type_to_polars(&sql_type);
-            eprintln!("[SQL Schema] Column: {} ({})", name, sql_type);
             ColumnInfo {
                 name,
                 sql_type,
@@ -110,20 +107,13 @@ async fn infer_query_schema(pool: &ConnectionPool, query: &str) -> Result<SqlSch
     // Wrap query in a subquery with LIMIT 1 to get schema with minimal data
     let schema_query = format!("SELECT * FROM ({}) AS _schema_query LIMIT 1", query);
 
-    eprintln!("[SQL Schema] Query: {}", schema_query);
-
-    let row_opt: Option<AnyRow> = match sqlx::query(&schema_query)
-        .fetch_optional(&pool.pool)
-        .await {
-            Ok(r) => {
-                eprintln!("[SQL Schema] fetch_optional succeeded, row present: {}", r.is_some());
-                r
-            }
-            Err(e) => {
-                eprintln!("[SQL Schema] fetch_optional failed: {}", e);
-                return Err(SqlError::QueryError(e.to_string()));
-            }
-        };
+    let row_opt: Option<AnyRow> = match sqlx::query(&schema_query).fetch_optional(&pool.pool).await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(SqlError::QueryError(e.to_string()));
+        }
+    };
 
     // If we got a row, extract column info from it
     if let Some(row) = row_opt {
@@ -135,7 +125,6 @@ async fn infer_query_schema(pool: &ConnectionPool, query: &str) -> Result<SqlSch
                 let type_info = col.type_info();
                 let sql_type = type_info.name().to_string();
                 let polars_dtype = sql_type_to_polars(&sql_type);
-                eprintln!("[SQL Schema] Column from query: {} ({})", name, sql_type);
                 ColumnInfo {
                     name,
                     sql_type,
@@ -168,12 +157,21 @@ fn sql_type_to_polars(sql_type: &str) -> DataType {
     }
 
     // Floating point types
-    if upper.contains("REAL") || upper.contains("FLOAT") || upper.contains("DOUBLE") || upper.contains("NUMERIC") || upper.contains("DECIMAL") {
+    if upper.contains("REAL")
+        || upper.contains("FLOAT")
+        || upper.contains("DOUBLE")
+        || upper.contains("NUMERIC")
+        || upper.contains("DECIMAL")
+    {
         return DataType::Float64;
     }
 
     // Text types
-    if upper.contains("TEXT") || upper.contains("VARCHAR") || upper.contains("CHAR") || upper.contains("STRING") {
+    if upper.contains("TEXT")
+        || upper.contains("VARCHAR")
+        || upper.contains("CHAR")
+        || upper.contains("STRING")
+    {
         return DataType::String;
     }
 

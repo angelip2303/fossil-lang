@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use once_cell::sync::Lazy;
-use sqlx::any::AnyPoolOptions;
 use sqlx::AnyPool;
+use sqlx::any::AnyPoolOptions;
 use tokio::sync::RwLock;
 
 use super::error::SqlError;
@@ -72,12 +72,12 @@ impl ConnectionPool {
 }
 
 /// Create a new connection pool
-async fn create_pool(connection_string: &str, timeout_secs: u64) -> Result<ConnectionPool, SqlError> {
+async fn create_pool(
+    connection_string: &str,
+    timeout_secs: u64,
+) -> Result<ConnectionPool, SqlError> {
     // Install any-driver support
     sqlx::any::install_default_drivers();
-
-    eprintln!("[SQL Connection] Connecting to: {}", connection_string);
-    eprintln!("[SQL Connection] Timeout: {} seconds", timeout_secs);
 
     let pool = AnyPoolOptions::new()
         .max_connections(10)
@@ -86,12 +86,7 @@ async fn create_pool(connection_string: &str, timeout_secs: u64) -> Result<Conne
         .idle_timeout(Duration::from_secs(300)) // 5 minutes
         .connect(connection_string)
         .await
-        .map_err(|e| {
-            eprintln!("[SQL Connection] Connection failed: {}", e);
-            SqlError::ConnectionFailed(e.to_string())
-        })?;
-
-    eprintln!("[SQL Connection] Connected successfully");
+        .map_err(|e| SqlError::ConnectionFailed(e.to_string()))?;
 
     Ok(ConnectionPool {
         pool,

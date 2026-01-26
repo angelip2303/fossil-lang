@@ -23,7 +23,7 @@ use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use fossil_lang::ast::Loc;
-use fossil_lang::ast::thir::{Polytype, Type, TypeKind, TypeVar, TypedHir};
+use fossil_lang::ir::{Ident, Ir, Polytype, PrimitiveType, Type, TypeKind, TypeVar};
 use fossil_lang::context::DefId;
 use fossil_lang::error::RuntimeError;
 use fossil_lang::passes::GlobalContext;
@@ -157,7 +157,7 @@ pub struct EntityWithIdFunction;
 impl FunctionImpl for EntityWithIdFunction {
     fn signature(
         &self,
-        thir: &mut TypedHir,
+        ir: &mut Ir,
         next_type_var: &mut dyn FnMut() -> TypeVar,
         _gcx: &GlobalContext,
     ) -> Polytype {
@@ -165,19 +165,19 @@ impl FunctionImpl for EntityWithIdFunction {
         let t_var = next_type_var();
 
         // First parameter: T (type variable)
-        let input_ty = thir.types.alloc(Type {
+        let input_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Var(t_var),
         });
 
         // Second parameter: string (URI)
-        let string_ty = thir.types.alloc(Type {
+        let string_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
-            kind: TypeKind::Primitive(fossil_lang::ast::ast::PrimitiveType::String),
+            kind: TypeKind::Primitive(PrimitiveType::String),
         });
 
         // Create T type for the Entity<T> type argument
-        let t_ty = thir.types.alloc(Type {
+        let t_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Var(t_var),
         });
@@ -185,16 +185,16 @@ impl FunctionImpl for EntityWithIdFunction {
         // Output type: Entity<T>
         // Using TypeKind::App to properly represent the generic type
         let entity_ctor = get_entity_ctor_def_id();
-        let output_ty = thir.types.alloc(Type {
+        let output_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::App {
-                ctor: entity_ctor,
+                ctor: Ident::Resolved(entity_ctor),
                 args: vec![t_ty],
             },
         });
 
         // Function type: (T, string) -> Entity<T>
-        let fn_ty = thir.types.alloc(Type {
+        let fn_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Function(vec![input_ty, string_ty], output_ty),
         });

@@ -1,6 +1,6 @@
-//! THIR Runtime Evaluator
+//! IR Runtime Evaluator
 //!
-//! This module provides runtime evaluation of THIR (Typed High-level IR) expressions.
+//! This module provides runtime evaluation of IR (Intermediate Representation) expressions.
 //! It enables stdlib functions to execute user-provided lambdas and evaluate field access.
 
 use std::rc::Rc;
@@ -9,15 +9,15 @@ use std::sync::Arc;
 use polars::prelude::*;
 
 use crate::ast::Loc;
-use crate::ast::thir::{ExprId, ExprKind, StmtId, TypedHir};
 use crate::context::{DefId, Symbol};
 use crate::error::RuntimeError;
+use crate::ir::{Argument, ExprId, ExprKind, Ident, Ir, StmtId, StmtKind, TypeKind, TypeRef};
 use crate::passes::GlobalContext;
 use crate::runtime::value::Value;
 use crate::traits::function::RuntimeContext;
 
 // Re-export Environment for convenience
-pub use crate::runtime::value::Environment as ThirEnvironment;
+pub use crate::runtime::value::Environment as IrEnvironment;
 
 /// Maximum call stack depth to prevent stack overflow
 const MAX_CALL_DEPTH: usize = 1000;
@@ -90,29 +90,29 @@ impl CallStack {
     }
 }
 
-/// THIR Expression Evaluator
+/// IR Expression Evaluator
 ///
-/// Evaluates typed HIR expressions at runtime. This is used by stdlib functions
+/// Evaluates typed IR expressions at runtime. This is used by stdlib functions
 /// to execute user-provided lambdas and evaluate field access on runtime values.
-pub struct ThirEvaluator<'a> {
-    /// Reference to the typed HIR being evaluated
-    thir: &'a TypedHir,
+pub struct IrEvaluator<'a> {
+    /// Reference to the IR being evaluated
+    ir: &'a Ir,
 
     /// Reference to global context for function lookup
     gcx: &'a GlobalContext,
 
     /// Current environment for variable bindings
-    env: ThirEnvironment,
+    env: IrEnvironment,
 
     /// Call stack for error reporting and recursion tracking
     call_stack: CallStack,
 }
 
-impl<'a> ThirEvaluator<'a> {
+impl<'a> IrEvaluator<'a> {
     /// Create a new evaluator with the given context and environment
-    pub fn new(thir: &'a TypedHir, gcx: &'a GlobalContext, env: ThirEnvironment) -> Self {
+    pub fn new(ir: &'a Ir, gcx: &'a GlobalContext, env: IrEnvironment) -> Self {
         Self {
-            thir,
+            ir,
             gcx,
             env,
             call_stack: CallStack::new(),
@@ -121,11 +121,11 @@ impl<'a> ThirEvaluator<'a> {
 
     /// Evaluate an expression and return its value
     pub fn eval(&mut self, expr_id: ExprId) -> Result<Value, RuntimeError> {
-        let expr = self.thir.exprs.get(expr_id);
+        let expr = self.ir.exprs.get(expr_id);
 
         match &expr.kind {
             ExprKind::Literal(lit) => {
-                use crate::ast::ast::Literal;
+                use crate::ir::Literal;
                 match lit {
                     Literal::Integer(i) => Ok(Value::Int(*i)),
                     Literal::String(s) => {
@@ -136,15 +136,20 @@ impl<'a> ThirEvaluator<'a> {
                 }
             }
 
-            ExprKind::Identifier(def_id) => {
-                // In THIR, identifiers can be:
+            ExprKind::Identifier(ident) => {
+                // In IR, identifiers can be:
                 // 1. Local variables (resolved to their DefId)
                 // 2. Functions (registered stdlib functions)
                 // 3. Module references
+                let def_id = match ident {
+                    Ident::Resolved(id) => *id,
+                    Ident::Unresolved(_) => {
+                        return Err(self.make_error("Unresolved identifier at runtime"))
+                    }
+                };
 
                 // First check if it's a local variable in the environment
-                // We'll use a heuristic: try to get the symbol name from the def
-                let def = self.gcx.definitions.get(*def_id);
+                let def = self.gcx.definitions.get(def_id);
 
                 // Try to look up by symbol in environment first (for local variables)
                 if let Some(val) = self.env.lookup(def.name) {
@@ -154,7 +159,11 @@ impl<'a> ThirEvaluator<'a> {
                 // Otherwise, it's a function or module binding
                 use crate::context::DefKind;
                 match &def.kind {
-                    DefKind::Func(Some(func)) => Ok(Value::BuiltinFunction(*def_id, func.clone())),
+                    DefKind::Func(Some(func)) => Ok(Value::BuiltinFunction(def_id, func.clone())),
+                    DefKind::Func(None) => {
+                        // Record constructor - return a special value that represents the constructor
+                        Ok(Value::RecordConstructor(def_id))
+                    }
                     DefKind::Let => {
                         // Local variable not in environment - error
                         Err(self.make_error(format!(
@@ -193,6 +202,16 @@ impl<'a> ThirEvaluator<'a> {
                 let field_str = self.gcx.interner.resolve(*field);
                 Ok(Value::FieldSelector(Arc::from(field_str)))
             }
+
+            ExprKind::Pipe { .. } => {
+                // Pipe should have been desugared during resolution
+                Err(self.make_error("Pipe expression should be desugared before evaluation"))
+            }
+
+            ExprKind::Placeholder => {
+                // Placeholder should never reach evaluation
+                Err(self.make_error("Placeholder expression should not be evaluated directly"))
+            }
         }
     }
 
@@ -211,13 +230,127 @@ impl<'a> ThirEvaluator<'a> {
 
             // If there's a corresponding expression, evaluate and convert to string
             if i < exprs.len() {
-                let value = self.eval(exprs[i])?;
-                let string_value = self.value_to_string(&value)?;
+                let expr_id = exprs[i];
+                let value = self.eval(expr_id)?;
+                // Dispatch through the registered string conversion trait (if any)
+                let string_value = if let Some(trait_def_id) = self.gcx.builtin_traits.to_string {
+                    self.dispatch_trait_to_string(&value, expr_id, trait_def_id)?
+                } else {
+                    self.value_to_string(&value)?
+                };
                 result.push_str(&string_value);
             }
         }
 
         Ok(Value::String(Arc::from(result)))
+    }
+
+    /// Dispatch a trait method call for string conversion.
+    /// Uses the general trait dispatch mechanism: looks up the trait impl for the
+    /// expression's type and calls the first method. Falls back to built-in conversion
+    /// for primitives and types without a user-defined impl.
+    fn dispatch_trait_to_string(
+        &mut self,
+        value: &Value,
+        expr_id: ExprId,
+        trait_def_id: DefId,
+    ) -> Result<String, RuntimeError> {
+        if let Some(result) = self.dispatch_trait_method(value, expr_id, trait_def_id)? {
+            self.value_to_string(&result)
+        } else {
+            self.value_to_string(value)
+        }
+    }
+
+    /// General trait method dispatch: given a value, its expression (for type info),
+    /// and a trait, finds and calls the user-defined impl method.
+    /// Returns None if no user-defined impl exists (primitives, unresolved types).
+    /// This is the core extensibility mechanism — any trait registered in GCX can
+    /// be dispatched at runtime without modifying the evaluator.
+    pub fn dispatch_trait_method(
+        &mut self,
+        value: &Value,
+        expr_id: ExprId,
+        trait_def_id: DefId,
+    ) -> Result<Option<Value>, RuntimeError> {
+        // Get the expression's type DefId from IR
+        let type_def_id = match self.get_expr_type_def_id(expr_id) {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+
+        // Find the impl method expression in IR
+        let method_expr_id = match self.find_trait_impl_method(trait_def_id, type_def_id) {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+
+        // Evaluate the method expression to get its closure
+        let value_clone = value.clone();
+        let method_val = self.eval(method_expr_id)?;
+
+        // Call the closure with self = value
+        match method_val {
+            Value::Closure { params, body, env } => {
+                let mut closure_env = (*env).clone();
+                // Bind self parameter to the value
+                if let Some(param) = params.first() {
+                    closure_env.bind(param.name, value_clone);
+                }
+                let saved_env = std::mem::replace(&mut self.env, closure_env);
+                let result = self.eval(body);
+                self.env = saved_env;
+                Ok(Some(result?))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Extract the type DefId from an expression's IR type.
+    fn get_expr_type_def_id(&self, expr_id: ExprId) -> Option<DefId> {
+        let expr = self.ir.exprs.get(expr_id);
+        let ty_id = match &expr.ty {
+            TypeRef::Known(id) => *id,
+            TypeRef::Unknown => return None,
+        };
+        let ty = self.ir.types.get(ty_id);
+        match &ty.kind {
+            TypeKind::Named(ident) => match ident {
+                Ident::Resolved(def_id) => Some(*def_id),
+                _ => None,
+            },
+            TypeKind::App { ctor, .. } => match ctor {
+                Ident::Resolved(def_id) => Some(*def_id),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Find the first method ExprId for a trait impl by searching IR Impl statements.
+    /// This is a general lookup: it finds any impl for the given (trait, type) pair.
+    fn find_trait_impl_method(&self, trait_def_id: DefId, type_def_id: DefId) -> Option<ExprId> {
+        for stmt_id in &self.ir.root {
+            let stmt = self.ir.stmts.get(*stmt_id);
+            if let StmtKind::Impl {
+                trait_name,
+                type_name,
+                methods,
+            } = &stmt.kind
+            {
+                // Check if both trait and type are resolved to the expected DefIds
+                let trait_matches = matches!(trait_name, Ident::Resolved(id) if *id == trait_def_id);
+                let type_matches = matches!(type_name, Ident::Resolved(id) if *id == type_def_id);
+
+                if trait_matches && type_matches {
+                    // Return the first method's expression
+                    if let Some((_name, expr_id)) = methods.first() {
+                        return Some(*expr_id);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Convert a Value to its string representation for interpolation
@@ -265,6 +398,7 @@ impl<'a> ThirEvaluator<'a> {
             }
             Value::Extension { metadata, .. } => Ok(format!("<{}>", metadata.type_name())),
             Value::FieldSelector(field) => Ok(field.to_string()),
+            Value::RecordConstructor(_) => Ok("<record-constructor>".to_string()),
         }
     }
 
@@ -386,12 +520,12 @@ impl<'a> ThirEvaluator<'a> {
     fn eval_application(
         &mut self,
         callee: ExprId,
-        args: &[crate::ast::thir::Argument],
+        args: &[Argument],
     ) -> Result<Value, RuntimeError> {
         // Check recursion depth before proceeding
         self.check_recursion_depth()?;
 
-        let callee_expr = self.thir.exprs.get(callee);
+        let callee_expr = self.ir.exprs.get(callee);
         let callee_loc = callee_expr.loc.clone();
         let callee_val = self.eval(callee)?;
 
@@ -406,19 +540,21 @@ impl<'a> ThirEvaluator<'a> {
         match callee_val {
             Value::Closure { params, body, env } => {
                 // Get function name for stack trace
-                let function_name = if let ExprKind::Identifier(def_id) = callee_expr.kind {
-                    let def = self.gcx.definitions.get(def_id);
-                    self.gcx.interner.resolve(def.name).to_string()
-                } else {
-                    "<anonymous>".to_string()
-                };
+                let function_name =
+                    if let ExprKind::Identifier(Ident::Resolved(def_id)) = &callee_expr.kind {
+                        let def = self.gcx.definitions.get(*def_id);
+                        self.gcx.interner.resolve(def.name).to_string()
+                    } else {
+                        "<anonymous>".to_string()
+                    };
 
                 // Push stack frame
                 self.call_stack.push(StackFrame {
                     function_name,
                     call_site: callee_loc,
-                    def_id: if let ExprKind::Identifier(def_id) = callee_expr.kind {
-                        Some(def_id)
+                    def_id: if let ExprKind::Identifier(Ident::Resolved(def_id)) = &callee_expr.kind
+                    {
+                        Some(*def_id)
                     } else {
                         None
                     },
@@ -456,17 +592,19 @@ impl<'a> ThirEvaluator<'a> {
                 });
 
                 // Call builtin function with type context
-                let mut ctx = RuntimeContext::new(self.gcx, self.thir);
+                let mut ctx = RuntimeContext::new(self.gcx, self.ir);
 
                 // Try to extract DefId from first argument's type (for functions like Entity::with_id)
                 // This handles cases with explicit type annotations
                 if !args.is_empty() {
-                    let first_arg_expr = self.thir.exprs.get(args[0].value());
-                    let arg_type = self.thir.types.get(first_arg_expr.ty);
+                    let first_arg_expr = self.ir.exprs.get(args[0].value());
+                    if let TypeRef::Known(arg_type_id) = first_arg_expr.ty {
+                        let arg_type = self.ir.types.get(arg_type_id);
 
-                    // If it's a Named type, extract the DefId
-                    if let crate::ast::thir::TypeKind::Named(def_id) = &arg_type.kind {
-                        ctx = ctx.with_type(*def_id);
+                        // If it's a Named type, extract the DefId
+                        if let TypeKind::Named(Ident::Resolved(def_id)) = &arg_type.kind {
+                            ctx = ctx.with_type(*def_id);
+                        }
                     }
                 }
 
@@ -476,6 +614,52 @@ impl<'a> ThirEvaluator<'a> {
                 self.call_stack.pop();
 
                 result
+            }
+
+            Value::RecordConstructor(ctor_def_id) => {
+                // Get the constructor's name (same as the type name)
+                let ctor_def = self.gcx.definitions.get(ctor_def_id);
+                let type_name = ctor_def.name;
+
+                // Find the type definition with this name in the IR
+                let field_names = self.get_record_field_names(type_name)?;
+
+                // Build the record by matching positional args with field names
+                if arg_values.len() != field_names.len() {
+                    return Err(self.make_error(format!(
+                        "Record constructor expects {} arguments, got {}",
+                        field_names.len(),
+                        arg_values.len()
+                    )));
+                }
+
+                // Create series for each field
+                let mut series_vec = Vec::new();
+                for (field_name, value) in field_names.iter().zip(arg_values.into_iter()) {
+                    let name_str = PlSmallStr::from_str(self.gcx.interner.resolve(*field_name));
+
+                    let series = match value {
+                        Value::Int(i) => Series::new(name_str, &[i]).into_column(),
+                        Value::String(s) => Series::new(name_str, &[s.as_ref()]).into_column(),
+                        Value::Bool(b) => Series::new(name_str, &[b]).into_column(),
+                        Value::Column(mut s) => {
+                            s.rename(name_str);
+                            s.into_column()
+                        }
+                        _ => {
+                            return Err(
+                                self.make_error("Unsupported value type in record constructor")
+                            );
+                        }
+                    };
+
+                    series_vec.push(series);
+                }
+
+                let df = DataFrame::new(series_vec)
+                    .map_err(|e| self.make_error(format!("Failed to create record: {}", e)))?;
+
+                Ok(Value::Records(df.lazy()))
             }
 
             _ => Err(self.make_error("Attempt to call non-function value")),
@@ -538,24 +722,33 @@ impl<'a> ThirEvaluator<'a> {
         let mut last_value = Value::Unit;
 
         for stmt_id in stmts {
-            let stmt = self.thir.stmts.get(*stmt_id);
+            let stmt = self.ir.stmts.get(*stmt_id);
 
             match &stmt.kind {
-                crate::ast::thir::StmtKind::Let { name, value } => {
+                StmtKind::Let { name, value, .. } => {
                     let val = self.eval(*value)?;
                     self.env.bind(*name, val);
                 }
 
-                crate::ast::thir::StmtKind::Expr(expr_id) => {
+                StmtKind::Const { name, value, .. } => {
+                    let val = self.eval(*value)?;
+                    self.env.bind(*name, val);
+                }
+
+                StmtKind::Expr(expr_id) => {
                     last_value = self.eval(*expr_id)?;
                 }
 
-                crate::ast::thir::StmtKind::Import { .. } => {
-                    // Imports are handled at compile time, skip at runtime
+                StmtKind::Type { .. } => {
+                    // Type declarations are compile time only, skip at runtime
                 }
 
-                crate::ast::thir::StmtKind::Type { .. } => {
-                    // Type declarations are compile time only, skip at runtime
+                StmtKind::Trait { .. } => {
+                    // Trait declarations are compile time only, skip at runtime
+                }
+
+                StmtKind::Impl { .. } => {
+                    // Impl declarations are compile time only, skip at runtime
                 }
             }
         }
@@ -588,6 +781,47 @@ impl<'a> ThirEvaluator<'a> {
             AnyValue::Int32(i) => Ok(Value::Int(i as i64)),
             _ => Err(self.make_error(format!("Unsupported series type: {:?}", any_value))),
         }
+    }
+
+    /// Get the field names for a record type by its name
+    fn get_record_field_names(&self, type_name: Symbol) -> Result<Vec<Symbol>, RuntimeError> {
+        use crate::ir::RecordRow;
+
+        // Find the type definition in the IR root statements
+        for stmt_id in &self.ir.root {
+            let stmt = self.ir.stmts.get(*stmt_id);
+            if let StmtKind::Type { name, ty } = &stmt.kind {
+                if *name == type_name {
+                    // Found the type, extract field names from the RecordRow
+                    let ty = self.ir.types.get(*ty);
+                    if let TypeKind::Record(row) = &ty.kind {
+                        let mut fields = Vec::new();
+                        let mut current_row = row.clone();
+                        loop {
+                            match current_row {
+                                RecordRow::Empty => break,
+                                RecordRow::Var(_) => break,
+                                RecordRow::Extend { field, rest, .. } => {
+                                    fields.push(field);
+                                    current_row = *rest;
+                                }
+                            }
+                        }
+                        return Ok(fields);
+                    } else {
+                        return Err(self.make_error(format!(
+                            "Type '{}' is not a record type",
+                            self.gcx.interner.resolve(type_name)
+                        )));
+                    }
+                }
+            }
+        }
+
+        Err(self.make_error(format!(
+            "Record type '{}' not found",
+            self.gcx.interner.resolve(type_name)
+        )))
     }
 
     /// Helper to create runtime errors

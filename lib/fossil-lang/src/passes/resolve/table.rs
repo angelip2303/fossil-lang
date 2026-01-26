@@ -24,8 +24,18 @@ pub struct ResolutionTable {
     pub function_params: HashMap<ExprId, Vec<DefId>>,
     /// Maps Let statement ID to the DefId it creates
     pub let_bindings: HashMap<StmtId, DefId>,
+    /// Maps Const statement ID to the DefId it creates
+    pub const_bindings: HashMap<StmtId, DefId>,
     /// Maps record constructor DefId to the type DefId it constructs
     pub record_constructors: HashMap<DefId, DefId>,
     /// Maps record constructor DefId to its field names (in order)
     pub constructor_fields: HashMap<DefId, Vec<Symbol>>,
+    /// Maps Trait statement ID to the DefId of the trait
+    pub trait_defs: HashMap<StmtId, DefId>,
+    /// Maps (trait_name, method_name) to the DefId of the method
+    pub trait_methods: HashMap<(Symbol, Symbol), DefId>,
+    /// Maps Impl statement ID to the DefId of the trait being implemented
+    pub impl_trait_defs: HashMap<StmtId, DefId>,
+    /// Maps Impl statement ID to the DefId of the type implementing the trait
+    pub impl_type_defs: HashMap<StmtId, DefId>,
 }

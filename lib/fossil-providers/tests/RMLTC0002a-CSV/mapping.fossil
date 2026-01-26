@@ -1,0 +1,19 @@
+type Input = csv!("tests/rmltc0002a_csv/student.csv")
+
+#[rdf(type = "http://xmlns.com/foaf/0.1/Person")]
+type Output = {
+    #[rdf(uri = "http://example.com/id")]
+    id: string,
+
+    #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
+    name: string,
+}
+
+let mapping = fn(row) -> {
+    Output(row.ID, row.Name)
+        |> Entity::with_id("http://example.com/${row.ID}/${row.Name}")
+}
+
+Input::load()
+|> List::map(mapping)
+|> Rdf::serialize("tests/rmltc0002a_csv/actual.nq")

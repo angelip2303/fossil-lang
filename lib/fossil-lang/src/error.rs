@@ -23,8 +23,9 @@
 use ariadne::{Label, Report, ReportKind};
 
 use crate::{
-    ast::{Loc, ast::Path, thir::TypeId},
+    ast::{ast::Path, Loc},
     context::{Interner, Symbol},
+    ir::TypeId,
 };
 
 /// Format a Symbol using the interner to get the actual name.
@@ -162,14 +163,6 @@ pub enum ErrorSuggestion {
         confidence: f32,
     },
 
-    /// "Consider importing this module"
-    ///
-    /// Suggests importing a module that contains the referenced name.
-    ConsiderImporting {
-        module: String,
-        path: String, // e.g., "open Data.List"
-    },
-
     /// "Add a type annotation"
     ///
     /// Suggests adding an explicit type annotation to help the type checker.
@@ -207,9 +200,6 @@ impl ErrorSuggestion {
                 } else {
                     format!("Did you mean '{}' (similar to '{}')?", suggestion, wrong)
                 }
-            }
-            Self::ConsiderImporting { module, path } => {
-                format!("Consider importing: {}\n  hint: add `{}`", module, path)
             }
             Self::AddTypeAnnotation {
                 name,

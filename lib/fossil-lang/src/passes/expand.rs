@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::ast::ast::*;
 use crate::context::{DefKind, Symbol};
 use crate::error::{CompileError, CompileErrorKind, CompileErrors};
@@ -7,11 +9,61 @@ use crate::traits::provider::ModuleSpec;
 pub struct ProviderExpander {
     ast: Ast,
     gcx: GlobalContext,
+    /// Const bindings collected from the AST for interpolation in provider args
+    const_values: HashMap<Symbol, String>,
 }
 
 impl ProviderExpander {
     pub fn new((ast, gcx): (Ast, GlobalContext)) -> Self {
-        Self { ast, gcx }
+        Self { ast, gcx, const_values: HashMap::new() }
+    }
+
+    /// Collect const bindings with string literal values from the AST
+    fn collect_const_bindings(&mut self) {
+        for stmt_id in &self.ast.root {
+            let stmt = self.ast.stmts.get(*stmt_id);
+            if let StmtKind::Const { name, value } = &stmt.kind {
+                let value_expr = self.ast.exprs.get(*value);
+                if let ExprKind::Literal(Literal::String(s)) = &value_expr.kind {
+                    let value_str = self.gcx.interner.resolve(*s).to_string();
+                    self.const_values.insert(*name, value_str);
+                }
+            }
+        }
+    }
+
+    /// Resolve ${CONST_NAME} interpolation patterns in a string using const bindings
+    fn resolve_const_interpolation(&self, s: &str) -> String {
+        let mut result = String::new();
+        let mut chars = s.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if c == '$' && chars.peek() == Some(&'{') {
+                chars.next(); // consume '{'
+                let mut name = String::new();
+                while let Some(&ch) = chars.peek() {
+                    if ch == '}' {
+                        chars.next(); // consume '}'
+                        break;
+                    }
+                    name.push(ch);
+                    chars.next();
+                }
+                // Look up the const value
+                if let Some(sym) = self.gcx.interner.lookup(&name) {
+                    if let Some(value) = self.const_values.get(&sym) {
+                        result.push_str(value);
+                        continue;
+                    }
+                }
+                // Not found - keep original
+                result.push_str(&format!("${{{}}}", name));
+            } else {
+                result.push(c);
+            }
+        }
+
+        result
     }
 
     /// Expand type providers (following F# model)
@@ -19,6 +71,8 @@ impl ProviderExpander {
     /// Type providers execute during compilation and generate AST types
     /// and optional modules (F# style).
     pub fn expand(mut self) -> Result<(Ast, GlobalContext), CompileErrors> {
+        // Collect const bindings first so they can be used in provider args
+        self.collect_const_bindings();
         // Collect all type alias statements with provider invocations
         let type_stmts: Vec<StmtId> = self
             .ast
@@ -97,10 +151,52 @@ impl ProviderExpander {
             }
         };
 
+        // Resolve const references and interpolation in string arguments before passing to provider
+        let mut resolved_args: Vec<ProviderArgument> = Vec::with_capacity(args.len());
+        for arg in &args {
+            let resolved = match arg {
+                ProviderArgument::ConstRef(sym) => {
+                    if let Some(value) = self.const_values.get(sym) {
+                        let new_sym = self.gcx.interner.intern(value);
+                        ProviderArgument::Positional(Literal::String(new_sym))
+                    } else {
+                        return Err(CompileError::new(
+                            CompileErrorKind::UndefinedVariable { name: *sym },
+                            loc.clone(),
+                        ).with_context(
+                            "Only `const` bindings with string literal values can be used as provider arguments"
+                        ));
+                    }
+                }
+                ProviderArgument::Positional(Literal::String(s)) => {
+                    let original = self.gcx.interner.resolve(*s);
+                    let resolved = self.resolve_const_interpolation(original);
+                    if resolved != original {
+                        let new_sym = self.gcx.interner.intern(&resolved);
+                        ProviderArgument::Positional(Literal::String(new_sym))
+                    } else {
+                        arg.clone()
+                    }
+                }
+                ProviderArgument::Named { name, value: Literal::String(s) } => {
+                    let original = self.gcx.interner.resolve(*s);
+                    let resolved = self.resolve_const_interpolation(original);
+                    if resolved != original {
+                        let new_sym = self.gcx.interner.intern(&resolved);
+                        ProviderArgument::Named { name: *name, value: Literal::String(new_sym) }
+                    } else {
+                        arg.clone()
+                    }
+                }
+                _ => arg.clone(),
+            };
+            resolved_args.push(resolved);
+        }
+
         // Execute the provider to generate type + optional module (F# style)
         let type_name_str = self.gcx.interner.resolve(type_name).to_string();
         let provider_output = provider_impl.provide(
-            &args,
+            &resolved_args,
             &mut self.ast,
             &mut self.gcx.interner,
             &type_name_str,

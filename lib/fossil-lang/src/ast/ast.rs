@@ -23,25 +23,36 @@ pub struct Stmt {
 /// A declaration in the language
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StmtKind {
-    /// An import declaration `open Module { items } as alias`
-    /// - module: The module path (providers::csv, "./utils", etc.)
-    /// - items: Optional selective imports { item1, item2 }
-    /// - alias: Optional alias (as alias)
-    Import {
-        module: Path,
-        items: Option<Vec<Symbol>>,
-        alias: Option<Symbol>,
-    },
     /// A value binding `let name = expr` or `let name: Type = expr`
     Let {
         name: Symbol,
         ty: Option<TypeId>,
         value: ExprId,
     },
+    /// A constant binding `const name = expr`
+    Const { name: Symbol, value: ExprId },
     /// A type definition `type name = type`
     Type { name: Symbol, ty: TypeId },
+    /// A trait definition `trait Name { method: type, ... }`
+    Trait {
+        name: Symbol,
+        methods: Vec<TraitMethod>,
+    },
+    /// A trait implementation `impl Trait for Type { method = expr, ... }`
+    Impl {
+        trait_name: Path,
+        type_name: Path,
+        methods: Vec<(Symbol, ExprId)>,
+    },
     /// An expression declaration `expr`
     Expr(ExprId),
+}
+
+/// A method signature in a trait definition
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TraitMethod {
+    pub name: Symbol,
+    pub ty: TypeId,
 }
 
 #[derive(Debug)]
@@ -102,7 +113,10 @@ pub enum TypeKind {
     /// A primitive type
     Primitive(PrimitiveType),
     /// A type provider invocation `provider!(arg1, arg2, ...)` with named/positional args
-    Provider { provider: Path, args: Vec<ProviderArgument> },
+    Provider {
+        provider: Path,
+        args: Vec<ProviderArgument>,
+    },
     /// A type function type `(T1, T2, ...) -> T`
     Function(Vec<TypeId>, TypeId),
     /// A list type `[T]`
@@ -125,10 +139,7 @@ pub enum Path {
     /// - dots = 0 means ./ (current directory)
     /// - dots = 1 means ../ (parent directory)
     /// - dots = 2 means ../../ (grandparent directory), etc.
-    Relative {
-        dots: u8,
-        components: Vec<Symbol>,
-    },
+    Relative { dots: u8, components: Vec<Symbol> },
 }
 
 impl Path {
@@ -160,9 +171,7 @@ impl Path {
             Path::Qualified(parts) => {
                 // SAFETY: Qualified paths are validated to be non-empty at construction
                 // via Path::qualified() which converts single-element paths to Simple.
-                *parts
-                    .last()
-                    .expect("BUG: Qualified path with zero parts")
+                *parts.last().expect("BUG: Qualified path with zero parts")
             }
             Path::Relative { components, .. } => {
                 // Relative paths must have at least one component
@@ -249,14 +258,24 @@ pub enum ProviderArgument {
     Positional(Literal),
     /// A named argument: `csv!(path: "file.csv")`
     Named { name: Symbol, value: Literal },
+    /// A reference to a compile-time const: `sql!(DB, "customers")`
+    ConstRef(Symbol),
 }
 
 impl ProviderArgument {
     /// Get the literal value of this argument
+    ///
+    /// # Panics
+    /// Panics if called on a `ConstRef` that hasn't been resolved during expansion.
     pub fn value(&self) -> &Literal {
         match self {
             ProviderArgument::Positional(lit) => lit,
             ProviderArgument::Named { value, .. } => value,
+            ProviderArgument::ConstRef(_) => {
+                panic!(
+                    "ConstRef must be resolved during provider expansion before accessing its value"
+                )
+            }
         }
     }
 }
@@ -264,6 +283,8 @@ impl ProviderArgument {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Param {
     pub name: Symbol,
+    /// Optional type annotation for this parameter (e.g., `fn(x: int)`)
+    pub ty: Option<TypeId>,
     /// Optional default value for this parameter
     pub default: Option<ExprId>,
 }
@@ -277,6 +298,27 @@ pub enum PrimitiveType {
     Bool,
 }
 
+impl From<polars::prelude::DataType> for PrimitiveType {
+    fn from(value: polars::prelude::DataType) -> Self {
+        use polars::prelude::DataType;
+        match value {
+            DataType::Boolean => PrimitiveType::Bool,
+            DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::Int128
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64 => PrimitiveType::Int,
+            DataType::Float32 | DataType::Float64 => PrimitiveType::Float,
+            DataType::String => PrimitiveType::String,
+            _ => todo!("Unsupported data type: {:?}", value),
+        }
+    }
+}
+
 /// Attribute annotation on record fields
 ///
 /// Supports named arguments like `#[rdf(uri = "...", required = true)]`
@@ -284,6 +326,7 @@ pub enum PrimitiveType {
 pub struct Attribute {
     pub name: Symbol,
     pub args: Vec<AttributeArg>,
+    pub loc: Loc,
 }
 
 /// A single argument in an attribute

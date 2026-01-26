@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use polars::prelude::*;
 
-use crate::ast::thir::{ExprId, Param};
 use crate::context::{DefId, Symbol};
+use crate::ir::{ExprId, Param};
 
 // TODO: Fix BindingId when module system is implemented
 pub type BindingId = u32;
@@ -106,6 +106,10 @@ pub enum Value {
         value: Box<Value>,
         metadata: Arc<dyn ExtensionMetadata>,
     },
+
+    /// Record constructor (for types defined with record syntax)
+    /// Contains the DefId of the constructor function
+    RecordConstructor(DefId),
 }
 
 /// Environment for variable bindings during execution

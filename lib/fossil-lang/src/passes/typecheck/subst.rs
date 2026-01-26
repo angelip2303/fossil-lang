@@ -5,100 +5,104 @@
 
 use std::collections::HashMap;
 
-use crate::ast::thir;
+use crate::ir::{Ir, RecordRow, Type, TypeId, TypeKind, TypeVar};
 
 /// Substitution: mapping from type variables to types
 #[derive(Clone, Debug, Default)]
 pub struct Subst {
-    pub(crate) map: HashMap<thir::TypeVar, thir::TypeId>,
+    pub(crate) map: HashMap<TypeVar, TypeId>,
 }
 
 impl Subst {
     /// Apply substitution to a type
-    pub fn apply(&self, ty_id: thir::TypeId, thir: &mut thir::TypedHir) -> thir::TypeId {
-        self.apply_with_cache(ty_id, thir, &mut HashMap::new())
+    pub fn apply(&self, ty_id: TypeId, ir: &mut Ir) -> TypeId {
+        self.apply_with_cache(ty_id, ir, &mut HashMap::new())
     }
 
     fn apply_with_cache(
         &self,
-        ty_id: thir::TypeId,
-        thir_ast: &mut thir::TypedHir,
-        cache: &mut HashMap<thir::TypeId, thir::TypeId>,
-    ) -> thir::TypeId {
+        ty_id: TypeId,
+        ir: &mut Ir,
+        cache: &mut HashMap<TypeId, TypeId>,
+    ) -> TypeId {
         if let Some(&cached) = cache.get(&ty_id) {
             return cached;
         }
 
         // Clone what we need before any mutable operations
-        let ty = thir_ast.types.get(ty_id);
+        let ty = ir.types.get(ty_id);
         let kind = ty.kind.clone();
         let loc = ty.loc.clone();
 
         let result = match kind {
-            thir::TypeKind::Var(var) => match self.map.get(&var) {
-                Some(&subst_ty) => self.apply_with_cache(subst_ty, thir_ast, cache),
+            TypeKind::Var(var) => match self.map.get(&var) {
+                Some(&subst_ty) => self.apply_with_cache(subst_ty, ir, cache),
                 None => ty_id,
             },
 
-            thir::TypeKind::App { ctor, args } => {
+            TypeKind::App { ctor, args } => {
                 let old_args = args.clone();
                 let new_args: Vec<_> = args
                     .iter()
-                    .map(|arg| self.apply_with_cache(*arg, thir_ast, cache))
+                    .map(|arg| self.apply_with_cache(*arg, ir, cache))
                     .collect();
 
                 if new_args == old_args {
                     ty_id
                 } else {
-                    thir_ast.types.alloc(thir::Type {
+                    ir.types.alloc(Type {
                         loc: loc.clone(),
-                        kind: thir::TypeKind::App { ctor, args: new_args },
+                        kind: TypeKind::App { ctor, args: new_args },
                     })
                 }
             }
 
-            thir::TypeKind::Record(row) => {
+            TypeKind::Record(row) => {
                 let old_row = row.clone();
-                let new_row = self.apply_row(row, thir_ast, cache);
+                let new_row = self.apply_row(row, ir, cache);
 
                 if new_row == old_row {
                     ty_id
                 } else {
-                    thir_ast.types.alloc(thir::Type {
+                    ir.types.alloc(Type {
                         loc: loc.clone(),
-                        kind: thir::TypeKind::Record(new_row),
+                        kind: TypeKind::Record(new_row),
                     })
                 }
             }
 
-            thir::TypeKind::Function(params, ret) => {
+            TypeKind::Function(params, ret) => {
                 let old_params = params.clone();
                 let new_params: Vec<_> = params
                     .iter()
-                    .map(|param| self.apply_with_cache(*param, thir_ast, cache))
+                    .map(|param| self.apply_with_cache(*param, ir, cache))
                     .collect();
-                let new_ret = self.apply_with_cache(ret, thir_ast, cache);
+                let new_ret = self.apply_with_cache(ret, ir, cache);
 
                 if new_params == old_params && new_ret == ret {
                     ty_id
                 } else {
-                    thir_ast.types.alloc(thir::Type {
+                    ir.types.alloc(Type {
                         loc: loc.clone(),
-                        kind: thir::TypeKind::Function(new_params, new_ret),
+                        kind: TypeKind::Function(new_params, new_ret),
                     })
                 }
             }
 
-            thir::TypeKind::FieldSelector { record_ty, field_ty, field } => {
-                let new_record_ty = self.apply_with_cache(record_ty, thir_ast, cache);
-                let new_field_ty = self.apply_with_cache(field_ty, thir_ast, cache);
+            TypeKind::FieldSelector {
+                record_ty,
+                field_ty,
+                field,
+            } => {
+                let new_record_ty = self.apply_with_cache(record_ty, ir, cache);
+                let new_field_ty = self.apply_with_cache(field_ty, ir, cache);
 
                 if new_record_ty == record_ty && new_field_ty == field_ty {
                     ty_id
                 } else {
-                    thir_ast.types.alloc(thir::Type {
+                    ir.types.alloc(Type {
                         loc: loc.clone(),
-                        kind: thir::TypeKind::FieldSelector {
+                        kind: TypeKind::FieldSelector {
                             record_ty: new_record_ty,
                             field_ty: new_field_ty,
                             field,
@@ -107,7 +111,22 @@ impl Subst {
                 }
             }
 
-            thir::TypeKind::Primitive(_) | thir::TypeKind::Named(_) => ty_id,
+            TypeKind::List(inner) => {
+                let new_inner = self.apply_with_cache(inner, ir, cache);
+                if new_inner == inner {
+                    ty_id
+                } else {
+                    ir.types.alloc(Type {
+                        loc: loc.clone(),
+                        kind: TypeKind::List(new_inner),
+                    })
+                }
+            }
+
+            TypeKind::Primitive(_)
+            | TypeKind::Named(_)
+            | TypeKind::Unit
+            | TypeKind::Provider { .. } => ty_id,
         };
 
         cache.insert(ty_id, result);
@@ -115,12 +134,12 @@ impl Subst {
     }
 
     /// Compose two substitutions: self ∘ other
-    pub fn compose(&self, other: &Subst, thir: &mut thir::TypedHir) -> Subst {
+    pub fn compose(&self, other: &Subst, ir: &mut Ir) -> Subst {
         let mut composed = HashMap::new();
 
         // Apply self to all mappings in other
         for (&var, &ty) in &other.map {
-            composed.insert(var, self.apply(ty, thir));
+            composed.insert(var, self.apply(ty, ir));
         }
 
         // Add mappings from self that aren't in other
@@ -131,43 +150,43 @@ impl Subst {
         Subst { map: composed }
     }
 
-    pub fn insert(&mut self, var: thir::TypeVar, ty: thir::TypeId) {
+    pub fn insert(&mut self, var: TypeVar, ty: TypeId) {
         self.map.insert(var, ty);
     }
 
     /// Apply substitution to a record row
     pub fn apply_row(
         &self,
-        row: thir::RecordRow,
-        thir_ast: &mut thir::TypedHir,
-        cache: &mut HashMap<thir::TypeId, thir::TypeId>,
-    ) -> thir::RecordRow {
+        row: RecordRow,
+        ir: &mut Ir,
+        cache: &mut HashMap<TypeId, TypeId>,
+    ) -> RecordRow {
         match row {
-            thir::RecordRow::Empty => thir::RecordRow::Empty,
-            thir::RecordRow::Extend { field, ty, rest } => {
-                let new_ty = self.apply_with_cache(ty, thir_ast, cache);
-                let new_rest = Box::new(self.apply_row(*rest, thir_ast, cache));
-                thir::RecordRow::Extend {
+            RecordRow::Empty => RecordRow::Empty,
+            RecordRow::Extend { field, ty, rest } => {
+                let new_ty = self.apply_with_cache(ty, ir, cache);
+                let new_rest = Box::new(self.apply_row(*rest, ir, cache));
+                RecordRow::Extend {
                     field,
                     ty: new_ty,
                     rest: new_rest,
                 }
             }
-            thir::RecordRow::Var(v) => {
+            RecordRow::Var(v) => {
                 // Check if v is bound in the substitution
                 if let Some(&bound_ty) = self.map.get(&v) {
                     // First, recursively apply substitution to the bound type
-                    let resolved_ty = self.apply_with_cache(bound_ty, thir_ast, cache);
+                    let resolved_ty = self.apply_with_cache(bound_ty, ir, cache);
                     // Extract the row from the resolved type
-                    let resolved = thir_ast.types.get(resolved_ty);
-                    if let thir::TypeKind::Record(row) = &resolved.kind {
+                    let resolved = ir.types.get(resolved_ty);
+                    if let TypeKind::Record(row) = &resolved.kind {
                         // Recursively apply to the extracted row as well
-                        self.apply_row(row.clone(), thir_ast, cache)
+                        self.apply_row(row.clone(), ir, cache)
                     } else {
-                        thir::RecordRow::Var(v)
+                        RecordRow::Var(v)
                     }
                 } else {
-                    thir::RecordRow::Var(v)
+                    RecordRow::Var(v)
                 }
             }
         }

@@ -1,21 +1,17 @@
 //! Name resolver implementation
 
+use std::collections::HashMap;
+
 use crate::ast::Loc;
 use crate::ast::ast::*;
 use crate::context::*;
-use crate::error::{CompileError, CompileErrorKind, CompileErrors, ErrorSuggestion};
+use crate::error::{CompileError, CompileErrorKind, CompileErrors};
 use crate::passes::GlobalContext;
-use crate::suggestions;
 
 use super::scope::ScopeStack;
 use super::table::{ResolutionTable, ResolvedAst};
 
 /// Name resolver - builds symbol tables and resolves all names
-///
-/// # Module Context for Relative Paths
-/// For relative path resolution (e.g., `./utils`, `../common`), the current module
-/// must be set using `set_module_context()`. This is typically done when resolving
-/// multi-module projects where each module has its own context.
 pub struct NameResolver {
     gcx: GlobalContext,
     ast: Ast,
@@ -25,33 +21,12 @@ pub struct NameResolver {
 
 impl NameResolver {
     pub fn new(ast: Ast, gcx: GlobalContext) -> Self {
-        let mut resolver = Self {
+        Self {
             gcx,
             ast,
             resolutions: ResolutionTable::default(),
             scopes: ScopeStack::new(),
-        };
-
-        // Apply prelude to root scope
-        let prelude = crate::passes::Prelude::standard();
-        prelude.apply(resolver.scopes.current_mut(), &mut resolver.gcx);
-
-        resolver
-    }
-
-    /// Set the current module context for relative path resolution
-    ///
-    /// This should be called before resolving a module that may contain
-    /// relative imports (e.g., `./utils`, `../common`).
-    ///
-    /// # Example
-    /// ```ignore
-    /// let mut resolver = NameResolver::new(ast, gcx);
-    /// resolver.set_module_context(module_def_id);
-    /// resolver.resolve()?;
-    /// ```
-    pub fn set_module_context(&mut self, module_id: DefId) {
-        self.scopes.set_current_module(module_id);
+        }
     }
 
     pub fn resolve(mut self) -> Result<ResolvedAst, CompileErrors> {
@@ -76,11 +51,64 @@ impl NameResolver {
             return Err(errors);
         }
 
+        // Phase 3: Desugar pipe expressions in-place
+        self.desugar_pipes();
+
         Ok(ResolvedAst {
             ast: self.ast,
             gcx: self.gcx,
             resolutions: self.resolutions,
         })
+    }
+
+    /// Desugar pipe expressions in-place
+    ///
+    /// Transforms:
+    /// - `a |> b` → `b(a)`
+    /// - `a |> f(x, y)` → `f(a, x, y)`
+    fn desugar_pipes(&mut self) {
+        // Collect all expression IDs that need to be processed
+        let expr_ids: Vec<ExprId> = self.ast.exprs.iter().map(|(id, _)| id).collect();
+
+        for expr_id in expr_ids {
+            self.desugar_pipe_expr(expr_id);
+        }
+    }
+
+    /// Desugar a single pipe expression if it is one
+    fn desugar_pipe_expr(&mut self, expr_id: ExprId) {
+        // Get the expression kind
+        let expr = self.ast.exprs.get(expr_id);
+        let kind = expr.kind.clone();
+
+        if let ExprKind::Pipe { lhs, rhs } = kind {
+            // Check if RHS is an Application
+            let rhs_expr = self.ast.exprs.get(rhs);
+            let rhs_kind = rhs_expr.kind.clone();
+
+            let new_kind = match rhs_kind {
+                ExprKind::Application { callee, args } => {
+                    // RHS is already a function call: prepend LHS as first argument
+                    let mut new_args = vec![Argument::Positional(lhs)];
+                    new_args.extend(args);
+                    ExprKind::Application {
+                        callee,
+                        args: new_args,
+                    }
+                }
+                _ => {
+                    // RHS is not a function call: simple pipe desugaring
+                    ExprKind::Application {
+                        callee: rhs,
+                        args: vec![Argument::Positional(lhs)],
+                    }
+                }
+            };
+
+            // Modify the expression in place
+            let expr_mut = self.ast.exprs.get_mut(expr_id);
+            expr_mut.kind = new_kind;
+        }
     }
 
     fn collect_declarations(&mut self) -> Result<(), CompileErrors> {
@@ -93,20 +121,6 @@ impl NameResolver {
             let loc = stmt.loc.clone();
 
             match &stmt.kind {
-                StmtKind::Import { module, items, alias } => {
-                    // Register the import in the scope
-                    // If items are specified, we'll handle selective imports
-                    // For now, just register the alias if present
-                    if let Some(alias) = alias {
-                        self.scopes
-                            .current_mut()
-                            .imports
-                            .insert(*alias, module.clone());
-                    }
-                    // TODO: Handle selective imports { item1, item2 }
-                    let _ = items; // Suppress unused warning for now
-                }
-
                 StmtKind::Let { name, ty: _, value } => {
                     let expr = self.ast.exprs.get(*value);
                     if matches!(expr.kind, ExprKind::Function { .. }) {
@@ -122,6 +136,18 @@ impl NameResolver {
                     }
                 }
 
+                StmtKind::Const { name, .. } => {
+                    if self.scopes.current_mut().values.contains_key(name) {
+                        errors.push(CompileError::new(
+                            CompileErrorKind::AlreadyDefined(*name),
+                            loc,
+                        ));
+                    } else {
+                        let def_id = self.gcx.definitions.insert(None, *name, DefKind::Const);
+                        self.scopes.current_mut().values.insert(*name, def_id);
+                    }
+                }
+
                 StmtKind::Type { name, .. } => {
                     if self.scopes.current_mut().types.contains_key(name) {
                         errors.push(CompileError::new(
@@ -132,6 +158,38 @@ impl NameResolver {
                         let def_id = self.gcx.definitions.insert(None, *name, DefKind::Type);
                         self.scopes.current_mut().types.insert(*name, def_id);
                     }
+                }
+
+                StmtKind::Trait { name, methods } => {
+                    let method_names: Vec<_> = methods.iter().map(|m| m.name).collect();
+                    let def_id = self.gcx.definitions.insert(
+                        None,
+                        *name,
+                        DefKind::Trait {
+                            methods: method_names,
+                        },
+                    );
+                    self.scopes.current_mut().types.insert(*name, def_id);
+
+                    // Register each method as a child definition
+                    for method in methods {
+                        let method_def_id = self.gcx.definitions.insert(
+                            Some(def_id),
+                            method.name,
+                            DefKind::TraitMethod,
+                        );
+                        self.resolutions
+                            .trait_methods
+                            .insert((*name, method.name), method_def_id);
+                    }
+
+                    // Track trait def for lowering
+                    self.resolutions.trait_defs.insert(stmt_id, def_id);
+                }
+
+                StmtKind::Impl { .. } => {
+                    // Impl blocks don't introduce new names into scope
+                    // They are processed in resolve_stmt
                 }
 
                 StmtKind::Expr(_) => {}
@@ -152,16 +210,13 @@ impl NameResolver {
         let _loc = stmt.loc.clone();
 
         match &stmt_kind {
-            StmtKind::Import { .. } => {
-                // Already processed in collect_declarations
-            }
-
             StmtKind::Let { name, ty, value } => {
                 // Resolve type annotation if present
                 if let Some(type_id) = ty
-                    && let Err(e) = self.resolve_type(*type_id) {
-                        errors.push(e);
-                    }
+                    && let Err(e) = self.resolve_type(*type_id)
+                {
+                    errors.push(e);
+                }
 
                 // Resolve the value expression
                 if let Err(e) = self.resolve_expr(*value) {
@@ -184,6 +239,21 @@ impl NameResolver {
                 self.resolutions.let_bindings.insert(stmt_id, def_id);
             }
 
+            StmtKind::Const { name, value } => {
+                // Resolve the value expression
+                if let Err(e) = self.resolve_expr(*value) {
+                    errors.push(e);
+                }
+
+                // Get DefId from collect phase
+                let def_id = self.scopes.lookup_value(*name)
+                    .expect("SAFETY: Const was registered in collect_declarations(). \
+                             The lookup cannot fail immediately after successful declaration collection.");
+
+                // Track stmt_id -> def_id mapping for lowering
+                self.resolutions.const_bindings.insert(stmt_id, def_id);
+            }
+
             StmtKind::Type { name, ty } => {
                 // Already registered in collect_declarations, just resolve the type
                 if let Err(e) = self.resolve_type(*ty) {
@@ -196,13 +266,110 @@ impl NameResolver {
                              The lookup cannot fail immediately after successful declaration collection.");
 
                 if let Some(metadata) = self.extract_type_metadata(type_def_id, *ty, errors) {
-                    self.gcx.type_metadata.insert(type_def_id, std::sync::Arc::new(metadata));
+                    self.gcx
+                        .type_metadata
+                        .insert(type_def_id, std::sync::Arc::new(metadata));
                 }
 
                 // Generate constructor function for record types
                 if let Err(e) = self.generate_record_constructor(*name, type_def_id, *ty) {
                     errors.push(e);
                 }
+            }
+
+            StmtKind::Trait { name, methods } => {
+                // Add "self" as a type in scope for trait method signatures
+                // It resolves to the trait's own DefId as a placeholder
+                let self_sym = self.gcx.interner.intern("self");
+                let trait_def_id = self
+                    .scopes
+                    .lookup_type(*name)
+                    .expect("Trait should be declared before resolution");
+                self.scopes
+                    .current_mut()
+                    .types
+                    .insert(self_sym, trait_def_id);
+
+                // Resolve method type signatures
+                for method in methods {
+                    if let Err(e) = self.resolve_type(method.ty) {
+                        errors.push(e);
+                    }
+                }
+
+                // Remove "self" from scope after resolving trait methods
+                self.scopes.current_mut().types.remove(&self_sym);
+            }
+
+            StmtKind::Impl {
+                trait_name,
+                type_name,
+                methods,
+            } => {
+                // Resolve trait name
+                let trait_def_id = match self.resolve_type_path(trait_name, _loc.clone()) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        errors.push(e);
+                        return;
+                    }
+                };
+
+                // Resolve type name
+                let type_def_id = match self.resolve_type_path(type_name, _loc.clone()) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        errors.push(e);
+                        return;
+                    }
+                };
+
+                // Validate that trait_def_id is actually a trait
+                let trait_def = self.gcx.definitions.get(trait_def_id);
+                if let DefKind::Trait {
+                    methods: trait_methods,
+                } = &trait_def.kind
+                {
+                    // Check all required methods are implemented
+                    for required in trait_methods {
+                        if !methods.iter().any(|(name, _)| name == required) {
+                            errors.push(CompileError::new(
+                                CompileErrorKind::UndefinedVariable { name: *required },
+                                _loc.clone(),
+                            ));
+                        }
+                    }
+                }
+
+                // Resolve method expressions
+                for (_, expr) in methods {
+                    if let Err(e) = self.resolve_expr(*expr) {
+                        errors.push(e);
+                    }
+                }
+
+                // Register impl
+                let mut impl_methods = HashMap::new();
+                for (name, _) in methods {
+                    let method_def_id =
+                        self.gcx
+                            .definitions
+                            .insert(Some(type_def_id), *name, DefKind::Func(None));
+                    impl_methods.insert(*name, method_def_id);
+                }
+
+                self.gcx.trait_impls.insert(
+                    (trait_def_id, type_def_id),
+                    crate::passes::TraitImplInfo {
+                        methods: impl_methods,
+                    },
+                );
+
+                // Track for lowering
+                self.resolutions
+                    .impl_trait_defs
+                    .insert(stmt_id, trait_def_id);
+                self.resolutions.impl_type_defs.insert(stmt_id, type_def_id);
             }
 
             StmtKind::Expr(expr) => {
@@ -243,6 +410,11 @@ impl NameResolver {
                     let def_id = self.gcx.definitions.insert(None, param.name, DefKind::Let);
                     self.scopes.current_mut().values.insert(param.name, def_id);
                     param_def_ids.push(def_id);
+
+                    // Resolve type annotation if present
+                    if let Some(ty_id) = param.ty {
+                        self.resolve_type(ty_id)?;
+                    }
 
                     // Resolve default value if present
                     if let Some(default_expr) = param.default {
@@ -365,35 +537,13 @@ impl NameResolver {
                     return Ok(def_id);
                 }
 
-                // Variable not found - create error with suggestions
+                // Variable not found
                 let name_str = self.gcx.interner.resolve(name);
-                let mut error = CompileError::new(CompileErrorKind::UndefinedVariable { name }, loc)
+                let error = CompileError::new(CompileErrorKind::UndefinedVariable { name }, loc)
                     .with_context(format!(
                         "Variable '{}' is not defined in the current scope",
                         name_str
                     ));
-
-                // Collect available variable names in scope
-                let available_names: Vec<String> = self
-                    .scopes
-                    .current()
-                    .values
-                    .keys()
-                    .map(|sym| self.gcx.interner.resolve(*sym).to_string())
-                    .collect();
-
-                // Find similar names using edit distance
-                if let Some((suggestion, confidence)) =
-                    crate::suggestions::find_similar(name_str, &available_names)
-                {
-                    error = error.with_suggestion(ErrorSuggestion::DidYouMean {
-                        wrong: name_str.to_string(),
-                        suggestion,
-                        confidence,
-                    });
-                }
-
-                // TODO: Check if available in an unimported module (future enhancement)
 
                 Err(error)
             }
@@ -407,10 +557,12 @@ impl NameResolver {
                     .ok_or_else(|| CompileError::new(CompileErrorKind::UndefinedPath { path }, loc))
             }
 
-            Path::Relative { dots, components } => {
-                // Resolve relative to current module
-                let base_module = self.navigate_up(*dots, loc.clone())?;
-                self.resolve_from_module(base_module, components, loc, /* is_type */ false)
+            Path::Relative { .. } => {
+                // Relative paths are not supported
+                Err(CompileError::new(
+                    CompileErrorKind::Runtime("Relative paths are not supported".into()),
+                    loc,
+                ))
             }
         }
     }
@@ -427,36 +579,14 @@ impl NameResolver {
                     return Ok(def_id);
                 }
 
-                // Type not found - create error with suggestions
+                // Type not found
                 let name_str = self.gcx.interner.resolve(name);
-                let mut error = CompileError::new(
-                    CompileErrorKind::UndefinedType(Path::Simple(name)),
-                    loc,
-                )
-                .with_context(format!(
-                    "Type '{}' is not defined in the current scope",
-                    name_str
-                ));
-
-                // Collect available type names in scope
-                let available_types: Vec<String> = self
-                    .scopes
-                    .current()
-                    .types
-                    .keys()
-                    .map(|sym| self.gcx.interner.resolve(*sym).to_string())
-                    .collect();
-
-                // Find similar type names using edit distance
-                if let Some((suggestion, confidence)) =
-                    crate::suggestions::find_similar(name_str, &available_types)
-                {
-                    error = error.with_suggestion(ErrorSuggestion::DidYouMean {
-                        wrong: name_str.to_string(),
-                        suggestion,
-                        confidence,
-                    });
-                }
+                let error =
+                    CompileError::new(CompileErrorKind::UndefinedType(Path::Simple(name)), loc)
+                        .with_context(format!(
+                            "Type '{}' is not defined in the current scope",
+                            name_str
+                        ));
 
                 Err(error)
             }
@@ -470,10 +600,12 @@ impl NameResolver {
                     .ok_or_else(|| CompileError::new(CompileErrorKind::UndefinedType(path), loc))
             }
 
-            Path::Relative { dots, components } => {
-                // Resolve relative to current module
-                let base_module = self.navigate_up(*dots, loc.clone())?;
-                self.resolve_from_module(base_module, components, loc, /* is_type */ true)
+            Path::Relative { .. } => {
+                // Relative paths are not supported
+                Err(CompileError::new(
+                    CompileErrorKind::Runtime("Relative paths are not supported".into()),
+                    loc,
+                ))
             }
         }
     }
@@ -511,7 +643,12 @@ impl NameResolver {
 
                         for attr in &field.attrs {
                             // Validate the attribute against its schema
-                            self.validate_attribute(attr, AttributeTarget::Field, &ty.loc, errors);
+                            self.validate_attribute(
+                                attr,
+                                AttributeTarget::Field,
+                                &attr.loc,
+                                errors,
+                            );
 
                             // Convert Vec<AttributeArg> to HashMap<Symbol, Literal>
                             let args = attr
@@ -559,25 +696,11 @@ impl NameResolver {
         let schema = match self.gcx.attribute_registry.get(attr.name) {
             Some(s) => s,
             None => {
-                // Unknown attribute - create error with suggestion
+                // Unknown attribute
                 let attr_name = self.gcx.interner.resolve(attr.name);
-                let mut error = CompileError::new(
-                    CompileErrorKind::UnknownAttribute(attr.name),
-                    loc.clone(),
-                )
-                .with_context(format!("Attribute '#[{}]' is not recognized", attr_name));
-
-                // Find similar attribute names for suggestion
-                let known_attrs = self.gcx.attribute_registry.all_names();
-                if let Some((suggestion, confidence)) =
-                    suggestions::find_similar(attr_name, &known_attrs)
-                {
-                    error = error.with_suggestion(ErrorSuggestion::DidYouMean {
-                        wrong: attr_name.to_string(),
-                        suggestion,
-                        confidence,
-                    });
-                }
+                let error =
+                    CompileError::new(CompileErrorKind::UnknownAttribute(attr.name), loc.clone())
+                        .with_context(format!("Attribute '#[{}]' is not recognized", attr_name));
 
                 errors.push(error);
                 return;
@@ -664,7 +787,7 @@ impl NameResolver {
                 }
                 None => {
                     // Unknown argument - create error with suggestion
-                    let mut error = CompileError::new(
+                    let error = CompileError::new(
                         CompileErrorKind::UnknownAttributeArg {
                             attr: attr.name,
                             arg: arg.key,
@@ -675,18 +798,6 @@ impl NameResolver {
                         "Unknown argument '{}' for attribute '#[{}]'",
                         arg_name, schema.name
                     ));
-
-                    // Find similar argument names for suggestion
-                    let known_args = schema.arg_names();
-                    if let Some((suggestion, confidence)) =
-                        suggestions::find_similar(arg_name, &known_args)
-                    {
-                        error = error.with_suggestion(ErrorSuggestion::DidYouMean {
-                            wrong: arg_name.to_string(),
-                            suggestion,
-                            confidence,
-                        });
-                    }
 
                     errors.push(error);
                 }
@@ -734,136 +845,25 @@ impl NameResolver {
             );
 
             // Add constructor to value scope (not type scope)
-            self.scopes.current_mut().values.insert(type_name, constructor_def_id);
+            self.scopes
+                .current_mut()
+                .values
+                .insert(type_name, constructor_def_id);
 
             // Store metadata linking constructor to its type
             // This will be used during type checking and code generation
-            self.resolutions.record_constructors.insert(constructor_def_id, type_def_id);
+            self.resolutions
+                .record_constructors
+                .insert(constructor_def_id, type_def_id);
 
             // Store field information for runtime constructor
             let field_names: Vec<Symbol> = fields.iter().map(|f| f.name).collect();
-            self.resolutions.constructor_fields.insert(constructor_def_id, field_names);
+            self.resolutions
+                .constructor_fields
+                .insert(constructor_def_id, field_names);
         }
 
         Ok(())
     }
 
-    /// Navigate up 'dots' levels in the module hierarchy
-    ///
-    /// # Arguments
-    /// - `dots`: Number of levels to go up (0 = current module, 1 = parent, 2 = grandparent, etc.)
-    /// - `loc`: Location for error reporting
-    ///
-    /// # Returns
-    /// DefId of the target module after navigating up
-    fn navigate_up(&self, dots: u8, loc: Loc) -> Result<DefId, CompileError> {
-        // Get current module from scope
-        let mut current = self.scopes.current_module().ok_or_else(|| {
-            CompileError::new(
-                CompileErrorKind::Runtime("No current module context for relative import".into()),
-                loc.clone(),
-            )
-        })?;
-
-        // Navigate up 'dots' times
-        for _ in 0..dots {
-            let def = self.gcx.definitions.get(current);
-
-            // Get parent module
-            if let crate::context::DefKind::Mod { .. } = &def.kind {
-                // Need to check the parent field
-                // Since parent is private, we need to iterate through definitions
-                // to find the module that contains this one
-                let parent_id = self.gcx.definitions.iter()
-                    .find(|parent_def| {
-                        // Check if any of parent's children is current
-                        self.gcx.definitions.get_children(parent_def.id())
-                            .iter()
-                            .any(|child| child.id() == current)
-                    })
-                    .map(|p| p.id());
-
-                current = parent_id.ok_or_else(|| {
-                    CompileError::new(
-                        CompileErrorKind::Runtime(
-                            "Relative import goes above project root".into()
-                        ),
-                        loc.clone(),
-                    )
-                })?;
-            } else {
-                return Err(CompileError::new(
-                    CompileErrorKind::Runtime("Not a module".into()),
-                    loc,
-                ));
-            }
-        }
-
-        Ok(current)
-    }
-
-    /// Resolve a path from a specific module
-    ///
-    /// # Arguments
-    /// - `module_id`: The module to resolve from
-    /// - `components`: The path components to resolve
-    /// - `loc`: Location for error reporting
-    /// - `is_type`: Whether this is a type path (vs value path)
-    fn resolve_from_module(
-        &self,
-        module_id: DefId,
-        components: &[Symbol],
-        loc: Loc,
-        is_type: bool,
-    ) -> Result<DefId, CompileError> {
-        if components.is_empty() {
-            return Ok(module_id);
-        }
-
-        // Start from the base module
-        let mut current = module_id;
-
-        // Navigate through each component
-        for (i, &component) in components.iter().enumerate() {
-            // Look for this component as a child of current
-            let found = self.gcx.definitions.iter()
-                .find(|def| {
-                    def.name == component &&
-                    self.gcx.definitions.get_children(current)
-                        .iter()
-                        .any(|child| child.id() == def.id())
-                });
-
-            if let Some(def) = found {
-                current = def.id();
-
-                // If this is not the last component, it must be a module
-                if i < components.len() - 1 {
-                    match &def.kind {
-                        crate::context::DefKind::Mod { .. } => {
-                            // Continue to next component
-                        }
-                        _ => {
-                            return Err(CompileError::new(
-                                CompileErrorKind::NotAModule(
-                                    Path::qualified(components[..=i].to_vec())
-                                ),
-                                loc,
-                            ));
-                        }
-                    }
-                }
-            } else {
-                // Component not found
-                let path = Path::qualified(components.to_vec());
-                return Err(if is_type {
-                    CompileError::new(CompileErrorKind::UndefinedType(path), loc)
-                } else {
-                    CompileError::new(CompileErrorKind::UndefinedPath { path }, loc)
-                });
-            }
-        }
-
-        Ok(current)
-    }
 }

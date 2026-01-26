@@ -5,14 +5,22 @@ use logos::Logos;
 pub enum Token<'a> {
     #[token("let")]
     Let,
+    #[token("const")]
+    Const,
     #[token("type")]
     Type,
-    #[token("open")]
-    Open,
-    #[token("as")]
-    As,
     #[token("fn")]
     Func,
+    #[token("trait")]
+    Trait,
+    #[token("impl")]
+    Impl,
+    #[token("for")]
+    For,
+    #[token("self")]
+    SelfKw,
+    #[token("+")]
+    Plus,
     #[token("true")]
     True,
     #[token("false")]

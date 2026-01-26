@@ -4,10 +4,10 @@
 //! and applying transformations, enabling functional data processing pipelines.
 
 use fossil_lang::ast::Loc;
-use fossil_lang::ast::thir::{Polytype, Type, TypeKind, TypeVar, TypedHir};
+use fossil_lang::ir::{Ident, Ir, Polytype, Type, TypeKind, TypeVar};
 use fossil_lang::error::RuntimeError;
 use fossil_lang::passes::GlobalContext;
-use fossil_lang::runtime::evaluator::ThirEvaluator;
+use fossil_lang::runtime::evaluator::IrEvaluator;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 use polars::prelude::*;
@@ -31,7 +31,7 @@ pub struct MapFunction;
 impl FunctionImpl for MapFunction {
     fn signature(
         &self,
-        thir: &mut TypedHir,
+        ir: &mut Ir,
         next_type_var: &mut dyn FnMut() -> TypeVar,
         gcx: &GlobalContext,
     ) -> Polytype {
@@ -41,13 +41,13 @@ impl FunctionImpl for MapFunction {
         let u_var = next_type_var();
 
         // T - element type
-        let t_ty = thir.types.alloc(Type {
+        let t_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Var(t_var),
         });
 
         // U - result element type
-        let u_ty = thir.types.alloc(Type {
+        let u_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Var(u_var),
         });
@@ -57,31 +57,31 @@ impl FunctionImpl for MapFunction {
         let list_ctor = gcx.list_type_ctor
             .expect("List type constructor not registered. This is a bug - GlobalContext::new() should register it.");
 
-        let list_t_ty = thir.types.alloc(Type {
+        let list_t_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::App {
-                ctor: list_ctor,
+                ctor: Ident::Resolved(list_ctor),
                 args: vec![t_ty],
             },
         });
 
         // Second parameter: (T -> U) function
-        let fn_param_ty = thir.types.alloc(Type {
+        let fn_param_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Function(vec![t_ty], u_ty),
         });
 
         // Return type: List<U>
-        let return_ty = thir.types.alloc(Type {
+        let return_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::App {
-                ctor: list_ctor,
+                ctor: Ident::Resolved(list_ctor),
                 args: vec![u_ty],
             },
         });
 
         // Function type: (List<T>, (T -> U)) -> List<U>
-        let map_fn_ty = thir.types.alloc(Type {
+        let map_fn_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Function(vec![list_t_ty, fn_param_ty], return_ty),
         });
@@ -123,9 +123,9 @@ impl FunctionImpl for MapFunction {
         if sample_df.height() > 0
             && let Some(lazy_stream) =
                 try_create_lazy_streaming_batch(lf.clone(), &sample_df, transform_fn, ctx)?
-            {
-                return Ok(lazy_stream);
-            }
+        {
+            return Ok(lazy_stream);
+        }
 
         // Fallback for non-Entity transformations (e.g., map to strings)
         let df = lf.clone().collect().map_err(|e| {
@@ -172,7 +172,7 @@ fn apply_transform(
                 ));
             }
 
-            let mut evaluator = ThirEvaluator::new(ctx.thir, ctx.gcx, closure_env);
+            let mut evaluator = IrEvaluator::new(ctx.ir, ctx.gcx, closure_env);
             evaluator.eval(*body)
         }
 
@@ -363,7 +363,7 @@ pub struct JoinFunction;
 impl FunctionImpl for JoinFunction {
     fn signature(
         &self,
-        thir: &mut TypedHir,
+        ir: &mut Ir,
         next_type_var: &mut dyn FnMut() -> TypeVar,
         gcx: &GlobalContext,
     ) -> Polytype {
@@ -375,24 +375,24 @@ impl FunctionImpl for JoinFunction {
         let f2_var = next_type_var();
 
         // T - element type of left list (record type)
-        let t_ty = thir.types.alloc(Type {
+        let t_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Var(t_var),
         });
 
         // U - element type of right list (record type)
-        let u_ty = thir.types.alloc(Type {
+        let u_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Var(u_var),
         });
 
         // F1, F2 - field types
-        let f1_ty = thir.types.alloc(Type {
+        let f1_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Var(f1_var),
         });
 
-        let f2_ty = thir.types.alloc(Type {
+        let f2_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Var(f2_var),
         });
@@ -402,50 +402,50 @@ impl FunctionImpl for JoinFunction {
             .list_type_ctor
             .expect("List type constructor not registered");
 
-        let left_list_ty = thir.types.alloc(Type {
+        let left_list_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::App {
-                ctor: list_ctor,
+                ctor: Ident::Resolved(list_ctor),
                 args: vec![t_ty],
             },
         });
 
         // Second parameter: List<U>
-        let right_list_ty = thir.types.alloc(Type {
+        let right_list_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::App {
-                ctor: list_ctor,
+                ctor: Ident::Resolved(list_ctor),
                 args: vec![u_ty],
             },
         });
 
         // Third parameter: FieldSelector<T, F1> - selects a field from T
         // We use the wildcard symbol since the actual field will be determined at call site
-        let left_selector_ty = thir.types.alloc(Type {
+        let left_selector_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::FieldSelector {
                 record_ty: t_ty,
                 field_ty: f1_ty,
-                field: gcx.wildcard_symbol,
+                field: gcx.wildcard_symbol(),
             },
         });
 
         // Fourth parameter: FieldSelector<U, F2> - selects a field from U
-        let right_selector_ty = thir.types.alloc(Type {
+        let right_selector_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::FieldSelector {
                 record_ty: u_ty,
                 field_ty: f2_ty,
-                field: gcx.wildcard_symbol,
+                field: gcx.wildcard_symbol(),
             },
         });
 
-        let return_ty = thir.types.alloc(Type {
+        let return_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Var(v_var),
         });
 
-        let fn_ty = thir.types.alloc(Type {
+        let fn_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Function(
                 vec![

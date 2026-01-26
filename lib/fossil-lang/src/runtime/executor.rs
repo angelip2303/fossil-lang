@@ -1,26 +1,26 @@
-//! THIR Program Executor
+//! IR Program Executor
 //!
-//! This module provides execution of complete THIR programs.
+//! This module provides execution of complete IR programs.
 //! It processes top-level statements and returns the final results.
 
-use crate::ast::thir::StmtKind;
 use crate::error::RuntimeError;
-use crate::passes::ThirProgram;
-use crate::runtime::evaluator::ThirEvaluator;
+use crate::ir::StmtKind;
+use crate::passes::IrProgram;
+use crate::runtime::evaluator::IrEvaluator;
 use crate::runtime::value::{Environment, Value};
 
-/// Executor for complete THIR programs
+/// Executor for complete IR programs
 ///
-/// Takes a compiled THIR program and executes it from top to bottom,
+/// Takes a compiled IR program and executes it from top to bottom,
 /// processing statements and collecting results.
-pub struct ThirExecutor;
+pub struct IrExecutor;
 
-impl ThirExecutor {
-    /// Execute a THIR program and return the results
+impl IrExecutor {
+    /// Execute an IR program and return the results
     ///
     /// # Arguments
     ///
-    /// * `program` - The compiled THIR program to execute
+    /// * `program` - The compiled IR program to execute
     ///
     /// # Returns
     ///
@@ -36,25 +36,25 @@ impl ThirExecutor {
     ///     src: source.to_string(),
     ///     name: "example".to_string()
     /// };
-    /// let thir = compiler.compile(input)?;
-    /// let results = ThirExecutor::execute(thir)?;
+    /// let ir = compiler.compile(input)?;
+    /// let results = IrExecutor::execute(ir)?;
     /// ```
-    pub fn execute(program: ThirProgram) -> Result<Vec<Value>, RuntimeError> {
-        let ThirProgram { thir, gcx } = program;
+    pub fn execute(program: IrProgram) -> Result<Vec<Value>, RuntimeError> {
+        let IrProgram { ir, gcx, .. } = program;
 
         // Create environment for top-level bindings
         let mut env = Environment::new();
 
         // Create evaluator
-        let mut evaluator = ThirEvaluator::new(&thir, &gcx, env.clone());
+        let mut evaluator = IrEvaluator::new(&ir, &gcx, env.clone());
 
         // Process each top-level statement
         let mut results = Vec::new();
 
-        for &stmt_id in &thir.root {
-            let stmt = thir.stmts.get(stmt_id);
+        for &stmt_id in &ir.root {
+            let stmt = ir.stmts.get(stmt_id);
             match &stmt.kind {
-                StmtKind::Let { name, value } => {
+                StmtKind::Let { name, value, .. } => {
                     // Evaluate the value
                     let val = evaluator.eval(*value)?;
 
@@ -62,7 +62,21 @@ impl ThirExecutor {
                     env.bind(*name, val.clone());
 
                     // Update evaluator's environment
-                    evaluator = ThirEvaluator::new(&thir, &gcx, env.clone());
+                    evaluator = IrEvaluator::new(&ir, &gcx, env.clone());
+
+                    // Add to results
+                    results.push(val);
+                }
+
+                StmtKind::Const { name, value, .. } => {
+                    // Evaluate the value
+                    let val = evaluator.eval(*value)?;
+
+                    // Bind it in the environment (same as let at runtime)
+                    env.bind(*name, val.clone());
+
+                    // Update evaluator's environment
+                    evaluator = IrEvaluator::new(&ir, &gcx, env.clone());
 
                     // Add to results
                     results.push(val);
@@ -74,12 +88,16 @@ impl ThirExecutor {
                     results.push(val);
                 }
 
-                StmtKind::Import { .. } => {
-                    // Imports are handled at compile time, nothing to do at runtime
-                }
-
                 StmtKind::Type { .. } => {
                     // Type declarations are compile time only, nothing to do at runtime
+                }
+
+                StmtKind::Trait { .. } => {
+                    // Trait declarations are compile time only, nothing to do at runtime
+                }
+
+                StmtKind::Impl { .. } => {
+                    // Impl declarations are compile time only, nothing to do at runtime
                 }
             }
         }

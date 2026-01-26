@@ -1,6 +1,6 @@
-use crate::ast::thir::{Polytype, TypeVar, TypedHir};
 use crate::context::DefId;
 use crate::error::RuntimeError;
+use crate::ir::{Ir, Polytype, TypeVar};
 use crate::passes::GlobalContext;
 use crate::runtime::value::Value;
 
@@ -13,8 +13,8 @@ pub struct RuntimeContext<'a> {
     /// Global context with interner, definitions, and type metadata
     pub gcx: &'a GlobalContext,
 
-    /// Typed HIR with complete type information
-    pub thir: &'a TypedHir,
+    /// IR with complete type information
+    pub ir: &'a Ir,
 
     /// DefId of the type currently being constructed (if applicable)
     /// Used by constructor functions to access type metadata
@@ -22,10 +22,10 @@ pub struct RuntimeContext<'a> {
 }
 
 impl<'a> RuntimeContext<'a> {
-    pub fn new(gcx: &'a GlobalContext, thir: &'a TypedHir) -> Self {
+    pub fn new(gcx: &'a GlobalContext, ir: &'a Ir) -> Self {
         Self {
             gcx,
-            thir,
+            ir,
             current_type: None,
         }
     }
@@ -40,12 +40,12 @@ pub trait FunctionImpl: Send + Sync {
     /// Returns the type signature of the function
     ///
     /// # Arguments
-    /// * `thir` - Mutable access to TypedHir for allocating types
+    /// * `ir` - Mutable access to IR for allocating types
     /// * `next_type_var` - Function to generate fresh type variables
     /// * `gcx` - Global context with type constructors (e.g., list_type_ctor)
     fn signature(
         &self,
-        thir: &mut TypedHir,
+        ir: &mut Ir,
         next_type_var: &mut dyn FnMut() -> TypeVar,
         gcx: &GlobalContext,
     ) -> Polytype;
@@ -58,7 +58,7 @@ pub trait FunctionImpl: Send + Sync {
     ///
     /// # Arguments
     /// * `args` - Function arguments as runtime values
-    /// * `ctx` - Runtime context with access to GlobalContext and TypedHir
+    /// * `ctx` - Runtime context with access to GlobalContext and IR
     ///
     /// # Example
     /// ```ignore

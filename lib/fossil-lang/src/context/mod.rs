@@ -192,9 +192,16 @@ pub enum DefKind {
         is_inline: bool,
     },
     Let,
+    Const,
     Type,
     Func(Option<Arc<dyn FunctionImpl>>),
     Provider(Arc<dyn TypeProviderImpl>),
+    /// A trait definition
+    Trait {
+        methods: Vec<Symbol>,
+    },
+    /// A method within a trait
+    TraitMethod,
 }
 
 impl Def {
@@ -369,7 +376,9 @@ pub struct TypeConstructorInfo {
 }
 
 pub mod attributes;
+pub mod global;
 pub mod metadata;
 
 pub use self::attributes::*;
+pub use self::global::*;
 pub use self::metadata::*;

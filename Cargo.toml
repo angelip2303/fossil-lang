@@ -2,12 +2,8 @@
 members = [
     "cli",
     "lib/fossil-lang",
-    "lib/fossil-lsp",
     "lib/fossil-providers",
     "lib/fossil-stdlib",
-]
-exclude = [
-    "editors/tree-sitter-fossil"
 ]
 resolver = "2"
 
@@ -28,10 +24,10 @@ rust-version = "1.88.0"
 # external dependencies
 polars = {version = "0.51.0", features = ["lazy", "json", "http"]}
 tempfile = "3.13"
+thiserror = "2.0.18"
 
 # internal dependencies
 fossil-lang = { path = "./lib/fossil-lang" }
-fossil-lsp = { path = "./lib/fossil-lsp" }
 fossil-providers = { path = "./lib/fossil-providers" }
 fossil-stdlib = { path = "./lib/fossil-stdlib" }
 

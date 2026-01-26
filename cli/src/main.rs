@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use fossil_lang::compiler::{Compiler, CompilerInput};
 use fossil_lang::error::CompileError;
 use fossil_lang::passes::GlobalContext;
-use fossil_lang::runtime::executor::ThirExecutor;
+use fossil_lang::runtime::executor::IrExecutor;
 
 #[derive(Parser)]
 #[command(name = "fossil")]
@@ -77,14 +77,15 @@ fn run_script(script: &PathBuf) -> Result<(), RunError> {
     gcx.register_provider("csv", fossil_providers::csv::CsvProvider);
     gcx.register_provider("sql", fossil_providers::sql::SqlProvider);
     gcx.register_provider("shex", fossil_providers::shex::ShexProvider);
+    gcx.register_provider("shacl", fossil_providers::shacl::ShaclProvider);
     fossil_stdlib::init(&mut gcx);
 
     // 5. Compile using File mode
     let compiler = Compiler::with_context(gcx);
-    let thir = compiler.compile(CompilerInput::File(temp_path))?;
+    let program = compiler.compile(CompilerInput::File(temp_path))?;
 
     // 6. Execute
-    ThirExecutor::execute(thir)?;
+    IrExecutor::execute(program)?;
 
     Ok(())
 }

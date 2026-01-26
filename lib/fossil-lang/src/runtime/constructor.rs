@@ -9,9 +9,9 @@ use std::sync::Arc;
 use polars::prelude::*;
 
 use crate::ast::Loc;
-use crate::ast::thir::{Polytype, Type, TypeId, TypeKind, TypeVar, TypedHir};
 use crate::context::{DefId, Symbol};
 use crate::error::{CompileError, CompileErrorKind, RuntimeError};
+use crate::ir::{Ident, Ir, Polytype, Type, TypeId, TypeKind, TypeVar};
 use crate::passes::GlobalContext;
 use crate::runtime::value::Value;
 use crate::traits::function::{FunctionImpl, RuntimeContext};
@@ -52,7 +52,7 @@ impl RecordConstructorFunction {
 impl FunctionImpl for RecordConstructorFunction {
     fn signature(
         &self,
-        thir: &mut TypedHir,
+        ir: &mut Ir,
         _next_type_var: &mut dyn FnMut() -> TypeVar,
         _gcx: &GlobalContext,
     ) -> Polytype {
@@ -63,13 +63,13 @@ impl FunctionImpl for RecordConstructorFunction {
         let params = self.field_types.clone();
 
         // Return type is the record type (Named type pointing to type_def_id)
-        let return_ty = thir.types.alloc(Type {
+        let return_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
-            kind: TypeKind::Named(self.type_def_id),
+            kind: TypeKind::Named(Ident::Resolved(self.type_def_id)),
         });
 
         // Function type
-        let fn_ty = thir.types.alloc(Type {
+        let fn_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Function(params, return_ty),
         });
@@ -147,9 +147,7 @@ fn value_to_series(value: &Value, name: &str) -> Result<Series, RuntimeError> {
             Ok(Series::new(name.into(), &[df.height() as i64]))
         }
         _ => Err(CompileError::new(
-            CompileErrorKind::Runtime(
-                "Unsupported value type in record constructor".to_string()
-            ),
+            CompileErrorKind::Runtime("Unsupported value type in record constructor".to_string()),
             Loc::generated(),
         )),
     }

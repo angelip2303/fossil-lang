@@ -4,8 +4,7 @@
 //! particularly for generating URIs from data values.
 
 use fossil_lang::ast::Loc;
-use fossil_lang::ast::ast::PrimitiveType;
-use fossil_lang::ast::thir::{Polytype, Type, TypeKind, TypeVar, TypedHir};
+use fossil_lang::ir::{Ir, Polytype, PrimitiveType, Type, TypeKind, TypeVar};
 use fossil_lang::error::RuntimeError;
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
@@ -28,32 +27,32 @@ pub struct StringConcatFunction;
 impl FunctionImpl for StringConcatFunction {
     fn signature(
         &self,
-        thir: &mut TypedHir,
+        ir: &mut Ir,
         _next_type_var: &mut dyn FnMut() -> TypeVar,
         _gcx: &GlobalContext,
     ) -> Polytype {
         // (string, string) -> string
 
         // First parameter: string
-        let string_ty1 = thir.types.alloc(Type {
+        let string_ty1 = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Primitive(PrimitiveType::String),
         });
 
         // Second parameter: string
-        let string_ty2 = thir.types.alloc(Type {
+        let string_ty2 = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Primitive(PrimitiveType::String),
         });
 
         // Return type: string
-        let return_ty = thir.types.alloc(Type {
+        let return_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Primitive(PrimitiveType::String),
         });
 
         // Function type: (string, string) -> string
-        let fn_ty = thir.types.alloc(Type {
+        let fn_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Function(vec![string_ty1, string_ty2], return_ty),
         });
@@ -94,81 +93,5 @@ impl FunctionImpl for StringConcatFunction {
         // Concatenate
         let result = format!("{}{}", s1, s2);
         Ok(Value::String(result.into()))
-    }
-}
-
-/// Convert value to string function implementation
-///
-/// Signature: (T) -> string
-///
-/// Converts various value types to their string representation.
-/// Particularly useful for converting numeric IDs to strings for URI generation.
-///
-/// Supported types:
-/// - Int: Converts to decimal string representation
-/// - String: Returns the string as-is
-/// - Bool: Converts to "true" or "false"
-///
-/// # Example
-/// ```fossil
-/// let id_str = to_string(42)  // "42"
-/// let uri = string::concat("http://example.com/item/", to_string(item.id))
-/// ```
-pub struct ToStringFunction;
-
-impl FunctionImpl for ToStringFunction {
-    fn signature(
-        &self,
-        thir: &mut TypedHir,
-        next_type_var: &mut dyn FnMut() -> TypeVar,
-        _gcx: &GlobalContext,
-    ) -> Polytype {
-        // forall T. (T) -> string
-        let t_var = next_type_var();
-
-        // Parameter: T (type variable - can be anything)
-        let input_ty = thir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Var(t_var),
-        });
-
-        // Return type: string
-        let return_ty = thir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Primitive(PrimitiveType::String),
-        });
-
-        // Function type: (T) -> string
-        let fn_ty = thir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Function(vec![input_ty], return_ty),
-        });
-
-        // Polymorphic type: forall T. (T) -> string
-        Polytype::poly(vec![t_var], fn_ty)
-    }
-
-    fn call(&self, args: Vec<Value>, _: &RuntimeContext) -> Result<Value, RuntimeError> {
-        use fossil_lang::error::{CompileError, CompileErrorKind};
-
-        let value = &args[0];
-
-        let str_repr = match value {
-            Value::Int(i) => i.to_string(),
-            Value::String(s) => s.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Unit => "()".to_string(),
-            _ => {
-                return Err(CompileError::new(
-                    CompileErrorKind::Runtime(
-                        "to_string: unsupported value type (expected int, string, bool, or unit)"
-                            .to_string(),
-                    ),
-                    Loc::generated(),
-                ));
-            }
-        };
-
-        Ok(Value::String(str_repr.into()))
     }
 }

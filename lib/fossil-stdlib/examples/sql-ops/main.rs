@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use fossil_lang::compiler::{Compiler, CompilerInput};
 use fossil_lang::error::CompileError;
 use fossil_lang::passes::GlobalContext;
-use fossil_lang::runtime::executor::ThirExecutor;
+use fossil_lang::runtime::executor::IrExecutor;
 
 const PROGRAM: &str = "lib/fossil-stdlib/examples/sql-ops/sql-ops.fossil";
 
@@ -13,7 +13,7 @@ pub fn main() -> Result<(), CompileError> {
     fossil_stdlib::init(&mut gcx);
 
     let compiler = Compiler::with_context(gcx);
-    let thir = compiler.compile(CompilerInput::File(PathBuf::from(PROGRAM)))?;
-    let _ = ThirExecutor::execute(thir)?;
+    let program = compiler.compile(CompilerInput::File(PathBuf::from(PROGRAM)))?;
+    let _ = IrExecutor::execute(program)?;
     Ok(())
 }

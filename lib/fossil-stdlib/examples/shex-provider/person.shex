@@ -3,9 +3,9 @@ PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 PREFIX ex: <https://example.com/>
 
 ex:PersonShape {
-    foaf:name xsd:string ? ;
-    foaf:age xsd:integer ? ;
-    foaf:mbox xsd:string ?
+    foaf:name xsd:string ;
+    foaf:age xsd:integer ;
+    foaf:mbox xsd:string
 }
 
 ex:OrganizationShape {

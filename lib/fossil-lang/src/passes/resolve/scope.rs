@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 
-use crate::ast::ast::Path;
 use crate::context::{DefId, Symbol};
 
 /// Scope stack for nested scoping
@@ -20,10 +19,6 @@ pub struct Scope {
     pub values: HashMap<Symbol, DefId>,
     /// Type bindings (type definitions)
     pub types: HashMap<Symbol, DefId>,
-    /// Import aliases (module imports)
-    pub imports: HashMap<Symbol, Path>,
-    /// Current module context (for relative path resolution)
-    pub current_module: Option<DefId>,
 }
 
 impl ScopeStack {
@@ -71,26 +66,5 @@ impl ScopeStack {
             .iter()
             .rev()
             .find_map(|s| s.types.get(&name).copied())
-    }
-
-    /// Resolve an import alias to its path
-    #[allow(dead_code)]
-    pub fn resolve_import(&self, alias: Symbol) -> Option<&Path> {
-        self.scopes.iter().rev().find_map(|s| s.imports.get(&alias))
-    }
-
-    /// Get the current module DefId (for relative path resolution)
-    pub fn current_module(&self) -> Option<DefId> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|s| s.current_module)
-    }
-
-    /// Set the current module for the current scope
-    pub fn set_current_module(&mut self, module_id: DefId) {
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.current_module = Some(module_id);
-        }
     }
 }

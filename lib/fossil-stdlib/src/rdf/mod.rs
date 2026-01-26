@@ -31,7 +31,7 @@ pub mod metadata;
 pub use metadata::RdfMetadata;
 
 use fossil_lang::ast::Loc;
-use fossil_lang::ast::thir::{Polytype, Type, TypeKind, TypeVar, TypedHir};
+use fossil_lang::ir::{Ir, Polytype, PrimitiveType, Type, TypeKind, TypeVar};
 use fossil_lang::error::RuntimeError;
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
@@ -172,7 +172,7 @@ pub struct RdfSerializeFunction;
 impl FunctionImpl for RdfSerializeFunction {
     fn signature(
         &self,
-        thir: &mut TypedHir,
+        ir: &mut Ir,
         next_type_var: &mut dyn FnMut() -> TypeVar,
         _gcx: &GlobalContext,
     ) -> Polytype {
@@ -181,25 +181,25 @@ impl FunctionImpl for RdfSerializeFunction {
 
         // First parameter: List<Entity<T>> (represented as List in type system)
         // For now, just use a type variable
-        let list_ty = thir.types.alloc(Type {
+        let list_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Var(t_var),
         });
 
         // Second parameter: string (filename)
-        let filename_ty = thir.types.alloc(Type {
+        let filename_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
-            kind: TypeKind::Primitive(fossil_lang::ast::ast::PrimitiveType::String),
+            kind: TypeKind::Primitive(PrimitiveType::String),
         });
 
         // Output type: Unit
-        let output_ty = thir.types.alloc(Type {
+        let output_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
-            kind: TypeKind::Primitive(fossil_lang::ast::ast::PrimitiveType::Unit),
+            kind: TypeKind::Primitive(PrimitiveType::Unit),
         });
 
         // Function type: (List<T>, string) -> Unit
-        let fn_ty = thir.types.alloc(Type {
+        let fn_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Function(vec![list_ty, filename_ty], output_ty),
         });

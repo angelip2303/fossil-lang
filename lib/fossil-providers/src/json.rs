@@ -5,10 +5,8 @@ use std::sync::Arc;
 
 use fossil_lang::ast::Loc;
 use fossil_lang::ast::ast::{Ast, ProviderArgument, Type, TypeKind};
-use fossil_lang::ast::thir::{
-    Polytype, Type as ThirType, TypeKind as ThirTypeKind, TypeVar, TypedHir,
-};
 use fossil_lang::context::Interner;
+use fossil_lang::ir::{Ident, Ir, Polytype, Type as IrType, TypeKind as IrTypeKind, TypeVar};
 use fossil_lang::error::{ProviderError, RuntimeError};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
@@ -154,7 +152,7 @@ pub struct JsonLoadFunction {
 impl FunctionImpl for JsonLoadFunction {
     fn signature(
         &self,
-        thir: &mut TypedHir,
+        ir: &mut Ir,
         _next_type_var: &mut dyn FnMut() -> TypeVar,
         gcx: &GlobalContext,
     ) -> Polytype {
@@ -168,17 +166,17 @@ impl FunctionImpl for JsonLoadFunction {
             let list_def_id = list_sym.and_then(|sym| gcx.definitions.get_by_symbol(sym).map(|d| d.id()));
 
             // Create Named type for the record type
-            let record_ty = thir.types.alloc(ThirType {
+            let record_ty = ir.types.alloc(IrType {
                 loc: Loc::generated(),
-                kind: ThirTypeKind::Named(def_id),
+                kind: IrTypeKind::Named(Ident::Resolved(def_id)),
             });
 
             if let Some(list_id) = list_def_id {
                 // Return List<RecordType>
-                thir.types.alloc(ThirType {
+                ir.types.alloc(IrType {
                     loc: Loc::generated(),
-                    kind: ThirTypeKind::App {
-                        ctor: list_id,
+                    kind: IrTypeKind::App {
+                        ctor: Ident::Resolved(list_id),
                         args: vec![record_ty],
                     },
                 })
@@ -188,16 +186,16 @@ impl FunctionImpl for JsonLoadFunction {
         } else {
             // Fallback: use type variable
             let t_var = _next_type_var();
-            thir.types.alloc(ThirType {
+            ir.types.alloc(IrType {
                 loc: Loc::generated(),
-                kind: ThirTypeKind::Var(t_var),
+                kind: IrTypeKind::Var(t_var),
             })
         };
 
         // Create function type: () -> List<RecordType>
-        let fn_ty = thir.types.alloc(ThirType {
+        let fn_ty = ir.types.alloc(IrType {
             loc: Loc::generated(),
-            kind: ThirTypeKind::Function(vec![], result_ty),
+            kind: IrTypeKind::Function(vec![], result_ty),
         });
 
         Polytype::mono(fn_ty)

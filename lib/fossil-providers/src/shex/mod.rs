@@ -27,35 +27,26 @@
 //!     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
 //!     name: string,
 //!     #[rdf(uri = "http://xmlns.com/foaf/0.1/age")]
-//!     #[optional]
-//!     age: int
+//!     age: Option<int>
 //! }
 //! ```
 
 use std::fs;
-use std::sync::Arc;
 
 use fossil_lang::ast::Loc;
 use fossil_lang::ast::ast::{
-    Ast, Attribute, AttributeArg, Literal, PrimitiveType, ProviderArgument, RecordField,
+    Ast, Attribute, AttributeArg, Literal, Path, PrimitiveType, ProviderArgument, RecordField,
     Type as AstType, TypeKind as AstTypeKind,
 };
-use fossil_lang::ast::thir::{
-    Polytype, Type as ThirType, TypeKind as ThirTypeKind, TypeVar, TypedHir,
-};
 use fossil_lang::context::Interner;
-use fossil_lang::error::{CompileErrorKind, ProviderError, RuntimeError};
-use fossil_lang::passes::GlobalContext;
-use fossil_lang::runtime::value::Value;
-use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
-use fossil_lang::traits::provider::{
-    FunctionDef, ModuleSpec, ProviderOutput, ProviderParamInfo, TypeProviderImpl,
-};
+use fossil_lang::error::{CompileErrorKind, ProviderError};
+use fossil_lang::traits::provider::{ProviderOutput, ProviderParamInfo, TypeProviderImpl};
 
 use iri_s::IriS;
 use shex_ast::ast::{Schema, ShapeExpr, ShapeExprLabel, TripleExpr};
 use shex_ast::compact::ShExParser;
 
+use crate::shapes::{ShapeField, extract_local_name, xsd_to_fossil_type};
 use crate::utils::*;
 
 /// ShEx Type Provider
@@ -117,21 +108,9 @@ impl TypeProviderImpl for ShexProvider {
             kind: AstTypeKind::Record(fields),
         });
 
-        // Generate module with validate function
-        let module_spec = ModuleSpec {
-            functions: vec![FunctionDef {
-                name: "validate".to_string(),
-                implementation: Arc::new(ShexValidateFunction {
-                    schema_path: path_str,
-                    shape_name,
-                }),
-            }],
-            submodules: vec![],
-        };
-
         Ok(ProviderOutput {
             generated_type: record_ty,
-            module_spec: Some(module_spec),
+            module_spec: None,
         })
     }
 }
@@ -212,27 +191,14 @@ fn parse_shex_schema(content: &str, interner: &mut Interner) -> Result<Schema, P
     })
 }
 
-/// Field information extracted from ShEx
-#[derive(Debug)]
-struct ShexField {
-    /// Field name (derived from predicate local name)
-    name: String,
-    /// Full predicate IRI
-    predicate_uri: String,
-    /// Fossil primitive type
-    fossil_type: PrimitiveType,
-    /// Whether the field is optional (cardinality ?)
-    optional: bool,
-    /// Whether the field is a list (cardinality * or +)
-    is_list: bool,
-}
+// Using ShapeField from crate::shapes
 
 /// Extract fields from a named shape
 fn extract_shape_fields(
     schema: &Schema,
     shape_name: &str,
     interner: &mut Interner,
-) -> Result<Vec<ShexField>, ProviderError> {
+) -> Result<Vec<ShapeField>, ProviderError> {
     // Find shape by name in the schema
     let shapes = schema.shapes().ok_or_else(|| {
         ProviderError::new(
@@ -274,7 +240,7 @@ fn shape_label_matches(label: &ShapeExprLabel, name: &str) -> bool {
 /// Recursively extract fields from a shape expression
 fn extract_fields_from_shape_expr(
     shape_expr: &ShapeExpr,
-    fields: &mut Vec<ShexField>,
+    fields: &mut Vec<ShapeField>,
     schema: &Schema,
 ) {
     match shape_expr {
@@ -313,7 +279,7 @@ fn extract_fields_from_shape_expr(
 /// Extract fields from triple expression
 fn extract_fields_from_triple_expr(
     triple_expr: &TripleExpr,
-    fields: &mut Vec<ShexField>,
+    fields: &mut Vec<ShapeField>,
     schema: &Schema,
 ) {
     match triple_expr {
@@ -334,18 +300,28 @@ fn extract_fields_from_triple_expr(
                 .map(|ve| shex_value_to_fossil_type(ve.as_ref()))
                 .unwrap_or(PrimitiveType::String);
 
-            // Cardinality - min/max are i32
+            // Cardinality mapping:
+            // | ShEx      | min | max | Fossil Type  |
+            // |-----------|-----|-----|--------------|
+            // | (default) | 1   | 1   | T            |
+            // | ?         | 0   | 1   | Option<T>    |
+            // | *         | 0   | -1  | [T] (List)   |
+            // | +         | 1   | -1  | [T] (List)   |
+            // Note: In ShEx, -1 means unbounded, default cardinality is {1,1}
             let min_val = min.unwrap_or(1);
-            let max_val = *max; // max is already Option<i32>
+            let max_val = max.unwrap_or(1);
 
-            let optional = min_val == 0;
-            let is_list = max_val.map(|m| m > 1).unwrap_or(true); // unbounded = list
+            // is_list: max == -1 (unbounded) OR max > 1
+            let is_list = max_val == -1 || max_val > 1;
 
-            fields.push(ShexField {
+            // optional: only when min=0 AND max=1 (the ? cardinality)
+            let optional = min_val == 0 && max_val == 1;
+
+            fields.push(ShapeField {
                 name: field_name,
                 predicate_uri,
                 fossil_type,
-                optional: optional && !is_list,
+                optional,
                 is_list,
             });
         }
@@ -360,23 +336,7 @@ fn extract_fields_from_triple_expr(
     }
 }
 
-/// Extract local name from IRI (last segment after # or /)
-fn extract_local_name(iri: &str) -> String {
-    // Remove angle brackets if present
-    let iri = iri.trim_start_matches('<').trim_end_matches('>');
-
-    // Try fragment first
-    if let Some(pos) = iri.rfind('#') {
-        return iri[pos + 1..].to_string();
-    }
-
-    // Then try last path segment
-    if let Some(pos) = iri.rfind('/') {
-        return iri[pos + 1..].to_string();
-    }
-
-    iri.to_string()
-}
+// extract_local_name is now imported from crate::shapes
 
 /// Map ShEx value expression to Fossil type
 fn shex_value_to_fossil_type(shape_expr: &ShapeExpr) -> PrimitiveType {
@@ -384,7 +344,7 @@ fn shex_value_to_fossil_type(shape_expr: &ShapeExpr) -> PrimitiveType {
         ShapeExpr::NodeConstraint(nc) => {
             if let Some(dt) = nc.datatype() {
                 let iri_str = dt.to_string();
-                xsd_str_to_fossil_type(&iri_str)
+                xsd_to_fossil_type(&iri_str)
             } else {
                 PrimitiveType::String
             }
@@ -393,77 +353,62 @@ fn shex_value_to_fossil_type(shape_expr: &ShapeExpr) -> PrimitiveType {
     }
 }
 
-/// Map XSD datatype string to Fossil primitive type
-fn xsd_str_to_fossil_type(iri_str: &str) -> PrimitiveType {
-    // Common XSD types
-    if iri_str.contains("string") {
-        PrimitiveType::String
-    } else if iri_str.contains("integer")
-        || iri_str.contains("int")
-        || iri_str.contains("long")
-        || iri_str.contains("short")
-    {
-        PrimitiveType::Int
-    } else if iri_str.contains("float") || iri_str.contains("double") || iri_str.contains("decimal")
-    {
-        PrimitiveType::Float
-    } else if iri_str.contains("boolean") {
-        PrimitiveType::Bool
-    } else {
-        // Default to string for unknown types (including IRIs)
-        PrimitiveType::String
-    }
-}
+// xsd_to_fossil_type is now imported from crate::shapes
 
 /// Convert ShEx fields to AST record fields
 fn shex_fields_to_ast_fields(
-    shex_fields: Vec<ShexField>,
+    shape_fields: Vec<ShapeField>,
     ast: &mut Ast,
     interner: &mut Interner,
 ) -> Vec<RecordField> {
-    shex_fields
+    shape_fields
         .into_iter()
         .map(|field| {
             let field_name = interner.intern(&field.name);
 
-            // Create the base type
+            // Create the base primitive type
             let base_ty = ast.types.alloc(AstType {
                 loc: Loc::generated(),
                 kind: AstTypeKind::Primitive(field.fossil_type),
             });
 
-            // Wrap in List if needed
+            // Apply cardinality wrapping:
+            // - is_list: wrap in List<T>
+            // - optional: wrap in Option<T>
+            // - neither: use base type directly
             let ty = if field.is_list {
+                // List<T>
                 ast.types.alloc(AstType {
                     loc: Loc::generated(),
                     kind: AstTypeKind::List(base_ty),
                 })
+            } else if field.optional {
+                // Option<T> using TypeKind::App
+                let option_sym = interner.intern("Option");
+                ast.types.alloc(AstType {
+                    loc: Loc::generated(),
+                    kind: AstTypeKind::App {
+                        ctor: Path::Simple(option_sym),
+                        args: vec![base_ty],
+                    },
+                })
             } else {
+                // Required field: T
                 base_ty
             };
 
-            // Build attributes
-            let mut attrs = Vec::new();
-
-            // Add #[rdf(uri = "...")] attribute
+            // Build attributes - only #[rdf(uri = "...")] now
+            // Option<T> expresses optionality in the type, no need for #[optional] attribute
             let rdf_attr_name = interner.intern("rdf");
             let uri_key = interner.intern("uri");
-            attrs.push(Attribute {
+            let attrs = vec![Attribute {
                 name: rdf_attr_name,
                 args: vec![AttributeArg {
                     key: uri_key,
                     value: Literal::String(interner.intern(&field.predicate_uri)),
                 }],
-            });
-
-            // Add #[optional] attribute if needed
-            if field.optional {
-                let optional_attr_name = interner.intern("optional");
-                attrs.push(Attribute {
-                    name: optional_attr_name,
-                    args: vec![],
-                });
-            }
+                loc: Loc::generated(),
+            }];
 
             RecordField {
                 name: field_name,
@@ -472,66 +417,4 @@ fn shex_fields_to_ast_fields(
             }
         })
         .collect()
-}
-
-/// Validate function implementation that uses rudof for ShEx validation
-pub struct ShexValidateFunction {
-    schema_path: String,
-    shape_name: String,
-}
-
-impl FunctionImpl for ShexValidateFunction {
-    fn signature(
-        &self,
-        thir: &mut TypedHir,
-        next_type_var: &mut dyn FnMut() -> TypeVar,
-        _gcx: &GlobalContext,
-    ) -> Polytype {
-        // Signature: forall T. (Entity<T>) -> bool
-        let t_var = next_type_var();
-
-        // Create type variable for input
-        let input_ty = thir.types.alloc(ThirType {
-            loc: Loc::generated(),
-            kind: ThirTypeKind::Var(t_var),
-        });
-
-        // Return type is bool
-        let bool_ty = thir.types.alloc(ThirType {
-            loc: Loc::generated(),
-            kind: ThirTypeKind::Primitive(PrimitiveType::Bool),
-        });
-
-        // Create function type: (T) -> bool
-        let fn_ty = thir.types.alloc(ThirType {
-            loc: Loc::generated(),
-            kind: ThirTypeKind::Function(vec![input_ty], bool_ty),
-        });
-
-        Polytype::poly(vec![t_var], fn_ty)
-    }
-
-    fn call(&self, args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
-        use fossil_lang::error::{CompileError, CompileErrorKind};
-
-        if args.is_empty() {
-            return Err(CompileError::new(
-                CompileErrorKind::Runtime("validate requires an argument".into()),
-                Loc::generated(),
-            ));
-        }
-
-        // For now, always return true (placeholder implementation)
-        // Full validation would require:
-        // 1. Converting the Value to RDF triples
-        // 2. Loading the ShEx schema with rudof
-        // 3. Running the validator
-        //
-        // This is left as a placeholder because full RDF conversion
-        // depends on the Entity representation in the stdlib
-
-        // TODO: Implement full ShEx validation using shex_validation crate
-
-        Ok(Value::Bool(true))
-    }
 }

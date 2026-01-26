@@ -1,21 +1,22 @@
 //! Compiler orchestration module
 //!
 //! This module coordinates the compilation pipeline:
-//! Source -> Parse -> ImportResolve -> Resolve -> Expand -> Lower -> TypeCheck
+//! Source -> Parse -> Expand -> Convert to IR -> Resolve -> TypeCheck
+//!
+//! The unified IR-based pipeline:
+//! 1. Parse source code into AST
+//! 2. Expand type providers (still on AST)
+//! 3. Convert AST to IR
+//! 4. Resolve names in IR
+//! 5. Type check IR
 
 use std::path::PathBuf;
 
+use crate::context::extract_pending_type_metadata;
 use crate::error::CompileError;
+use crate::ir;
 use crate::passes::{
-    GlobalContext,
-    ThirProgram,
-    ImportResolver,
-    ModuleLoader,
-    parse::Parser,
-    resolve::NameResolver,
-    expand::ProviderExpander,
-    lower::HirLowering,
-    typecheck::TypeChecker,
+    expand::ProviderExpander, parse::Parser, typecheck::TypeChecker, GlobalContext, IrProgram,
 };
 
 /// Result of compilation with access to the GlobalContext
@@ -23,25 +24,9 @@ use crate::passes::{
 /// This struct provides both the compilation result (success or errors)
 /// and access to the GlobalContext, which contains the interner needed
 /// for formatting error messages with resolved symbol names.
-///
-/// # Example
-/// ```rust,ignore
-/// let compiler = Compiler::new();
-/// let result = compiler.compile_with_context(input);
-///
-/// if let Some(ref program) = result.program {
-///     // Use the compiled program
-/// }
-///
-/// for error in &result.errors {
-///     // Format errors with proper symbol names
-///     let message = error.message_with_interner(&result.gcx.interner);
-///     println!("{}", message);
-/// }
-/// ```
 pub struct CompilationResult {
     /// The compiled program (if compilation succeeded)
-    pub program: Option<ThirProgram>,
+    pub program: Option<IrProgram>,
     /// Compilation errors (empty if successful)
     pub errors: Vec<CompileError>,
     /// The GlobalContext containing the interner for symbol resolution
@@ -61,26 +46,17 @@ impl CompilationResult {
 }
 
 /// Compiler input options
-///
-/// Supports three compilation modes:
-/// - Single file compilation
-/// - Project directory compilation (looks for main.fossil)
-/// - String compilation (for REPL/tests)
 #[derive(Debug, Clone)]
 pub enum CompilerInput {
     /// Compile a single file as entry point
     File(PathBuf),
-    /// Compile a project directory (searches for main.fossil)
-    Directory(PathBuf),
-    /// Compile source string (REPL/testing mode)
-    String { src: String, name: String },
 }
 
 pub struct Compiler {
     /// The source ID for error reporting
     source_id: usize,
     /// Optional custom GlobalContext (for provider registration, etc.)
-    gcx: Option<crate::passes::GlobalContext>,
+    gcx: Option<GlobalContext>,
 }
 
 impl Compiler {
@@ -93,7 +69,7 @@ impl Compiler {
 
     /// Create a compiler with a custom GlobalContext
     ///
-    /// This allows registering type providers (F# style):
+    /// This allows registering type providers:
     /// ```ignore
     /// use fossil_lang::compiler::Compiler;
     /// use fossil_lang::passes::GlobalContext;
@@ -105,7 +81,7 @@ impl Compiler {
     /// let compiler = Compiler::with_context(gcx);
     /// compiler.compile(src)?;
     /// ```
-    pub fn with_context(gcx: crate::passes::GlobalContext) -> Self {
+    pub fn with_context(gcx: GlobalContext) -> Self {
         Self {
             source_id: 0,
             gcx: Some(gcx),
@@ -114,329 +90,90 @@ impl Compiler {
 
     /// Compile input through the full pipeline
     ///
-    /// Supports three compilation modes via CompilerInput:
-    /// - File: Compile a single .fossil file (can have imports)
-    /// - Directory: Compile project (searches for main.fossil as entry)
-    /// - String: Compile source string (REPL/testing, single module)
-    ///
-    /// Pipeline: Parse → ImportResolve → Expand → Resolve → Lower → TypeCheck
-    pub fn compile(&self, input: CompilerInput) -> Result<ThirProgram, CompileError> {
+    /// Pipeline: Parse → Expand → Convert to IR → Resolve → TypeCheck
+    pub fn compile(&self, input: CompilerInput) -> Result<IrProgram, CompileError> {
         match input {
-            CompilerInput::File(path) => {
-                // Compile file as project with parent directory as root
-                let root_dir = path
-                    .parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| std::env::current_dir().expect("Failed to get current directory"));
-                self.compile_project(root_dir, path)
-            }
-            CompilerInput::Directory(root_dir) => {
-                // Search for main.fossil as entry point
-                let entry_point = root_dir.join("main.fossil");
-                if !entry_point.exists() {
-                    return Err(CompileError::new(
+            CompilerInput::File(path) => self.compile_file(path),
+        }
+    }
+
+    /// Compile a single file
+    ///
+    /// Pipeline: Parse → Expand → Convert to IR → Resolve → TypeCheck
+    fn compile_file(&self, path: PathBuf) -> Result<IrProgram, CompileError> {
+        // Read source file
+        let src = std::fs::read_to_string(&path).map_err(|e| {
+            CompileError::new(
+                crate::error::CompileErrorKind::Runtime(format!(
+                    "Failed to read file '{}': {}",
+                    path.display(),
+                    e
+                )),
+                crate::ast::Loc::generated(),
+            )
+        })?;
+
+        // Get or create GlobalContext
+        let gcx = self.gcx.clone().unwrap_or_default();
+
+        // Phase 1: Parse source → AST
+        let parsed = Parser::parse_with_context(&src, self.source_id, gcx).map_err(|errors| {
+            errors.0.into_iter().next().unwrap_or_else(|| {
+                CompileError::new(
+                    crate::error::CompileErrorKind::Runtime("Parse failed".to_string()),
+                    crate::ast::Loc::generated(),
+                )
+            })
+        })?;
+
+        // Phase 2: Expand type providers (still on AST)
+        let (expanded_ast, mut gcx) = ProviderExpander::new((parsed.ast, parsed.gcx))
+            .expand()
+            .map_err(|errors| {
+                errors.0.into_iter().next().unwrap_or_else(|| {
+                    CompileError::new(
                         crate::error::CompileErrorKind::Runtime(
-                            "No main.fossil found in project directory".into()
+                            "Provider expansion failed".to_string(),
                         ),
                         crate::ast::Loc::generated(),
-                    ));
-                }
-                self.compile_project(root_dir, entry_point)
-            }
-            CompilerInput::String { src, name: _ } => {
-                // REPL/testing mode: single module without file imports
-                self.compile_string(&src)
-            }
-        }
-    }
-
-    /// Compile a multi-file project
-    ///
-    /// Uses ImportResolverWithLoader to recursively load all imports,
-    /// detect circular dependencies, and compile in topological order.
-    ///
-    /// NOTE: Current implementation processes modules individually in topological order.
-    /// Future enhancement: Process all modules together with cross-module type checking.
-    fn compile_project(
-        &self,
-        root_dir: PathBuf,
-        entry_point: PathBuf,
-    ) -> Result<ThirProgram, CompileError> {
-        // Phase 1: Multi-module import resolution with file loading
-        let loader = ModuleLoader::new(root_dir);
-        let gcx = self.gcx.clone().unwrap_or_default();
-        let resolver = ImportResolver::new_with_loader(loader, gcx);
-
-        let mut multi_ast = resolver.resolve_all(entry_point)?;
-
-        // For now, we process each module individually in topological order
-        // TODO: Extend pipeline to compile all modules together with cross-module resolution
-        //
-        // Current strategy: Compile only the entry module (last in topological order)
-        // This works because imports are already validated by ImportResolverWithLoader
-        let entry_module_id = *multi_ast.order.last()
-            .ok_or_else(|| CompileError::new(
-                crate::error::CompileErrorKind::Runtime("No modules to compile".into()),
-                crate::ast::Loc::generated(),
-            ))?;
-
-        let entry_ast = multi_ast.modules.remove(&entry_module_id)
-            .ok_or_else(|| CompileError::new(
-                crate::error::CompileErrorKind::Runtime("Entry module not found".into()),
-                crate::ast::Loc::generated(),
-            ))?;
-
-        // Phase 2: Expand type providers
-        let expanded = ProviderExpander::new((entry_ast, multi_ast.gcx)).expand()
-            .map_err(|errors| {
-                // TODO(Phase 2.2): Return all errors once pipeline supports CompileErrors
-                errors.0.into_iter().next()
-                    .unwrap_or_else(|| CompileError::new(
-                        crate::error::CompileErrorKind::Runtime("Provider expansion failed".to_string()),
-                        crate::ast::Loc::generated()
-                    ))
+                    )
+                })
             })?;
 
-        // Phase 3: Name Resolution
-        let mut name_resolver = NameResolver::new(expanded.0, expanded.1);
-        name_resolver.set_module_context(entry_module_id);
-        let resolved = name_resolver.resolve()
-            .map_err(|errors| {
-                // TODO(Phase 2.2): Return all errors once pipeline supports CompileErrors
-                errors.0.into_iter().next()
-                    .unwrap_or_else(|| CompileError::new(
-                        crate::error::CompileErrorKind::Runtime("Name resolution failed".to_string()),
-                        crate::ast::Loc::generated()
-                    ))
-            })?;
+        // Phase 2.5: Extract type metadata from AST before conversion
+        // This captures field attributes (like #[rdf(uri = "...")]) from record types
+        // and stores them by type name. The IrResolver will transfer to DefId keys later.
+        extract_pending_type_metadata(&expanded_ast, &mut gcx);
 
-        // Phase 4: Lower AST -> HIR
-        let hir = HirLowering::new(resolved).lower()
-            .map_err(|errors| {
-                // TODO(Phase 2.2): Return all errors once pipeline supports CompileErrors
-                errors.0.into_iter().next()
-                    .unwrap_or_else(|| CompileError::new(
-                        crate::error::CompileErrorKind::Runtime("Lowering failed".to_string()),
-                        crate::ast::Loc::generated()
-                    ))
-            })?;
+        // Phase 3: Convert AST → IR
+        let ir = ir::ast_to_ir(expanded_ast);
 
-        // Phase 5: Type Check HIR -> THIR
-        let thir = TypeChecker::new(hir).check()
-            .map_err(|errors| {
-                // TODO(Phase 2.2): Return all errors once pipeline supports CompileErrors
-                errors.0.into_iter().next()
-                    .unwrap_or_else(|| CompileError::new(
-                        crate::error::CompileErrorKind::Runtime("Type checking failed".to_string()),
-                        crate::ast::Loc::generated()
-                    ))
-            })?;
-
-        Ok(thir)
-    }
-
-    /// Compile source string (REPL/testing mode)
-    ///
-    /// Simplified pipeline for single-module compilation without file imports.
-    /// Uses the original ImportResolver for in-memory validation.
-    fn compile_string(&self, src: &str) -> Result<ThirProgram, CompileError> {
-        // Phase 1: Parse source -> AST
-        let parsed = if let Some(ref custom_gcx) = self.gcx {
-            Parser::parse_with_context(src, self.source_id, custom_gcx.clone())
+        // Phase 4: Resolve names in IR
+        let (ir, gcx) =
+            ir::IrResolver::new(ir, gcx)
+                .resolve()
                 .map_err(|errors| {
-                    // TODO(Phase 2.2): Return all errors once pipeline supports CompileErrors
-                    errors.0.into_iter().next()
-                        .unwrap_or_else(|| CompileError::new(
-                            crate::error::CompileErrorKind::Parse(crate::context::Symbol::synthetic()),
-                            crate::ast::Loc::generated()
-                        ))
-                })?
-        } else {
-            Parser::parse(src, self.source_id)
-                .map_err(|errors| {
-                    // TODO(Phase 2.2): Return all errors once pipeline supports CompileErrors
-                    errors.0.into_iter().next()
-                        .unwrap_or_else(|| CompileError::new(
-                            crate::error::CompileErrorKind::Parse(crate::context::Symbol::synthetic()),
-                            crate::ast::Loc::generated()
-                        ))
-                })?
-        };
+                    errors.0.into_iter().next().unwrap_or_else(|| {
+                        CompileError::new(
+                            crate::error::CompileErrorKind::Runtime(
+                                "Name resolution failed".to_string(),
+                            ),
+                            crate::ast::Loc::generated(),
+                        )
+                    })
+                })?;
 
-        // Phase 2: Import Resolution - validate imports exist (in-memory only)
-        let (ast, gcx) = ImportResolver::new(parsed.ast, parsed.gcx).resolve()
-            .map_err(|errors| {
-                // TODO(Phase 2.2): Return all errors once pipeline supports CompileErrors
-                errors.0.into_iter().next()
-                    .unwrap_or_else(|| CompileError::new(
-                        crate::error::CompileErrorKind::Runtime("Import resolution failed".to_string()),
-                        crate::ast::Loc::generated()
-                    ))
-            })?;
+        // Phase 5: Type check IR
+        let program = TypeChecker::new(ir, gcx).check().map_err(|errors| {
+            errors.0.into_iter().next().unwrap_or_else(|| {
+                CompileError::new(
+                    crate::error::CompileErrorKind::Runtime("Type checking failed".to_string()),
+                    crate::ast::Loc::generated(),
+                )
+            })
+        })?;
 
-        // Phase 3: Expand type providers
-        let expanded = ProviderExpander::new((ast, gcx)).expand()
-            .map_err(|errors| {
-                // TODO(Phase 2.2): Return all errors once pipeline supports CompileErrors
-                errors.0.into_iter().next()
-                    .unwrap_or_else(|| CompileError::new(
-                        crate::error::CompileErrorKind::Runtime("Provider expansion failed".to_string()),
-                        crate::ast::Loc::generated()
-                    ))
-            })?;
-
-        // Phase 4: Name Resolution
-        let resolved = NameResolver::new(expanded.0, expanded.1).resolve()
-            .map_err(|errors| {
-                // TODO(Phase 2.2): Return all errors once pipeline supports CompileErrors
-                errors.0.into_iter().next()
-                    .unwrap_or_else(|| CompileError::new(
-                        crate::error::CompileErrorKind::Runtime("Name resolution failed".to_string()),
-                        crate::ast::Loc::generated()
-                    ))
-            })?;
-
-        // Phase 5: Lower AST -> HIR
-        let hir = HirLowering::new(resolved).lower()
-            .map_err(|errors| {
-                // TODO(Phase 2.2): Return all errors once pipeline supports CompileErrors
-                errors.0.into_iter().next()
-                    .unwrap_or_else(|| CompileError::new(
-                        crate::error::CompileErrorKind::Runtime("Lowering failed".to_string()),
-                        crate::ast::Loc::generated()
-                    ))
-            })?;
-
-        // Phase 6: Type Check HIR -> THIR
-        let thir = TypeChecker::new(hir).check()
-            .map_err(|errors| {
-                // TODO(Phase 2.2): Return all errors once pipeline supports CompileErrors
-                errors.0.into_iter().next()
-                    .unwrap_or_else(|| CompileError::new(
-                        crate::error::CompileErrorKind::Runtime("Type checking failed".to_string()),
-                        crate::ast::Loc::generated()
-                    ))
-            })?;
-
-        Ok(thir)
-    }
-
-    /// Compile source string and return result with GlobalContext
-    ///
-    /// This method is designed for IDE/LSP integration where you need access
-    /// to the GlobalContext (and its interner) even when compilation fails,
-    /// in order to format error messages with proper symbol names.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let compiler = Compiler::new();
-    /// let result = compiler.compile_with_diagnostics(src);
-    ///
-    /// for error in &result.errors {
-    ///     let message = error.message_with_interner(&result.gcx.interner);
-    ///     println!("{}", message);
-    /// }
-    /// ```
-    pub fn compile_with_diagnostics(&self, src: &str) -> CompilationResult {
-        // Phase 1: Parse source -> AST
-        let parsed = if let Some(ref custom_gcx) = self.gcx {
-            match Parser::parse_with_context(src, self.source_id, custom_gcx.clone()) {
-                Ok(p) => p,
-                Err(errors) => {
-                    return CompilationResult {
-                        program: None,
-                        errors: errors.0,
-                        gcx: custom_gcx.clone(),
-                    };
-                }
-            }
-        } else {
-            match Parser::parse(src, self.source_id) {
-                Ok(p) => p,
-                Err(errors) => {
-                    return CompilationResult {
-                        program: None,
-                        errors: errors.0,
-                        gcx: GlobalContext::default(),
-                    };
-                }
-            }
-        };
-
-        let gcx_after_parse = parsed.gcx.clone();
-
-        // Phase 2: Import Resolution
-        let (ast, gcx) = match ImportResolver::new(parsed.ast, parsed.gcx).resolve() {
-            Ok(result) => result,
-            Err(errors) => {
-                return CompilationResult {
-                    program: None,
-                    errors: errors.0,
-                    gcx: gcx_after_parse,
-                };
-            }
-        };
-
-        // Phase 3: Expand type providers
-        let expanded = match ProviderExpander::new((ast, gcx)).expand() {
-            Ok(result) => result,
-            Err(errors) => {
-                return CompilationResult {
-                    program: None,
-                    errors: errors.0,
-                    gcx: gcx_after_parse,
-                };
-            }
-        };
-
-        let gcx_after_expand = expanded.1.clone();
-
-        // Phase 4: Name Resolution
-        let resolved = match NameResolver::new(expanded.0, expanded.1).resolve() {
-            Ok(result) => result,
-            Err(errors) => {
-                return CompilationResult {
-                    program: None,
-                    errors: errors.0,
-                    gcx: gcx_after_expand,
-                };
-            }
-        };
-
-        let gcx_after_resolve = resolved.gcx.clone();
-
-        // Phase 5: Lower AST -> HIR
-        let hir = match HirLowering::new(resolved).lower() {
-            Ok(result) => result,
-            Err(errors) => {
-                return CompilationResult {
-                    program: None,
-                    errors: errors.0,
-                    gcx: gcx_after_resolve,
-                };
-            }
-        };
-
-        let gcx_after_lower = hir.gcx.clone();
-
-        // Phase 6: Type Check HIR -> THIR
-        match TypeChecker::new(hir).check() {
-            Ok(thir) => {
-                let gcx = thir.gcx.clone();
-                CompilationResult {
-                    program: Some(thir),
-                    errors: Vec::new(),
-                    gcx,
-                }
-            }
-            Err(errors) => {
-                CompilationResult {
-                    program: None,
-                    errors: errors.0,
-                    gcx: gcx_after_lower,
-                }
-            }
-        }
+        Ok(program)
     }
 }
 

@@ -140,6 +140,58 @@ impl AttributeData {
     }
 }
 
+/// Extract type metadata from AST and store in pending_type_metadata
+///
+/// This function iterates through all Type statements in the AST,
+/// extracts field attributes from record types, and stores them
+/// keyed by the type name Symbol. During IR resolution, this metadata
+/// will be transferred to type_metadata keyed by DefId.
+pub fn extract_pending_type_metadata(
+    ast: &crate::ast::ast::Ast,
+    gcx: &mut crate::passes::GlobalContext,
+) {
+    use crate::ast::ast::{StmtKind, TypeKind};
+
+    for &stmt_id in &ast.root {
+        let stmt = ast.stmts.get(stmt_id);
+
+        if let StmtKind::Type { name, ty } = &stmt.kind {
+            let ty = ast.types.get(*ty);
+
+            if let TypeKind::Record(fields) = &ty.kind {
+                // Use a placeholder DefId (0) since we don't have the real one yet
+                let mut metadata = TypeMetadata::new(DefId::new(0));
+
+                for field in fields {
+                    if !field.attrs.is_empty() {
+                        let mut field_meta = FieldMetadata::new();
+
+                        for attr in &field.attrs {
+                            // Convert Vec<AttributeArg> to HashMap<Symbol, Literal>
+                            let args = attr
+                                .args
+                                .iter()
+                                .map(|arg| (arg.key, arg.value.clone()))
+                                .collect();
+
+                            field_meta.attributes.push(AttributeData {
+                                name: attr.name,
+                                args,
+                            });
+                        }
+
+                        metadata.field_metadata.insert(field.name, field_meta);
+                    }
+                }
+
+                if !metadata.is_empty() {
+                    gcx.pending_type_metadata.insert(*name, metadata);
+                }
+            }
+        }
+    }
+}
+
 /// A typed wrapper for attribute access with convenient string-based lookups
 ///
 /// This provides a more ergonomic API for accessing attribute arguments

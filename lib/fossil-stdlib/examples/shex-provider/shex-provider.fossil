@@ -1,5 +1,11 @@
-type PersonData = csv!("lib/fossil-stdlib/examples/shex-provider/people.csv")
-type Person = shex!("lib/fossil-stdlib/examples/shex-provider/person.shex", shape: "PersonShape")
+const ROOT = "lib/fossil-stdlib/examples/shex-provider"
+
+type PersonData = csv!("${ROOT}/people.csv")
+type Person = shex!("${ROOT}/person.shex", shape: "PersonShape")
+
+impl ToString for PersonData {
+    to_string = fn(self) -> "PersonData"
+}
 
 let csv_to_rdf = fn(row) -> {
     Person(row.name, row.age, row.name)
@@ -8,4 +14,4 @@ let csv_to_rdf = fn(row) -> {
 
 PersonData::load()
 |> List::map(csv_to_rdf)
-|> Rdf::serialize("results.ttl")
+|> Rdf::serialize("${ROOT}/results.ttl")
