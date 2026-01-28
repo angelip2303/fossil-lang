@@ -97,9 +97,6 @@ pub struct RecordsPlan {
     pub type_def_id: Option<DefId>,
     /// Schema of the output (known at compile-time)
     pub schema: Arc<Schema>,
-    /// Identity expression for entity URIs (used by RDF serialization)
-    /// This is a Polars expression that produces the subject URI for each row.
-    pub identity_expr: Option<Expr>,
 }
 
 impl RecordsPlan {
@@ -110,7 +107,6 @@ impl RecordsPlan {
             transforms: Vec::new(),
             type_def_id: None,
             schema: Arc::new(schema),
-            identity_expr: None,
         }
     }
 
@@ -121,7 +117,6 @@ impl RecordsPlan {
             transforms: Vec::new(),
             type_def_id: Some(type_def_id),
             schema: Arc::new(schema),
-            identity_expr: None,
         }
     }
 
@@ -135,7 +130,6 @@ impl RecordsPlan {
             transforms: Vec::new(),
             type_def_id: Some(type_def_id),
             schema: Arc::new(schema),
-            identity_expr: None,
         }
     }
 
@@ -146,7 +140,6 @@ impl RecordsPlan {
             transforms: Vec::new(),
             type_def_id: None,
             schema: Arc::new(Schema::default()),
-            identity_expr: None,
         }
     }
 

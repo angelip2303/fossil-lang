@@ -93,9 +93,13 @@ where
             ctx.alloc_stmt(StmtKind::Const { name, value }, ctx.to_loc(e.span()))
         });
 
-    // Use .then() instead of .ignore_then() to preserve full span
-    // Also detect invalid type annotation pattern: `type Name: Foo = Bar`
-    let type_stmt = just(Token::Type)
+    // Type statement with optional leading attributes:
+    // #[rdf(type = "...", id = "...")]
+    // type Name = Type
+    let type_stmt = parse_attribute(ctx)
+        .repeated()
+        .collect::<Vec<_>>()
+        .then(just(Token::Type))
         .then(parse_symbol(ctx))
         .then(
             // Detect invalid type annotation pattern: `: SomeType`
@@ -107,14 +111,14 @@ where
         )
         .then_ignore(just(Token::Eq))
         .then(parse_type(ctx))
-        .validate(|(((_, name), invalid_annotation_span), ty), e, emitter| {
+        .validate(|((((attrs, _), name), invalid_annotation_span), ty), e, emitter| {
             if let Some(annotation_span) = invalid_annotation_span {
                 emitter.emit(Rich::custom(
                     annotation_span,
                     "Type declarations cannot have type annotations. Remove the `: <type>` after the name."
                 ));
             }
-            ctx.alloc_stmt(StmtKind::Type { name, ty }, ctx.to_loc(e.span()))
+            ctx.alloc_stmt(StmtKind::Type { name, ty, attrs }, ctx.to_loc(e.span()))
         });
 
     // Trait method signature: `name: type`
@@ -552,17 +556,37 @@ fn parse_interpolation_segments(s: &str) -> Option<(Vec<&str>, Vec<(&str, usize)
     Some((parts, exprs))
 }
 
+/// Parse attribute key - accepts identifiers AND reserved keywords like 'type'
+///
+/// Inside attributes, we allow keywords to be used as keys:
+/// `#[rdf(type = "...", id = "...")]`
+fn parse_attr_key<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
+where
+    I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
+{
+    select! {
+        Token::Identifier(ident) => ctx.intern(ident),
+        Token::Type => ctx.intern("type"),
+        Token::Trait => ctx.intern("trait"),
+        Token::Impl => ctx.intern("impl"),
+        Token::For => ctx.intern("for"),
+        Token::Let => ctx.intern("let"),
+        Token::Const => ctx.intern("const"),
+    }
+}
+
 /// Parse attribute: #[name(key = value, key2 = value2)]
 ///
 /// Examples:
 /// - `#[rdf(uri = "http://example.com")]`
-/// - `#[rdf(uri = "http://example.com", required = true)]`
+/// - `#[rdf(type = "http://schema.org/Person", id = "...")]`
 fn parse_attribute<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Attribute, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
     // Parse a single named argument: key = value
-    let named_arg = parse_symbol(ctx)
+    // Use parse_attr_key to allow keywords like 'type' as keys
+    let named_arg = parse_attr_key(ctx)
         .then_ignore(just(Token::Eq))
         .then(parse_literal(ctx))
         .map(|(key, value)| AttributeArg { key, value });

@@ -116,7 +116,7 @@ impl ProviderExpander {
         let (type_name, type_id) = {
             let stmt = self.ast.stmts.get(stmt_id);
             match &stmt.kind {
-                StmtKind::Type { name, ty } => (*name, *ty),
+                StmtKind::Type { name, ty, .. } => (*name, *ty),
                 _ => return Ok(()),
             }
         };

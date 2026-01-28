@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "cli",
-    "lib/fossil-lang",
+    "lib/fossil-lang", "lib/fossil-macros",
     "lib/fossil-providers",
     "lib/fossil-stdlib",
 ]
@@ -28,6 +28,7 @@ thiserror = "2.0.18"
 
 # internal dependencies
 fossil-lang = { path = "./lib/fossil-lang" }
+fossil-macros = { path = "./lib/fossil-macros" }
 fossil-providers = { path = "./lib/fossil-providers" }
 fossil-stdlib = { path = "./lib/fossil-stdlib" }
 

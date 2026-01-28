@@ -92,7 +92,6 @@ impl FunctionImpl for MapFunction {
                     }
                     final_plan.type_def_id = traced_plan.type_def_id;
                     final_plan.schema = traced_plan.schema;
-                    final_plan.identity_expr = traced_plan.identity_expr;
                     Ok(Value::Records(final_plan))
                 } else {
                     // Not a pending transformation - use the traced plan directly
@@ -247,7 +246,6 @@ impl FunctionImpl for JoinFunction {
             transforms: Vec::new(),
             type_def_id: None,
             schema: std::sync::Arc::new(combined_schema),
-            identity_expr: None,
         };
 
         Ok(Value::Records(result_plan))

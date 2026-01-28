@@ -1,19 +1,18 @@
-type Input = csv!("tests/rmltc0002a_csv/student.csv")
+type Input = csv!("tests/RMLTC0002c-CSV/student.csv")
 
-#[rdf(type = "http://xmlns.com/foaf/0.1/Person")]
+#[rdf(type = "http://xmlns.com/foaf/0.1/Person", id = "http://example.com/${ID}/${Name}")]
 type Output = {
     #[rdf(uri = "http://example.com/id")]
-    id: string,
+    ID: string,
 
     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
-    name: string,
+    Name: string,
 }
 
-let mapping = fn(row) -> {
-    Output(row.IDs, row.Name)
-        |> Entity::with_id("http://example.com/${row.ID}/${row.Name}")
-}
+// This mapping intentionally uses an invalid field (IDs instead of ID)
+// This should cause a compilation error (negative test)
+let mapping = fn(row) -> Output(row.IDs, row.Name)
 
 Input::load()
 |> List::map(mapping)
-|> Rdf::serialize("tests/rmltc0002a_csv/actual.nq")
+|> Rdf::serialize("tests/RMLTC0002c-CSV/actual.nq")

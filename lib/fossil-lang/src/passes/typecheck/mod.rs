@@ -152,7 +152,7 @@ impl TypeChecker {
             .iter()
             .filter_map(|&stmt_id| {
                 let stmt = self.ir.stmts.get(stmt_id);
-                if let StmtKind::Type { name, ty } = &stmt.kind {
+                if let StmtKind::Type { name, ty, .. } = &stmt.kind {
                     Some((stmt_id, *name, *ty))
                 } else {
                     None
@@ -392,7 +392,7 @@ impl TypeChecker {
                 self.ir.exprs.get_mut(value).ty = TypeRef::Known(inferred_ty);
             }
 
-            StmtKind::Type { name: _, ty: _ } => {
+            StmtKind::Type { .. } => {
                 // Type definitions are already in the IR, nothing to do
             }
 

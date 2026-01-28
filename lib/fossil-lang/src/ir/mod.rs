@@ -10,6 +10,7 @@
 use polars::prelude::DataType;
 
 use crate::ast::Loc;
+use crate::ast::ast::Attribute;
 use crate::context::{Arena, DefId, NodeId, Symbol};
 
 // Re-exports for backwards compatibility (passes are now in crate::passes)
@@ -213,8 +214,13 @@ pub enum StmtKind {
         def_id: Option<DefId>,
         value: ExprId,
     },
-    /// A type definition `type name = type`
-    Type { name: Symbol, ty: TypeId },
+    /// A type definition `type name = type` with optional type-level attributes
+    Type {
+        name: Symbol,
+        ty: TypeId,
+        /// Type-level attributes (e.g., #[rdf(type = "...", id = "...")])
+        attrs: Vec<Attribute>,
+    },
     /// A trait definition `trait Name { method: type, ... }`
     Trait {
         name: Symbol,

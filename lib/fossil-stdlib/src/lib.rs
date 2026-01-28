@@ -1,13 +1,9 @@
-pub mod entity;
 pub mod list;
 pub mod rdf;
 pub mod string;
 
 // DataFrame iteration and transformation
 pub use list::{JoinFunction, MapFunction};
-
-// Entity functions
-pub use entity::EntityWithIdFunction;
 
 // RDF serialization
 pub use rdf::{RdfMetadata, RdfSerializeFunction};
@@ -37,9 +33,6 @@ use fossil_lang::passes::GlobalContext;
 /// fossil_stdlib::init(&mut gcx);
 /// ```
 pub fn init(gcx: &mut GlobalContext) {
-    // Register Entity functions (Entity::with_id adds subject pattern to plans)
-    gcx.register_function("Entity", "with_id", EntityWithIdFunction);
-
     // Register string operations
     gcx.register_function("String", "concat", StringConcatFunction);
     gcx.register_function("String", "format", StringFormatFunction);

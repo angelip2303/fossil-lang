@@ -13,6 +13,7 @@ también podrían estar incluidos en este pack
   }
   ```
 
+- [ ] ¿Qué pasa si un atributo type aparece junto con una shape que define rdfs:type también?
 
 - [ ] La serialización de RDF no funciona si un record empieza por mayus
 

@@ -1,13 +1,10 @@
 const ROOT = "lib/fossil-stdlib/examples/shex-provider"
 
 type PersonData = csv!("${ROOT}/people.csv")
+
+#[rdf(type = "http://xmlns.com/foaf/0.1/Person", id = "http://example.com/person/${name}")]
 type Person = shex!("${ROOT}/person.shex", shape: "PersonShape")
 
-let to_rdf = fn(row) -> {
-    Person(row.name, row.age, row.email)
-        |> Entity::with_id("http://example.com/person/${row.name}")
-}
-
 PersonData::load()
-|> List::map(to_rdf)
+|> List::map(fn(row) -> Person(row.name, row.age, row.email))
 |> Rdf::serialize("results.parquet")

@@ -58,9 +58,13 @@ impl AstToIrConverter {
                 }
             }
 
-            ast::StmtKind::Type { name, ty } => {
+            ast::StmtKind::Type { name, ty, attrs } => {
                 let ir_ty = self.convert_type(ast, *ty);
-                StmtKind::Type { name: *name, ty: ir_ty }
+                StmtKind::Type {
+                    name: *name,
+                    ty: ir_ty,
+                    attrs: attrs.clone(),
+                }
             }
 
             ast::StmtKind::Trait { name, methods } => {

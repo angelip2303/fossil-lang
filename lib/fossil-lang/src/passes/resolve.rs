@@ -217,7 +217,7 @@ impl IrResolver {
                 }
             }
 
-            StmtKind::Type { name, ty } => {
+            StmtKind::Type { name, ty, .. } => {
                 self.resolve_type(*ty, errors);
 
                 // Generate constructor for record types

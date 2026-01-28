@@ -20,12 +20,16 @@ use crate::context::{DefId, Interner, Symbol};
 
 /// Type metadata extracted from AST during name resolution
 ///
-/// Contains metadata about a type definition, particularly attributes
-/// on record fields. This information is captured at compile-time and
-/// made available to runtime functions via RuntimeContext.
+/// Contains metadata about a type definition, including:
+/// - Type-level attributes (e.g., `#[rdf(type = "...", id = "...")]`)
+/// - Field-level attributes (e.g., `#[rdf(uri = "...")]` on record fields)
+///
+/// This information is captured at compile-time and made available to
+/// runtime functions via RuntimeContext.
 ///
 /// # Example
 /// ```fossil
+/// #[rdf(type = "http://schema.org/Person", id = "http://example.org/${id}")]
 /// type Person = {
 ///     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
 ///     name: string,
@@ -34,11 +38,15 @@ use crate::context::{DefId, Interner, Symbol};
 ///
 /// Results in TypeMetadata with:
 /// - def_id: DefId of Person
+/// - type_attributes: [Attribute("rdf", { type: "http://...", id: "http://..." })]
 /// - field_metadata: { "name" -> [Attribute("rdf", { uri: "http://..." })] }
 #[derive(Debug, Clone)]
 pub struct TypeMetadata {
     /// DefId of the type this metadata belongs to
     pub def_id: DefId,
+
+    /// Type-level attributes (e.g., #[rdf(type = "...", id = "...")])
+    pub type_attributes: Vec<AttributeData>,
 
     /// Metadata for each field in the type (if it's a record)
     pub field_metadata: HashMap<Symbol, FieldMetadata>,
@@ -49,8 +57,14 @@ impl TypeMetadata {
     pub fn new(def_id: DefId) -> Self {
         Self {
             def_id,
+            type_attributes: Vec::new(),
             field_metadata: HashMap::new(),
         }
+    }
+
+    /// Get a type-level attribute by name
+    pub fn get_type_attribute(&self, name: Symbol) -> Option<&AttributeData> {
+        self.type_attributes.iter().find(|attr| attr.name == name)
     }
 
     /// Get metadata for a specific field
@@ -155,13 +169,28 @@ pub fn extract_pending_type_metadata(
     for &stmt_id in &ast.root {
         let stmt = ast.stmts.get(stmt_id);
 
-        if let StmtKind::Type { name, ty } = &stmt.kind {
-            let ty = ast.types.get(*ty);
+        if let StmtKind::Type { name, ty, attrs } = &stmt.kind {
+            let ty_node = ast.types.get(*ty);
 
-            if let TypeKind::Record(fields) = &ty.kind {
-                // Use a placeholder DefId (0) since we don't have the real one yet
-                let mut metadata = TypeMetadata::new(DefId::new(0));
+            // Create metadata with type-level attributes
+            let mut metadata = TypeMetadata::new(DefId::new(0));
 
+            // Store type-level attributes (e.g., #[rdf(type = "...", id = "...")])
+            for attr in attrs {
+                let args = attr
+                    .args
+                    .iter()
+                    .map(|arg| (arg.key, arg.value.clone()))
+                    .collect();
+
+                metadata.type_attributes.push(AttributeData {
+                    name: attr.name,
+                    args,
+                });
+            }
+
+            // Extract field-level attributes from record types
+            if let TypeKind::Record(fields) = &ty_node.kind {
                 for field in fields {
                     if !field.attrs.is_empty() {
                         let mut field_meta = FieldMetadata::new();
@@ -183,10 +212,11 @@ pub fn extract_pending_type_metadata(
                         metadata.field_metadata.insert(field.name, field_meta);
                     }
                 }
+            }
 
-                if !metadata.is_empty() {
-                    gcx.pending_type_metadata.insert(*name, metadata);
-                }
+            // Store metadata if it has any content (type-level or field-level)
+            if !metadata.is_empty() || !metadata.type_attributes.is_empty() {
+                gcx.pending_type_metadata.insert(*name, metadata);
             }
         }
     }

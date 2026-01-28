@@ -363,7 +363,6 @@ impl<'a> IrEvaluator<'a> {
             transforms: Vec::new(),
             type_def_id: None,
             schema: std::sync::Arc::new(schema),
-            identity_expr: None,
         }))
     }
 
@@ -409,7 +408,6 @@ impl<'a> IrEvaluator<'a> {
                     transforms: Vec::new(),
                     type_def_id,
                     schema: std::sync::Arc::new(schema),
-                    identity_expr: None,
                 };
 
                 Ok(Value::Records(result_plan))
@@ -656,7 +654,7 @@ impl<'a> IrEvaluator<'a> {
         // Find the type definition in the IR root statements
         for stmt_id in &self.ir.root {
             let stmt = self.ir.stmts.get(*stmt_id);
-            if let StmtKind::Type { name, ty } = &stmt.kind {
+            if let StmtKind::Type { name, ty, .. } = &stmt.kind {
                 if *name == type_name {
                     // Found the type, extract field names from the RecordRow
                     let ty = self.ir.types.get(*ty);

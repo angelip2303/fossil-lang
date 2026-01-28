@@ -15,8 +15,27 @@ use polars::prelude::*;
 ///
 /// Signature: (Records, string) -> Unit
 ///
-/// Serializes a RecordsPlan with identity annotations to an RDF file.
-/// Uses ChunkedExecutor for memory-efficient batch processing.
+/// Serializes a RecordsPlan to an RDF file using metadata from type-level
+/// and field-level attributes.
+///
+/// # Type-Level Attributes
+///
+/// ```fossil
+/// #[rdf(type = "http://schema.org/Person", id = "http://example.org/${id}")]
+/// type Person = shex!("person.shex", shape: "PersonShape")
+/// ```
+///
+/// - `type`: Generates rdf:type triples for each entity
+/// - `id`: Template for subject URIs (blank nodes if omitted)
+///
+/// # Field-Level Attributes
+///
+/// ```fossil
+/// type Person = {
+///     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
+///     name: string,
+/// }
+/// ```
 pub struct RdfSerializeFunction;
 
 impl FunctionImpl for RdfSerializeFunction {
@@ -71,17 +90,7 @@ impl FunctionImpl for RdfSerializeFunction {
             }
         };
 
-        // Verify we have identity expression (from Entity::with_id)
-        let _identity_expr = plan.identity_expr.as_ref().ok_or_else(|| {
-            CompileError::new(
-                CompileErrorKind::Runtime(
-                    "Rdf::serialize requires records with Entity::with_id applied".to_string(),
-                ),
-                Loc::generated(),
-            )
-        })?;
-
-        // Get RDF metadata from type
+        // Get RDF metadata from type-level and field-level attributes
         let rdf_metadata = plan
             .type_def_id
             .and_then(|def_id| {
@@ -93,7 +102,10 @@ impl FunctionImpl for RdfSerializeFunction {
             .ok_or_else(|| {
                 CompileError::new(
                     CompileErrorKind::Runtime(
-                        "Rdf::serialize requires a typed record with #[rdf(...)] attributes"
+                        "Rdf::serialize requires a typed record with #[rdf(...)] attributes.\n\
+                         Add type-level attributes like:\n\
+                         #[rdf(type = \"http://schema.org/Person\", id = \"http://example.org/${id}\")]\n\
+                         type Person = ..."
                             .to_string(),
                     ),
                     Loc::generated(),
@@ -108,6 +120,11 @@ impl FunctionImpl for RdfSerializeFunction {
 ///
 /// Uses ChunkedExecutor to process data in fixed-size batches, ensuring constant
 /// memory usage regardless of dataset size.
+///
+/// Output Parquet schema:
+/// - `_subject`: Generated subject URI from id_template (or blank node placeholder)
+/// - `_type`: The rdf:type URI (if specified)
+/// - Predicate columns: Renamed to their RDF URIs
 fn serialize_streaming(
     plan: &fossil_lang::runtime::value::RecordsPlan,
     rdf_metadata: &RdfMetadata,
@@ -118,12 +135,29 @@ fn serialize_streaming(
 
     let interner = ctx.gcx.interner.clone();
 
-    // Build selection expressions from RDF metadata
-    let selection: Vec<Expr> = rdf_metadata
-        .predicates
-        .iter()
-        .map(|(key, value)| col(interner.resolve(*key)).alias(value))
-        .collect();
+    let mut selection: Vec<Expr> = Vec::new();
+
+    // 1. Generate _subject column from id_template
+    if let Some(ref id_template) = rdf_metadata.id_template {
+        let subject_expr = parse_id_template_to_expr(id_template);
+        selection.push(subject_expr.alias("_subject"));
+    } else {
+        // No id_template = blank nodes
+        // For now, use a placeholder - real blank node generation will be
+        // implemented when we have proper RDF output (not Parquet)
+        selection.push(lit("_:blank").alias("_subject"));
+    }
+
+    // 2. Add _type column if rdf_type is specified
+    if let Some(ref rdf_type) = rdf_metadata.rdf_type {
+        selection.push(lit(rdf_type.as_str()).alias("_type"));
+    }
+
+    // 3. Add predicate columns renamed to their URIs
+    for (field_sym, predicate_uri) in &rdf_metadata.predicates {
+        let field_name = interner.resolve(*field_sym);
+        selection.push(col(field_name).alias(predicate_uri));
+    }
 
     // Estimate batch size from plan schema
     let batch_size = estimate_batch_size_from_plan(plan);
@@ -143,4 +177,73 @@ fn serialize_streaming(
         })?;
 
     Ok(Value::Unit)
+}
+
+/// Parse an id_template like "http://example.org/${id}/${name}" into a Polars concat_str expression
+///
+/// The template supports `${column_name}` interpolation which references columns in the data.
+///
+/// # Example
+/// ```text
+/// "http://example.org/${id}" -> concat_str([lit("http://example.org/"), col("id")])
+/// "urn:${a}:${b}"            -> concat_str([lit("urn:"), col("a"), lit(":"), col("b")])
+/// ```
+fn parse_id_template_to_expr(template: &str) -> Expr {
+    let mut parts: Vec<Expr> = Vec::new();
+    let mut current_pos = 0;
+    let bytes = template.as_bytes();
+
+    while current_pos < template.len() {
+        // Find next ${
+        if let Some(start) = template[current_pos..].find("${") {
+            let start_abs = current_pos + start;
+
+            // Add literal part before ${
+            if start_abs > current_pos {
+                parts.push(lit(&template[current_pos..start_abs]));
+            }
+
+            // Find matching }
+            let expr_start = start_abs + 2;
+            let mut brace_depth = 1;
+            let mut expr_end = expr_start;
+
+            while expr_end < template.len() && brace_depth > 0 {
+                match bytes[expr_end] {
+                    b'{' => brace_depth += 1,
+                    b'}' => brace_depth -= 1,
+                    _ => {}
+                }
+                if brace_depth > 0 {
+                    expr_end += 1;
+                }
+            }
+
+            if brace_depth == 0 {
+                // Extract column name and add as col() expression
+                let column_name = &template[expr_start..expr_end];
+                parts.push(col(column_name).cast(DataType::String));
+                current_pos = expr_end + 1;
+            } else {
+                // Unmatched brace - treat rest as literal
+                parts.push(lit(&template[current_pos..]));
+                break;
+            }
+        } else {
+            // No more interpolations, add remaining text
+            if current_pos < template.len() {
+                parts.push(lit(&template[current_pos..]));
+            }
+            break;
+        }
+    }
+
+    // Combine all parts with concat_str
+    if parts.is_empty() {
+        lit(template)
+    } else if parts.len() == 1 {
+        parts.pop().unwrap()
+    } else {
+        concat_str(parts, "", true)
+    }
 }

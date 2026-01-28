@@ -31,8 +31,19 @@ pub enum StmtKind {
     },
     /// A constant binding `const name = expr`
     Const { name: Symbol, value: ExprId },
-    /// A type definition `type name = type`
-    Type { name: Symbol, ty: TypeId },
+    /// A type definition `type name = type` with optional type-level attributes
+    ///
+    /// # Example
+    /// ```fossil
+    /// #[rdf(type = "http://schema.org/Person", id = "http://example.org/${id}")]
+    /// type Person = shex!("person.shex", shape: "PersonShape")
+    /// ```
+    Type {
+        name: Symbol,
+        ty: TypeId,
+        /// Type-level attributes (e.g., #[rdf(type = "...", id = "...")])
+        attrs: Vec<Attribute>,
+    },
     /// A trait definition `trait Name { method: type, ... }`
     Trait {
         name: Symbol,
