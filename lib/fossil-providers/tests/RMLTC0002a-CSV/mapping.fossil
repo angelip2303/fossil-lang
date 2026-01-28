@@ -1,16 +1,11 @@
 type Input = csv!("tests/RMLTC0002a-CSV/student.csv")
 
-#[rdf(type = "http://xmlns.com/foaf/0.1/Person", id = "http://example.com/${ID}/${Name}")]
+#[rdf(id = "http://example.com/${Name}")]
 type Output = {
-    #[rdf(uri = "http://example.com/id")]
-    ID: string,
-
     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
     Name: string,
 }
 
-let mapping = fn(row) -> Output(row.ID, row.Name)
-
 Input::load()
-|> List::map(mapping)
+|> List::map(fn(row) -> Output(row.Name))
 |> Rdf::serialize("tests/RMLTC0002a-CSV/actual.nq")

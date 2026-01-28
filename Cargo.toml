@@ -23,7 +23,6 @@ rust-version = "1.88.0"
 [workspace.dependencies]
 # external dependencies
 polars = {version = "0.52.0", features = ["lazy", "timezones", "new_streaming", "parquet", "concat_str", "strings"]}
-tempfile = "3.13"
 thiserror = "2.0.18"
 
 # internal dependencies

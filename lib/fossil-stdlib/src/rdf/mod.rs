@@ -1,6 +1,8 @@
 pub mod metadata;
+pub mod serializer;
 
 pub use metadata::RdfMetadata;
+pub use serializer::{OutputFormat, RdfBatchWriter};
 
 use fossil_lang::ast::Loc;
 use fossil_lang::error::RuntimeError;
@@ -8,8 +10,8 @@ use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
-use polars::prelude::*;
 
+use polars::prelude::*;
 
 /// Rdf::serialize function implementation
 ///
@@ -116,13 +118,13 @@ impl FunctionImpl for RdfSerializeFunction {
     }
 }
 
-/// RDF serialization using chunked execution
+/// RDF serialization using chunked execution with Oxigraph
 ///
 /// Uses ChunkedExecutor to process data in fixed-size batches, ensuring constant
-/// memory usage regardless of dataset size.
+/// memory usage regardless of dataset size. Writes native RDF using Oxigraph.
 ///
-/// Output Parquet schema:
-/// - `_subject`: Generated subject URI from id_template (or blank node placeholder)
+/// DataFrame schema for batches:
+/// - `_subject`: Generated subject URI from id_template (or blank node `_:bN`)
 /// - `_type`: The rdf:type URI (if specified)
 /// - Predicate columns: Renamed to their RDF URIs
 fn serialize_streaming(
@@ -132,21 +134,53 @@ fn serialize_streaming(
     ctx: &RuntimeContext,
 ) -> Result<Value, RuntimeError> {
     use fossil_lang::runtime::chunked_executor::{ChunkedExecutor, estimate_batch_size_from_plan};
+    use fossil_lang::runtime::value::Transform;
+    use std::cell::RefCell;
 
     let interner = ctx.gcx.interner.clone();
 
+    // Clone the plan so we can modify its transforms
+    let mut plan = plan.clone();
+
+    // If there are subject_columns that need to be preserved from the source,
+    // we need to inject them into any existing Select transform.
+    // This ensures columns referenced in ${...} templates are available even if
+    // they weren't part of the mapped type's fields.
+    if !rdf_metadata.subject_columns.is_empty() {
+        for transform in &mut plan.transforms {
+            if let Transform::Select(exprs) = transform {
+                for col_name in &rdf_metadata.subject_columns {
+                    // Only add if not already present
+                    let already_present = exprs.iter().any(|e| {
+                        // Check if this expression is already selecting this column
+                        matches!(e, Expr::Column(name) if name.to_string() == *col_name)
+                            || matches!(e, Expr::Alias(_, alias) if alias.to_string() == *col_name)
+                    });
+                    if !already_present {
+                        exprs.push(col(col_name));
+                    }
+                }
+            }
+        }
+    }
+
     let mut selection: Vec<Expr> = Vec::new();
 
-    // 1. Generate _subject column from id_template
-    if let Some(ref id_template) = rdf_metadata.id_template {
-        let subject_expr = parse_id_template_to_expr(id_template);
-        selection.push(subject_expr.alias("_subject"));
-    } else {
-        // No id_template = blank nodes
-        // For now, use a placeholder - real blank node generation will be
-        // implemented when we have proper RDF output (not Parquet)
-        selection.push(lit("_:blank").alias("_subject"));
-    }
+    // 1. Generate _subject column from id_template (required)
+    let id_template = rdf_metadata.id_template.as_ref().ok_or_else(|| {
+        fossil_lang::error::CompileError::new(
+            fossil_lang::error::CompileErrorKind::Runtime(
+                "Rdf::serialize requires #[rdf(id = \"...\")] attribute.\n\
+                 The id template defines how subject URIs are generated.\n\
+                 Example: #[rdf(id = \"http://example.org/${id}\")]\n\
+                 Use ${column_name} for interpolation."
+                    .to_string(),
+            ),
+            Loc::generated(),
+        )
+    })?;
+    let subject_expr = parse_id_template_to_expr(id_template);
+    selection.push(subject_expr.alias("_subject"));
 
     // 2. Add _type column if rdf_type is specified
     if let Some(ref rdf_type) = rdf_metadata.rdf_type {
@@ -159,22 +193,52 @@ fn serialize_streaming(
         selection.push(col(field_name).alias(predicate_uri));
     }
 
+    // Infer output format from file extension
+    let format = OutputFormat::from_path(destination);
+
+    // Create the RDF batch writer
+    let writer = RdfBatchWriter::new(destination, format, rdf_metadata).map_err(|e| {
+        fossil_lang::error::CompileError::new(
+            fossil_lang::error::CompileErrorKind::Runtime(format!(
+                "Failed to create RDF writer: {}",
+                e
+            )),
+            Loc::generated(),
+        )
+    })?;
+
+    // Use RefCell to allow mutable access from the closure
+    let writer = RefCell::new(writer);
+
     // Estimate batch size from plan schema
-    let batch_size = estimate_batch_size_from_plan(plan);
+    let batch_size = estimate_batch_size_from_plan(&plan);
 
     // Execute plan with selection - ChunkedExecutor is the ONLY place materialization happens
     let executor = ChunkedExecutor::new(batch_size);
     executor
-        .execute_plan_with_select_to_parquet(plan, selection, destination)
+        .execute_plan_with_select_batched(&plan, selection, |batch| {
+            writer.borrow_mut().write_batch(&batch)
+        })
         .map_err(|e| {
             fossil_lang::error::CompileError::new(
                 fossil_lang::error::CompileErrorKind::Runtime(format!(
-                    "Failed to write parquet: {}",
+                    "Failed to write RDF: {}",
                     e
                 )),
                 Loc::generated(),
             )
         })?;
+
+    // Finish writing and close the file
+    writer.into_inner().finish().map_err(|e| {
+        fossil_lang::error::CompileError::new(
+            fossil_lang::error::CompileErrorKind::Runtime(format!(
+                "Failed to finalize RDF file: {}",
+                e
+            )),
+            Loc::generated(),
+        )
+    })?;
 
     Ok(Value::Unit)
 }

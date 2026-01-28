@@ -6,8 +6,6 @@ type Output = {
     Name: string,
 }
 
-let mapping = fn(row) -> Output(row.Name)
-
 Input::load()
-|> List::map(mapping)
+|> List::map(fn(row) -> Output(row.Name))
 |> Rdf::serialize("tests/RMLTC0000-CSV/actual.nq")

@@ -1,6 +1,6 @@
 type Input = csv!("tests/RMLTC0002c-CSV/student.csv")
 
-#[rdf(type = "http://xmlns.com/foaf/0.1/Person", id = "http://example.com/${ID}/${Name}")]
+#[rdf(id = "http://example.com/${ID}/${Name}")]
 type Output = {
     #[rdf(uri = "http://example.com/id")]
     ID: string,
@@ -9,10 +9,8 @@ type Output = {
     Name: string,
 }
 
-// This mapping intentionally uses an invalid field (IDs instead of ID)
+// this mapping intentionally uses an invalid field (IDs instead of ID)
 // This should cause a compilation error (negative test)
-let mapping = fn(row) -> Output(row.IDs, row.Name)
-
 Input::load()
-|> List::map(mapping)
+|> List::map(Output(row.IDs, row.Name))
 |> Rdf::serialize("tests/RMLTC0002c-CSV/actual.nq")

@@ -7,12 +7,11 @@
 //! # Lazy Evaluation Guarantee
 //!
 //! This module uses `SafeLazyFrame` internally to build transformation pipelines.
-//! The `.collect()` method is only called here, in `execute_lazy_to_parquet`,
+//! The `.collect()` method is only called here, in `execute_plan_with_select_batched`,
 //! through `SafeLazyFrame::into_inner()`. External code cannot accidentally
 //! materialize data because `SafeLazyFrame` does not expose `.collect()`.
 
 use polars::prelude::*;
-use std::path::Path;
 
 use super::lazy_frame::SafeLazyFrame;
 use super::value::{RecordsPlan, SourceDescriptor, Transform};
@@ -31,30 +30,63 @@ impl ChunkedExecutor {
         Self { batch_size }
     }
 
-    /// Execute a RecordsPlan to a Parquet file in chunks
+    /// Execute a RecordsPlan with selection and process batches via callback
     ///
-    /// This is the ONLY way to materialize a RecordsPlan.
-    /// Returns the total number of rows written.
-    pub fn execute_plan_to_parquet(&self, plan: &RecordsPlan, path: &str) -> PolarsResult<u64> {
-        // Build the SafeLazyFrame from the plan (internal only!)
-        let safe_lf = self.build_safe_lazy_frame(plan)?;
-        self.execute_safe_lazy_to_parquet(safe_lf, path)
-    }
-
-    /// Execute a RecordsPlan with additional selection expressions
+    /// This is the ONLY way to materialize a RecordsPlan. It processes data in
+    /// fixed-size batches and calls the provided callback for each batch.
+    /// Used for RDF serialization and other streaming outputs.
     ///
-    /// Used by sinks that need to apply final transformations (like RDF field mapping).
-    pub fn execute_plan_with_select_to_parquet(
+    /// # Arguments
+    ///
+    /// * `plan` - The RecordsPlan to execute
+    /// * `select_exprs` - Selection expressions to apply (e.g., RDF field mapping)
+    /// * `process_batch` - Callback called for each batch DataFrame
+    ///
+    /// # Returns
+    ///
+    /// Total number of rows processed
+    pub fn execute_plan_with_select_batched<F>(
         &self,
         plan: &RecordsPlan,
         select_exprs: Vec<Expr>,
-        path: &str,
-    ) -> PolarsResult<u64> {
+        mut process_batch: F,
+    ) -> PolarsResult<u64>
+    where
+        F: FnMut(DataFrame) -> PolarsResult<()>,
+    {
         let mut safe_lf = self.build_safe_lazy_frame(plan)?;
         if !select_exprs.is_empty() {
             safe_lf = safe_lf.select(select_exprs);
         }
-        self.execute_safe_lazy_to_parquet(safe_lf, path)
+
+        // Convert to LazyFrame for batched execution
+        let lf = safe_lf.into_inner();
+        let mut total_rows: u64 = 0;
+        let mut offset: i64 = 0;
+
+        loop {
+            // Get a batch using slice - THIS is where materialization happens
+            let batch_lf = lf.clone().slice(offset, self.batch_size as u32);
+            let batch_df = batch_lf.collect()?;
+
+            let batch_len = batch_df.height();
+            if batch_len == 0 {
+                break;
+            }
+
+            // Call the callback with this batch
+            process_batch(batch_df)?;
+
+            total_rows += batch_len as u64;
+            offset += batch_len as i64;
+
+            // If we got fewer rows than requested, we're done
+            if batch_len < self.batch_size {
+                break;
+            }
+        }
+
+        Ok(total_rows)
     }
 
     /// Build a SafeLazyFrame from a RecordsPlan
@@ -131,66 +163,6 @@ impl ChunkedExecutor {
             Transform::Filter(expr) => safe_lf.filter(expr.clone()),
             Transform::WithColumn(expr) => safe_lf.with_column(expr.clone()),
         }
-    }
-
-    /// Execute a SafeLazyFrame to Parquet in chunks
-    ///
-    /// This is the ONLY place where `.collect()` is called, through `into_inner()`.
-    fn execute_safe_lazy_to_parquet(&self, safe_lf: SafeLazyFrame, path: &str) -> PolarsResult<u64> {
-        // Convert to LazyFrame for batched execution - this is the ONLY place we do this
-        let mut lf = safe_lf.into_inner();
-        let path = Path::new(path);
-        let mut total_rows: u64 = 0;
-        let mut offset: i64 = 0;
-        let mut writer: Option<polars::io::parquet::write::BatchedWriter<std::fs::File>> = None;
-
-        loop {
-            // Get a batch using slice - THIS is where materialization happens
-            let batch_lf = lf.clone().slice(offset, self.batch_size as u32);
-            let batch_df = batch_lf.collect()?;
-
-            let batch_len = batch_df.height();
-            if batch_len == 0 {
-                break;
-            }
-
-            // Initialize writer on first batch (we need the schema)
-            if writer.is_none() {
-                let file = std::fs::File::create(path)?;
-                let w = ParquetWriter::new(file)
-                    .with_compression(ParquetCompression::Snappy)
-                    .batched(&batch_df.schema())?;
-                writer = Some(w);
-            }
-
-            // Write batch
-            if let Some(ref mut w) = writer {
-                w.write_batch(&batch_df)?;
-            }
-
-            total_rows += batch_len as u64;
-            offset += batch_len as i64;
-
-            // If we got fewer rows than requested, we're done
-            if batch_len < self.batch_size {
-                break;
-            }
-        }
-
-        // Finalize the file
-        if let Some(w) = writer {
-            w.finish()?;
-        } else {
-            // No data - create empty parquet file with schema from lazy frame
-            let schema = lf.collect_schema()?;
-            let empty_df = DataFrame::empty_with_schema(&schema);
-            let file = std::fs::File::create(path)?;
-            ParquetWriter::new(file)
-                .with_compression(ParquetCompression::Snappy)
-                .finish(&mut empty_df.clone())?;
-        }
-
-        Ok(total_rows)
     }
 }
 

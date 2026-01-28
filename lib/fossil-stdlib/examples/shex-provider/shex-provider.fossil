@@ -2,9 +2,9 @@ const ROOT = "lib/fossil-stdlib/examples/shex-provider"
 
 type PersonData = csv!("${ROOT}/people.csv")
 
-#[rdf(type = "http://xmlns.com/foaf/0.1/Person", id = "http://example.com/person/${name}")]
+#[rdf(id = "http://example.com/person/${email}", type = "http://xmlns.com/foaf/0.1/Person")]
 type Person = shex!("${ROOT}/person.shex", shape: "PersonShape")
 
 PersonData::load()
-|> List::map(fn(row) -> Person(row.name, row.age, row.email))
-|> Rdf::serialize("results.parquet")
+|> List::map(fn(row) -> Person(row.name, row.age))
+|> Rdf::serialize("results.ttl")

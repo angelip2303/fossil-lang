@@ -1,5 +1,5 @@
 use crate::common::error::TestSuiteError;
-use crate::common::test::{test_negative, test_positive};
+use crate::common::test::*;
 
 mod common;
 

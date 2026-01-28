@@ -1,23 +1,8 @@
-- [ ] Mejorar la forma en la que manejamos los metadatos. Quizás con el concepto de atributos, la noción de entity pierde sentido? El problema es que en el caso de ShEx, como obtiene como debes serializar los sujetos, ya que ShEx sólo representa el vecindario de un nodo, y no a qué sujetos afecta... no?
+- [ ] ¿Qué pasa si un atributo type aparece junto con una shape que define rdfs:type también? Creo que lo que deberíamos de hacer es emitir un warning, indicando que se ignorará el del atributo type.
 
-- [ ] Tenemos que soportar alguna forma de especificar tipos para los distintos elementos, quizás algo así (rdfs:type), quizás algunos metadatos como (rdfs:label) o (rdfs:comment)
-también podrían estar incluidos en este pack
-  ```
-  #[rdf(type = "http://xmlns.com/foaf/0.1/Person")]
-  type Output = {
-      #[rdf(uri = "http://example.com/id")]
-      id: string,
-  
-      #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
-      name: string,
-  }
-  ```
 
-- [ ] ¿Qué pasa si un atributo type aparece junto con una shape que define rdfs:type también?
+- [ ] Qué pasa si cometemos un error a la hora de escribir los atributos: #[rdf(id = "_:students{ID}", with = ["ID"])] en lugar de #[rdf(id = "_:students${ID}", with = ["ID"])]. Qué pasa realmente con las templates de las columnas? Estamos recreando la sintaxis de string interpolation, pero realmente no es string interpolation
 
-- [ ] La serialización de RDF no funciona si un record empieza por mayus
-
-- [ ] Permitir la generación de RDF en distintos formatos de serialización
 
 - [ ] Permitir el uso de PrefixMap o similar
 
@@ -56,7 +41,7 @@ let csv_to_rdf = fn(row: PersonData) -> {
 PersonData::load()
 |> List::map(csv_to_rdf)
 |> Rdf::serialize("${ROOT}/results.ttl")
-`, Fíjate que al anotar los tipos en la función sí que funciona correctamente. Debemos darle una vuelta a como manejamos eso: debería ser obligatorio? El mensaje de error debería sugerir que debería implementar ToString? Debería inferir el tipo? Quizás el string interpolation debería exigir que implemente ToString? Por otro lado, quizás string interpolation debería ser un azúcar sintáctico para String::concat, y que String::concat debería de exigir que sus parámetros implementen ToString.
+`, Fíjate que al anotar los tipos en la función sí que funciona correctamente. Debemos darle una vuelta a como manejamos eso: debería ser obligatorio? El mensaje de error debería sugerir que debería implementar ToString? Debería inferir el tipo? Quizás el string interpolation debería exigir que implemente ToString?
 
 
 - [ ] Pensar cómo manejar records y named records cuando son iguales...

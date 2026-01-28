@@ -48,6 +48,7 @@ book
 *.ttl
 *.rdf
 *.nt
+*.nq
 *.owl
 *.ttl.gz
 *.rdf.gz

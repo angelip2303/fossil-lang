@@ -6,12 +6,19 @@
 //! # Type-Level Attributes
 //!
 //! ```fossil
-//! #[rdf(type = "http://schema.org/Person", id = "http://example.org/${id}")]
+//! #[rdf(
+//!     type = "http://schema.org/Person",
+//!     id = "http://example.org/${id}"
+//! )]
 //! type Person = shex!("person.shex", shape: "PersonShape")
 //! ```
 //!
 //! - `type`: The rdf:type URI for instances of this type
-//! - `id`: Template for generating subject URIs (supports interpolation)
+//! - `id`: Template for generating subject URIs (supports `${column}` interpolation)
+//!
+//! Columns referenced in `${...}` are automatically extracted from the source data.
+//! For example, `${id}` will preserve the `id` column from the source even if
+//! it's not part of the target type's fields.
 //!
 //! # Field-Level Attributes
 //!
@@ -64,6 +71,10 @@ pub struct RdfMetadata {
 
     /// Mapping from field name to predicate URI
     pub predicates: HashMap<Symbol, String>,
+
+    /// Columns referenced in id_template that need to be preserved from source
+    /// These are automatically inferred from `${column}` patterns in the template
+    pub subject_columns: Vec<String>,
 }
 
 impl RdfMetadata {
@@ -73,12 +84,15 @@ impl RdfMetadata {
             rdf_type: None,
             id_template: None,
             predicates: HashMap::new(),
+            subject_columns: Vec::new(),
         }
     }
 
     /// Extract RDF metadata from TypeMetadata captured during resolution
     ///
     /// Uses the declarative `FromAttrs` derive macro for clean extraction.
+    /// Columns referenced in the id_template via `${column}` are automatically
+    /// extracted and stored in `subject_columns`.
     ///
     /// # Arguments
     ///
@@ -92,10 +106,18 @@ impl RdfMetadata {
         // Use declarative extraction for type-level attributes
         let type_attrs = RdfTypeAttrs::from_type_metadata(type_metadata, interner);
 
+        // Auto-extract columns from id_template
+        let subject_columns = type_attrs
+            .id_template
+            .as_ref()
+            .map(|t| extract_template_columns(t))
+            .unwrap_or_default();
+
         let mut metadata = RdfMetadata {
             rdf_type: type_attrs.rdf_type,
             id_template: type_attrs.id_template,
             predicates: HashMap::new(),
+            subject_columns,
         };
 
         // Extract field-level attributes using declarative extraction
@@ -140,3 +162,33 @@ impl Default for RdfMetadata {
         Self::new()
     }
 }
+
+/// Extract column names from a template string
+///
+/// Parses `${column}` patterns and returns a list of column names.
+/// For example: `"http://example.org/${id}/${name}"` returns `["id", "name"]`
+fn extract_template_columns(template: &str) -> Vec<String> {
+    let mut columns = Vec::new();
+    let mut current_pos = 0;
+
+    while current_pos < template.len() {
+        if let Some(start) = template[current_pos..].find("${") {
+            let start_abs = current_pos + start;
+            let expr_start = start_abs + 2;
+
+            // Find matching }
+            if let Some(end_rel) = template[expr_start..].find('}') {
+                let column_name = &template[expr_start..expr_start + end_rel];
+                columns.push(column_name.to_string());
+                current_pos = expr_start + end_rel + 1;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    columns
+}
+

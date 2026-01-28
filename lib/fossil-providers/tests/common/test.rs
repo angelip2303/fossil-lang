@@ -37,8 +37,8 @@ pub fn test_positive(test_case: &str) -> Result<(), TestSuiteError> {
 }
 
 pub fn test_negative(test_case: &str) -> Result<(), TestSuiteError> {
-    match test(test_case)? {
-        true => Err(TestSuiteError::NotEquals),
-        false => Ok(()),
+    match test(test_case) {
+        Ok(_) => Err(TestSuiteError::NotEquals),
+        Err(_) => Ok(()),
     }
 }

@@ -4,8 +4,7 @@ PREFIX ex: <https://example.com/>
 
 ex:PersonShape {
     foaf:name xsd:string ;
-    foaf:age xsd:integer ;
-    foaf:mbox xsd:string
+    foaf:age xsd:integer
 }
 
 ex:OrganizationShape {
