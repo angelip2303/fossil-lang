@@ -4,7 +4,6 @@
 //! It enables stdlib functions to execute user-provided lambdas and evaluate field access.
 
 use std::rc::Rc;
-use std::sync::Arc;
 
 use polars::prelude::*;
 
@@ -124,16 +123,17 @@ impl<'a> IrEvaluator<'a> {
         let expr = self.ir.exprs.get(expr_id);
 
         match &expr.kind {
-            ExprKind::Literal(lit) => {
+            ExprKind::Literal(literal) => {
                 use crate::ir::Literal;
-                match lit {
-                    Literal::Integer(i) => Ok(Value::Int(*i)),
+                // All literals become Polars expressions
+                Ok(Value::Expr(match literal {
+                    Literal::Integer(i) => lit(*i),
                     Literal::String(s) => {
                         let str_val = self.gcx.interner.resolve(*s);
-                        Ok(Value::String(Arc::from(str_val)))
+                        lit(str_val)
                     }
-                    Literal::Boolean(b) => Ok(Value::Bool(*b)),
-                }
+                    Literal::Boolean(b) => lit(*b),
+                }))
             }
 
             ExprKind::Identifier(ident) => {
@@ -197,85 +197,47 @@ impl<'a> IrEvaluator<'a> {
                 self.eval_string_interpolation(parts, exprs)
             }
 
-            ExprKind::FieldSelector { field, .. } => {
-                // Field selector evaluates to the field name as a string
-                let field_str = self.gcx.interner.resolve(*field);
-                Ok(Value::FieldSelector(Arc::from(field_str)))
-            }
-
             ExprKind::Pipe { .. } => {
                 // Pipe should have been desugared during resolution
                 Err(self.make_error("Pipe expression should be desugared before evaluation"))
-            }
-
-            ExprKind::Placeholder => {
-                // Placeholder should never reach evaluation
-                Err(self.make_error("Placeholder expression should not be evaluated directly"))
             }
         }
     }
 
     /// Evaluate a string interpolation expression
     ///
-    /// When interpolating Expr values (from RowContext tracing), preserves the
-    /// column reference as a template `${column_name}` for lazy processing.
+    /// All values are Expr, so we always build a concat_str expression.
+    /// This keeps everything lazy until execution at the sink.
     fn eval_string_interpolation(
         &mut self,
         parts: &[Symbol],
         exprs: &[ExprId],
     ) -> Result<Value, RuntimeError> {
-        let mut result = String::new();
+        let mut concat_parts: Vec<Expr> = Vec::new();
 
-        // Invariant: parts.len() == exprs.len() + 1
         for (i, part) in parts.iter().enumerate() {
-            // Add the literal part
-            result.push_str(self.gcx.interner.resolve(*part));
+            let part_str = self.gcx.interner.resolve(*part);
+            if !part_str.is_empty() {
+                concat_parts.push(lit(part_str));
+            }
 
-            // If there's a corresponding expression, evaluate and convert to string
             if i < exprs.len() {
-                let expr_id = exprs[i];
-                let value = self.eval(expr_id)?;
-
-                // Special handling for Expr values: preserve as template
-                // This allows Entity::with_id to extract column names for lazy processing
-                if let Value::Expr(ref expr) = value {
-                    // Extract column name from col("name") expression
-                    if let Some(col_name) = extract_column_name(expr) {
-                        result.push_str("${");
-                        result.push_str(&col_name);
-                        result.push('}');
-                        continue;
+                let value = self.eval(exprs[i])?;
+                match value {
+                    Value::Expr(e) => {
+                        // Cast to string for concatenation
+                        concat_parts.push(e.cast(polars::prelude::DataType::String));
+                    }
+                    _ => {
+                        concat_parts.push(lit("<value>"));
                     }
                 }
-
-                // Dispatch through the registered string conversion trait (if any)
-                let string_value = if let Some(trait_def_id) = self.gcx.builtin_traits.to_string {
-                    self.dispatch_trait_to_string(&value, expr_id, trait_def_id)?
-                } else {
-                    self.value_to_string(&value)?
-                };
-                result.push_str(&string_value);
             }
         }
 
-        Ok(Value::String(Arc::from(result)))
-    }
-
-    /// Dispatch a trait method call for string conversion.
-    /// Uses the general trait dispatch mechanism: looks up the trait impl for the
-    /// expression's type and calls the first method. Falls back to built-in conversion
-    /// for primitives and types without a user-defined impl.
-    fn dispatch_trait_to_string(
-        &mut self,
-        value: &Value,
-        expr_id: ExprId,
-        trait_def_id: DefId,
-    ) -> Result<String, RuntimeError> {
-        if let Some(result) = self.dispatch_trait_method(value, expr_id, trait_def_id)? {
-            self.value_to_string(&result)
-        } else {
-            self.value_to_string(value)
-        }
+        // Build concat_str expression
+        let concat_expr = concat_str(concat_parts, "", true);
+        Ok(Value::Expr(concat_expr))
     }
 
     /// General trait method dispatch: given a value, its expression (for type info),
@@ -369,108 +331,51 @@ impl<'a> IrEvaluator<'a> {
         None
     }
 
-    /// Convert a Value to its string representation for interpolation
-    fn value_to_string(&self, value: &Value) -> Result<String, RuntimeError> {
-        match value {
-            Value::Int(i) => Ok(i.to_string()),
-            Value::String(s) => Ok(s.to_string()),
-            Value::Bool(b) => Ok(b.to_string()),
-            Value::Unit => Ok("()".to_string()),
-            Value::Expr(expr) => Ok(format!("{:?}", expr)),
-            Value::Records(plan) => {
-                // Collect and format the DataFrame
-                match plan.lf.clone().collect() {
-                    Ok(df) => Ok(format!("{}", df)),
-                    Err(_) => Ok("<records>".to_string()),
-                }
-            }
-            Value::RowContext { .. } => Ok("<row-context>".to_string()),
-            Value::Closure { .. } => Ok("<function>".to_string()),
-            Value::Function(_) => Ok("<function>".to_string()),
-            Value::BuiltinFunction(_, _) => Ok("<builtin>".to_string()),
-            Value::FieldSelector(field) => Ok(field.to_string()),
-            Value::RecordConstructor(_) => Ok("<record-constructor>".to_string()),
-        }
-    }
-
     /// Evaluate a record expression
     ///
-    /// When fields are Expr values, returns a record of expressions (lazy).
-    /// When fields are primitives, creates a single-row DataFrame.
+    /// All field values are Expr, so we always build a lazy plan.
     fn eval_record(&mut self, fields: &[(Symbol, ExprId)]) -> Result<Value, RuntimeError> {
-        use crate::runtime::value::RecordsPlan;
+        use crate::runtime::value::{RecordsPlan, SourceDescriptor};
 
         if fields.is_empty() {
-            return Ok(Value::Records(RecordsPlan::new(LazyFrame::default())));
+            return Ok(Value::Records(RecordsPlan::empty()));
         }
 
-        // Evaluate all fields first
-        let mut field_values: Vec<(Symbol, Value)> = Vec::with_capacity(fields.len());
-        for (name, expr_id) in fields {
-            let value = self.eval(*expr_id)?;
-            field_values.push((*name, value));
-        }
+        // Build select expressions from all fields
+        let select_exprs: Vec<Expr> = fields
+            .iter()
+            .map(|(name, expr_id)| {
+                let value = self.eval(*expr_id)?;
+                let name_str = self.gcx.interner.resolve(*name);
+                match value {
+                    Value::Expr(expr) => Ok(expr.alias(name_str)),
+                    _ => Ok(lit(NULL).alias(name_str)),
+                }
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
 
-        // Check if any field is an expression (lazy path)
-        let has_exprs = field_values.iter().any(|(_, v)| matches!(v, Value::Expr(_)));
+        // Build schema from expressions
+        let schema = build_schema_from_exprs(&select_exprs);
 
-        if has_exprs {
-            // LAZY PATH: Build select expressions
-            // This creates a record of named expressions for lazy transformation
-            let select_exprs: Vec<Expr> = field_values
-                .into_iter()
-                .map(|(name, value)| {
-                    let name_str = self.gcx.interner.resolve(name);
-                    match value {
-                        Value::Expr(expr) => expr.alias(name_str),
-                        Value::Int(i) => lit(i).alias(name_str),
-                        Value::String(s) => lit(s.as_ref()).alias(name_str),
-                        Value::Bool(b) => lit(b).alias(name_str),
-                        _ => lit(NULL).alias(name_str), // Fallback for unsupported
-                    }
-                })
-                .collect();
-
-            // Store the expressions as a lazy plan that will be applied later
-            // We need a base LazyFrame - use an empty one with the expressions
-            // The actual data comes from the source in List::map
-            let lf = LazyFrame::default().select(select_exprs);
-            Ok(Value::Records(RecordsPlan::new(lf)))
-        } else {
-            // CONCRETE PATH: All primitives - create single-row DataFrame
-            let mut series_vec = Vec::new();
-
-            for (name, value) in field_values {
-                let name_str = PlSmallStr::from_str(self.gcx.interner.resolve(name));
-
-                let series = match value {
-                    Value::Int(i) => Series::new(name_str, &[i]).into_column(),
-                    Value::String(s) => Series::new(name_str, &[s.as_ref()]).into_column(),
-                    Value::Bool(b) => Series::new(name_str, &[b]).into_column(),
-                    _ => {
-                        return Err(self.make_error("Unsupported value type in record field"));
-                    }
-                };
-
-                series_vec.push(series);
-            }
-
-            let df = DataFrame::new(series_vec)
-                .map_err(|e| self.make_error(format!("Failed to create DataFrame: {}", e)))?;
-
-            Ok(Value::Records(RecordsPlan::new(df.lazy())))
-        }
+        // Store as pending transformation - will be applied to source by List::map
+        Ok(Value::Records(RecordsPlan {
+            source: SourceDescriptor::Pending { select_exprs },
+            transforms: Vec::new(),
+            type_def_id: None,
+            schema: std::sync::Arc::new(schema),
+            identity_expr: None,
+        }))
     }
 
     /// Evaluate a list expression
     ///
-    /// Lists of primitives become a single-column DataFrame.
     /// Lists of records get concatenated lazily.
+    /// Lists of primitives (Expr) are not typical in this DSL.
     fn eval_list(&mut self, items: &[ExprId]) -> Result<Value, RuntimeError> {
-        use crate::runtime::value::RecordsPlan;
+        use crate::runtime::value::{RecordsPlan, SourceDescriptor};
 
         if items.is_empty() {
-            return Ok(Value::Records(RecordsPlan::new(LazyFrame::default())));
+            return Ok(Value::Records(RecordsPlan::empty()));
         }
 
         let values: Vec<Value> = items
@@ -479,73 +384,42 @@ impl<'a> IrEvaluator<'a> {
             .collect::<Result<Vec<_>, _>>()?;
 
         match &values[0] {
-            Value::Int(_) => {
-                let ints: Vec<i64> = values
-                    .into_iter()
-                    .map(|v| match v {
-                        Value::Int(i) => i,
-                        _ => unreachable!("Type checker ensures homogeneous lists"),
-                    })
-                    .collect();
-                let series = Series::from_iter(ints);
-                let df = DataFrame::new(vec![series.into_column()])
-                    .map_err(|e| self.make_error(format!("Failed to create list: {}", e)))?;
-                Ok(Value::Records(RecordsPlan::new(df.lazy())))
-            }
-
-            Value::String(_) => {
-                let strings: Vec<&str> = values
-                    .iter()
-                    .map(|v| match v {
-                        Value::String(s) => s.as_ref(),
-                        _ => unreachable!("Type checker ensures homogeneous lists"),
-                    })
-                    .collect();
-                let series = Series::from_iter(strings);
-                let df = DataFrame::new(vec![series.into_column()])
-                    .map_err(|e| self.make_error(format!("Failed to create list: {}", e)))?;
-                Ok(Value::Records(RecordsPlan::new(df.lazy())))
-            }
-
-            Value::Bool(_) => {
-                let bools: Vec<bool> = values
-                    .into_iter()
-                    .map(|v| match v {
-                        Value::Bool(b) => b,
-                        _ => unreachable!("Type checker ensures homogeneous lists"),
-                    })
-                    .collect();
-                let series = Series::from_iter(bools);
-                let df = DataFrame::new(vec![series.into_column()])
-                    .map_err(|e| self.make_error(format!("Failed to create list: {}", e)))?;
-                Ok(Value::Records(RecordsPlan::new(df.lazy())))
-            }
-
             Value::Records(_) => {
+                // Lazily concatenate all record plans
                 let plans: Vec<_> = values
                     .into_iter()
                     .map(|v| match v {
-                        Value::Records(plan) => plan,
+                        Value::Records(plan) => Box::new(plan),
                         _ => unreachable!("Type checker ensures homogeneous lists"),
                     })
                     .collect();
 
-                // Concatenate all LazyFrames, preserving metadata from first plan
-                let lfs: Vec<LazyFrame> = plans.iter().map(|p| p.lf.clone()).collect();
-                let concatenated = concat(lfs, UnionArgs::default())
-                    .map_err(|e| self.make_error(format!("Failed to concatenate lists: {}", e)))?;
+                // Get schema from first plan (all should have same schema)
+                let schema = plans
+                    .first()
+                    .map(|p| p.schema.as_ref().clone())
+                    .unwrap_or_default();
 
                 // Preserve metadata from first plan
-                let mut result_plan = RecordsPlan::new(concatenated);
-                if let Some(first) = plans.first() {
-                    result_plan.type_def_id = first.type_def_id;
-                    result_plan.subject_pattern = first.subject_pattern.clone();
-                }
+                let type_def_id = plans.first().and_then(|p| p.type_def_id);
+
+                // Create lazy concat source - NO materialization!
+                let result_plan = RecordsPlan {
+                    source: SourceDescriptor::Concat(plans),
+                    transforms: Vec::new(),
+                    type_def_id,
+                    schema: std::sync::Arc::new(schema),
+                    identity_expr: None,
+                };
 
                 Ok(Value::Records(result_plan))
             }
 
-            _ => Err(self.make_error("Unsupported list element type")),
+            // Lists of primitives are not typical in this DataFrame-based DSL
+            // The type system should guide users toward Records
+            _ => Err(self.make_error(
+                "Lists must contain records. Use type providers to load data.",
+            )),
         }
     }
 
@@ -682,86 +556,52 @@ impl<'a> IrEvaluator<'a> {
                     )));
                 }
 
-                // Check if any argument is an expression (lazy path)
-                let has_exprs = arg_values.iter().any(|v| matches!(v, Value::Expr(_)));
+                // All values are Expr - build select expressions for lazy transformation
+                let select_exprs: Vec<Expr> = field_names
+                    .iter()
+                    .zip(arg_values.into_iter())
+                    .map(|(field_name, value)| {
+                        let name_str = self.gcx.interner.resolve(*field_name);
+                        match value {
+                            Value::Expr(expr) => expr.alias(name_str),
+                            _ => lit(NULL).alias(name_str),
+                        }
+                    })
+                    .collect();
 
-                if has_exprs {
-                    // LAZY PATH: Build select expressions for transformation
-                    let select_exprs: Vec<Expr> = field_names
-                        .iter()
-                        .zip(arg_values.into_iter())
-                        .map(|(field_name, value)| {
-                            let name_str = self.gcx.interner.resolve(*field_name);
-                            match value {
-                                Value::Expr(expr) => expr.alias(name_str),
-                                Value::Int(i) => lit(i).alias(name_str),
-                                Value::String(s) => lit(s.as_ref()).alias(name_str),
-                                Value::Bool(b) => lit(b).alias(name_str),
-                                _ => lit(NULL).alias(name_str),
-                            }
-                        })
-                        .collect();
+                // Build schema from expressions
+                let schema = build_schema_from_exprs(&select_exprs);
 
-                    // Store expressions in the plan - they'll be applied to source by List::map
-                    Ok(Value::Records(RecordsPlan::from_exprs(select_exprs, type_def_id)))
-                } else {
-                    // CONCRETE PATH: All primitives - create single-row DataFrame
-                    let mut series_vec = Vec::new();
-                    for (field_name, value) in field_names.iter().zip(arg_values.into_iter()) {
-                        let name_str = PlSmallStr::from_str(self.gcx.interner.resolve(*field_name));
-
-                        let series = match value {
-                            Value::Int(i) => Series::new(name_str, &[i]).into_column(),
-                            Value::String(s) => Series::new(name_str, &[s.as_ref()]).into_column(),
-                            Value::Bool(b) => Series::new(name_str, &[b]).into_column(),
-                            _ => {
-                                return Err(
-                                    self.make_error("Unsupported value type in record constructor")
-                                );
-                            }
-                        };
-
-                        series_vec.push(series);
-                    }
-
-                    let df = DataFrame::new(series_vec)
-                        .map_err(|e| self.make_error(format!("Failed to create record: {}", e)))?;
-
-                    // Create plan with type information (use type's DefId for metadata lookup)
-                    Ok(Value::Records(RecordsPlan::with_type(df.lazy(), type_def_id)))
-                }
+                // Store expressions in the plan - they'll be applied to source by List::map
+                Ok(Value::Records(RecordsPlan::from_exprs(
+                    select_exprs,
+                    type_def_id,
+                    schema,
+                )))
             }
 
             _ => Err(self.make_error("Attempt to call non-function value")),
         }
     }
 
-    /// Evaluate field access (e.g., `row.id`)
+    /// Evaluate field access (e.g., `row.field`)
     ///
-    /// On RowContext: returns Value::Expr(col("field")) for lazy column access
-    /// On Records: returns Value::Expr(col("field")) - field access is lazy
+    /// Returns Value::Expr(col("field")) for lazy column access.
+    /// The actual selection happens at sink time (e.g., Rdf::serialize).
     fn eval_field_access(&mut self, expr: ExprId, field: Symbol) -> Result<Value, RuntimeError> {
         let value = self.eval(expr)?;
         let field_name = self.gcx.interner.resolve(field);
 
         match value {
-            // LAZY: RowContext field access returns an expression
-            Value::RowContext { schema } => {
+            Value::Records(plan) => {
                 // Validate field exists in schema
-                if !schema.contains(field_name) {
+                if !plan.schema.contains(field_name) {
                     return Err(self.make_error(format!(
                         "Field '{}' not found in schema. Available: {:?}",
                         field_name,
-                        schema.iter_names().collect::<Vec<_>>()
+                        plan.schema.iter_names().collect::<Vec<_>>()
                     )));
                 }
-                // Return lazy column expression
-                Ok(Value::Expr(col(field_name)))
-            }
-
-            // LAZY: Records field access returns an expression
-            // The actual selection happens at sink time (serialize)
-            Value::Records(_plan) => {
                 // Return lazy column expression
                 Ok(Value::Expr(col(field_name)))
             }
@@ -870,16 +710,22 @@ impl<'a> IrEvaluator<'a> {
     }
 }
 
-/// Extract column name from a Polars Expr if it's a simple column reference
+/// Build a schema from select expressions
 ///
-/// Returns Some("column_name") for col("column_name") expressions,
-/// None for complex expressions that can't be represented as a template.
-fn extract_column_name(expr: &polars::prelude::Expr) -> Option<String> {
-    use polars::prelude::Expr;
+/// Extracts field names from aliased expressions. Types are inferred as Unknown
+/// since the actual types come from the source data at runtime.
+fn build_schema_from_exprs(exprs: &[Expr]) -> Schema {
+    let fields: Vec<_> = exprs
+        .iter()
+        .filter_map(|expr| {
+            // Extract alias name from expression
+            if let Expr::Alias(_, name) = expr {
+                Some(Field::new(name.clone(), DataType::Unknown(Default::default())))
+            } else {
+                None
+            }
+        })
+        .collect();
 
-    match expr {
-        Expr::Column(name) => Some(name.to_string()),
-        Expr::Alias(inner, _) => extract_column_name(inner),
-        _ => None,
-    }
+    Schema::from_iter(fields)
 }

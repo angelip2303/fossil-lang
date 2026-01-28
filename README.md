@@ -1,17 +1,19 @@
-- [ ] Debe existir esto en Value? List(Vec<Value>), como una variante
 
-- [ ] /// Identificador único para el tipo Extension Entity
-pub const ENTITY_TYPE_ID: ExtensionTypeId = ExtensionTypeId(1);
+- [ ] Parece que annotations y metadata es como que los dos hacen referencia a lo mismo
 
-/// Identificador para streams perezosos de entidades
-pub const LAZY_ENTITY_STREAM_TYPE_ID: ExtensionTypeId = ExtensionTypeId(2);
 
-Tienen que existir los dos? Seguro? Esta es la mejor manera de manejar extensiones? En general, creo que el tema de streaming se puede mejorar, ya que realmente no somos 100% capaces de trabajar con larger than ram datasets
 
-- [ ] Quizás el concepto de un único Record suelto va fuera?
-- [ ] Todo lo de extensiones también va fuera
+- [ ] En mi opinión, es probable que estemos usando más cosas de terceros de las que deberíamos
+
+- constructor.rs debería de ser unicamente azucar sintactico para la instanciación de records: Es
+  decir, type Name = { name: string }, se podría construir así: let name: Name = { name = "John" }
+  o así: let name = Name("John")
+
+- [ ] Va fuera todo el tema de extensiones, asegurarse de ello
+
 - [ ] fn parse_subject_pattern(subject_uri: &str) parece que hardcodea el transformar string interpolation, string interpolation deberia de ser syntax sugar para String::concat, no?
 
+- [ ] Comprobar si List::join funciona correctamente
 
 - [ ] Con una embedding API puede ser que pudiesemos quitar fossil-stdlib como un crate de Rust, y trabajar directamente con archivos .fossil?
 

@@ -94,8 +94,6 @@ pub enum ExprKind {
         parts: Vec<Symbol>,
         exprs: Vec<ExprId>,
     },
-    /// Placeholder `_` for field selectors (e.g., `_.field`)
-    Placeholder,
 }
 
 #[derive(Debug)]

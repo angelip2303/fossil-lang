@@ -258,14 +258,31 @@ impl FunctionImpl for CsvLoadFunction {
     }
 
     fn call(&self, _args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
-        use fossil_lang::runtime::value::RecordsPlan;
+        use fossil_lang::runtime::value::{RecordsPlan, SourceDescriptor};
 
-        let lf = LazyCsvReader::new(self.uri.clone())
+        // Extract path string from PlPath
+        let path_str = match &self.uri {
+            PlPath::Local(p) => p.to_string_lossy().to_string(),
+            PlPath::Cloud(c) => c.to_string(),
+        };
+
+        // Create source descriptor - no data is loaded yet!
+        let source = SourceDescriptor::Csv {
+            path: path_str,
+            delimiter: self.options.delimiter,
+            has_header: self.options.has_header,
+        };
+
+        // Infer schema at load time (this reads only the header, not all data)
+        let schema = LazyCsvReader::new(self.uri.clone())
             .with_has_header(self.options.has_header)
             .with_infer_schema_length(self.options.infer_schema_length)
             .with_separator(self.options.delimiter)
             .with_quote_char(self.options.quote_char)
-            .finish()?;
+            .finish()?
+            .collect_schema()?
+            .as_ref()
+            .clone();
 
         // Look up type DefId to include in the plan
         let type_def_id = ctx
@@ -275,8 +292,8 @@ impl FunctionImpl for CsvLoadFunction {
             .and_then(|sym| ctx.gcx.definitions.get_by_symbol(sym).map(|d| d.id()));
 
         let plan = match type_def_id {
-            Some(def_id) => RecordsPlan::with_type(lf, def_id),
-            None => RecordsPlan::new(lf),
+            Some(def_id) => RecordsPlan::with_type(source, schema, def_id),
+            None => RecordsPlan::new(source, schema),
         };
 
         Ok(Value::Records(plan))

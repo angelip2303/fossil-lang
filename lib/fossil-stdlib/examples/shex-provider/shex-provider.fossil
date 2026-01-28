@@ -3,11 +3,11 @@ const ROOT = "lib/fossil-stdlib/examples/shex-provider"
 type PersonData = csv!("${ROOT}/people.csv")
 type Person = shex!("${ROOT}/person.shex", shape: "PersonShape")
 
-let csv_to_rdf = fn(row) -> {
+let to_rdf = fn(row) -> {
     Person(row.name, row.age, row.email)
         |> Entity::with_id("http://example.com/person/${row.name}")
 }
 
 PersonData::load()
-|> List::map(csv_to_rdf)
-|> Rdf::serialize("${ROOT}/results.ttl")
+|> List::map(to_rdf)
+|> Rdf::serialize("results.parquet")

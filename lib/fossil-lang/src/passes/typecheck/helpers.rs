@@ -106,19 +106,6 @@ impl TypeChecker {
                 format!("{{{}}}", self.format_row(row))
             }
             TypeKind::List(elem) => format!("[{}]", self.format_type(*elem)),
-            TypeKind::FieldSelector {
-                record_ty,
-                field_ty,
-                field,
-            } => {
-                let field_name = self.gcx.interner.resolve(*field);
-                format!(
-                    "FieldSelector<{}, {} as {}>",
-                    self.format_type(*record_ty),
-                    field_name,
-                    self.format_type(*field_ty)
-                )
-            }
             TypeKind::Provider { .. } => "<provider>".to_string(),
         }
     }

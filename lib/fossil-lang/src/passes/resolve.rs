@@ -361,7 +361,7 @@ impl IrResolver {
                 }
             }
 
-            ExprKind::Unit | ExprKind::Literal(_) | ExprKind::Placeholder | ExprKind::FieldSelector { .. } => {}
+            ExprKind::Unit | ExprKind::Literal(_) => {}
         }
     }
 
@@ -419,8 +419,7 @@ impl IrResolver {
 
             TypeKind::Unit
             | TypeKind::Primitive(_)
-            | TypeKind::Var(_)
-            | TypeKind::FieldSelector { .. } => {}
+            | TypeKind::Var(_) => {}
         }
     }
 

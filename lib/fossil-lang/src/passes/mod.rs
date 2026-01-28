@@ -1,6 +1,7 @@
 use crate::ast::ast;
 use crate::ir;
 
+pub mod convert;
 pub mod expand;
 pub mod parse;
 pub mod resolve;

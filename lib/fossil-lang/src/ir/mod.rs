@@ -7,16 +7,14 @@
 //!
 //! This design enables in-place mutation and avoids rebuilding the tree at each pass.
 
-pub mod convert;
-pub mod resolve;
-
 use polars::prelude::DataType;
 
 use crate::ast::Loc;
 use crate::context::{Arena, DefId, NodeId, Symbol};
 
-pub use convert::ast_to_ir;
-pub use resolve::IrResolver;
+// Re-exports for backwards compatibility (passes are now in crate::passes)
+pub use crate::passes::convert::ast_to_ir;
+pub use crate::passes::resolve::IrResolver;
 
 pub type StmtId = NodeId<Stmt>;
 pub type ExprId = NodeId<Expr>;
@@ -197,13 +195,6 @@ pub enum ExprKind {
         parts: Vec<Symbol>,
         exprs: Vec<ExprId>,
     },
-    /// Placeholder `_` for field selectors (e.g., `_.field`)
-    Placeholder,
-    /// Field selector `_.field` - type-safe reference to a field (created during type checking)
-    FieldSelector {
-        field: Symbol,
-        record_ty: TypeId,
-    },
 }
 
 /// A parameter in a function
@@ -273,12 +264,6 @@ pub enum TypeKind {
     App { ctor: Ident, args: Vec<TypeId> },
     /// A type variable (for type inference)
     Var(TypeVar),
-    /// Field selector type
-    FieldSelector {
-        record_ty: TypeId,
-        field_ty: TypeId,
-        field: Symbol,
-    },
 }
 
 /// A path to an identifier
@@ -491,31 +476,4 @@ impl Polytype {
             ty,
         }
     }
-}
-
-// =============================================================================
-// Attribute support (from AST)
-// =============================================================================
-
-/// Attribute annotation on record fields
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Attribute {
-    pub name: Symbol,
-    pub args: Vec<AttributeArg>,
-    pub loc: Loc,
-}
-
-/// A single argument in an attribute
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct AttributeArg {
-    pub key: Symbol,
-    pub value: Literal,
-}
-
-/// Record field with optional attributes
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RecordField {
-    pub name: Symbol,
-    pub ty: TypeId,
-    pub attrs: Vec<Attribute>,
 }

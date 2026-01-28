@@ -172,58 +172,6 @@ impl TypeChecker {
                 self.unify_rows(row1.clone(), row2.clone(), loc)
             }
 
-            // FieldSelector unification
-            (
-                TypeKind::FieldSelector {
-                    record_ty: r1,
-                    field_ty: f1,
-                    field: fld1,
-                },
-                TypeKind::FieldSelector {
-                    record_ty: r2,
-                    field_ty: f2,
-                    field: fld2,
-                },
-            ) => {
-                // Check if either field is a wildcard (used in function signatures)
-                // The `_` symbol represents "any field" and matches any field selector
-                let fld1_name = self.gcx.interner.resolve(*fld1);
-                let fld2_name = self.gcx.interner.resolve(*fld2);
-                let is_wildcard1 = fld1_name == "_";
-                let is_wildcard2 = fld2_name == "_";
-
-                // Fields must match unless one is a wildcard
-                if !is_wildcard1 && !is_wildcard2 && fld1 != fld2 {
-                    let expected_str = self.format_type(ty1_id);
-                    let actual_str = self.format_type(ty2_id);
-                    return Err(CompileError::new(
-                        CompileErrorKind::TypeMismatch {
-                            expected: ty1_id,
-                            actual: ty2_id,
-                        },
-                        loc,
-                    )
-                    .with_context(format!(
-                        "Field selectors have different field names: `{}` vs `{}`",
-                        expected_str, actual_str
-                    )));
-                }
-
-                // Unify record types
-                let r1 = *r1;
-                let r2 = *r2;
-                let f1 = *f1;
-                let f2 = *f2;
-                let s1 = self.unify(r1, r2, loc.clone())?;
-
-                // Unify field types
-                let f1_applied = s1.apply(f1, &mut self.ir);
-                let f2_applied = s1.apply(f2, &mut self.ir);
-                let s2 = self.unify(f1_applied, f2_applied, loc)?;
-
-                Ok(s1.compose(&s2, &mut self.ir))
-            }
-
             // Functions
             (TypeKind::Function(params1, ret1), TypeKind::Function(params2, ret2)) => {
                 if params1.len() != params2.len() {
@@ -332,11 +280,6 @@ impl TypeChecker {
                 params.iter().any(|p| self.occurs_in(var, *p)) || self.occurs_in(var, *ret)
             }
             TypeKind::List(elem) => self.occurs_in(var, *elem),
-            TypeKind::FieldSelector {
-                record_ty,
-                field_ty,
-                ..
-            } => self.occurs_in(var, *record_ty) || self.occurs_in(var, *field_ty),
             TypeKind::Primitive(_)
             | TypeKind::Named(_)
             | TypeKind::Unit

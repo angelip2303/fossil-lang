@@ -58,15 +58,6 @@ impl TypeEnv {
                 vars.extend(self.free_vars_type(*ret, ir));
                 vars
             }
-            TypeKind::FieldSelector {
-                record_ty,
-                field_ty,
-                ..
-            } => {
-                let mut vars = self.free_vars_type(*record_ty, ir);
-                vars.extend(self.free_vars_type(*field_ty, ir));
-                vars
-            }
             TypeKind::List(inner) => self.free_vars_type(*inner, ir),
             TypeKind::Primitive(_)
             | TypeKind::Named(_)

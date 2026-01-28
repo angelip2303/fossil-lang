@@ -6,10 +6,8 @@
 //! # Lazy Streaming Architecture
 //!
 //! All transformations are compiled to Polars expressions, enabling true streaming.
-//! The closure is "traced" with a RowContext that returns Expr values for field
+//! The closure is "traced" with a Records context that returns Expr values for field
 //! accesses, building a lazy transformation plan instead of materializing rows.
-
-use std::sync::Arc;
 
 use fossil_lang::ast::Loc;
 use fossil_lang::error::RuntimeError;
@@ -18,13 +16,12 @@ use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::evaluator::IrEvaluator;
 use fossil_lang::runtime::value::{RecordsPlan, Value};
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
-use polars::prelude::*;
 
 /// Map function implementation
 ///
 /// Signature: forall T, U. (List<T>, (T -> U)) -> List<U>
 ///
-/// Traces the transformation function with a RowContext to build Polars expressions.
+/// Traces the transformation function with a Records context to build Polars expressions.
 /// The result is a lazy plan that transforms the source without materializing rows.
 ///
 /// # Example
@@ -100,8 +97,9 @@ impl FunctionImpl for MapFunction {
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
         use fossil_lang::error::{CompileError, CompileErrorKind};
+        use fossil_lang::runtime::value::Transform;
 
-        // Extract RecordsPlan (LazyFrame + metadata)
+        // Extract RecordsPlan
         let source_plan = match &args[0] {
             Value::Records(plan) => plan.clone(),
             _ => {
@@ -115,39 +113,33 @@ impl FunctionImpl for MapFunction {
         // Extract transformation function
         let transform_fn = &args[1];
 
-        // Get schema from source to create RowContext
-        let schema = source_plan.lf.clone().collect_schema().map_err(|e| {
-            CompileError::new(
-                CompileErrorKind::Runtime(format!("Failed to get schema: {}", e)),
-                Loc::generated(),
-            )
-        })?;
-
-        // LAZY TRACING: Evaluate the closure with RowContext
+        // LAZY TRACING: Evaluate the closure with a tracing context
         // Field accesses will return Expr values, building a lazy transformation
-        let row_context = Value::RowContext {
-            schema: Arc::new((*schema).clone()),
-        };
+        let row_context = Value::Records(RecordsPlan::new(
+            fossil_lang::runtime::value::SourceDescriptor::Empty,
+            source_plan.schema.as_ref().clone(),
+        ));
 
         let traced_result = trace_transform(transform_fn, row_context, ctx)?;
 
         match traced_result {
             Value::Records(traced_plan) => {
-                // Get the select expressions from the traced plan
-                let select_exprs = traced_plan.select_exprs.clone().unwrap_or_default();
-
-                // Apply the transformation to the source LazyFrame
-                let transformed_lf = if select_exprs.is_empty() {
-                    source_plan.lf.clone()
+                // Check if traced_plan is a Pending transformation
+                if let Some(select_exprs) = traced_plan.source.take_select_exprs() {
+                    // Apply the pending transformation to our source
+                    let mut final_plan = source_plan.clone();
+                    if !select_exprs.is_empty() {
+                        final_plan.transforms.push(Transform::Select(select_exprs));
+                    }
+                    final_plan.type_def_id = traced_plan.type_def_id;
+                    final_plan.schema = traced_plan.schema;
+                    final_plan.identity_expr = traced_plan.identity_expr;
+                    Ok(Value::Records(final_plan))
                 } else {
-                    source_plan.lf.clone().select(select_exprs)
-                };
-
-                let mut final_plan = RecordsPlan::new(transformed_lf);
-                final_plan.type_def_id = traced_plan.type_def_id;
-                final_plan.subject_pattern = traced_plan.subject_pattern;
-
-                Ok(Value::Records(final_plan))
+                    // Not a pending transformation - use the traced plan directly
+                    // This handles cases where the transformation returns a concrete value
+                    Ok(Value::Records(traced_plan))
+                }
             }
             _ => Err(CompileError::new(
                 CompileErrorKind::Runtime(
@@ -159,7 +151,7 @@ impl FunctionImpl for MapFunction {
     }
 }
 
-/// Trace a transformation function with RowContext to discover the output structure
+/// Trace a transformation function to discover the output structure
 fn trace_transform(
     transform_fn: &Value,
     row_context: Value,
@@ -197,7 +189,7 @@ fn trace_transform(
 
 /// Join two LazyFrames on a common column
 ///
-/// Signature: forall T, U, V, F1, F2. (List<T>, List<U>, FieldSelector<T, F1>, FieldSelector<U, F2>) -> List<V>
+/// Signature: forall T, U, V. (List<T>, List<U>, String, String) -> List<V>
 pub struct JoinFunction;
 
 impl FunctionImpl for JoinFunction {
@@ -210,8 +202,6 @@ impl FunctionImpl for JoinFunction {
         let t_var = next_type_var();
         let u_var = next_type_var();
         let v_var = next_type_var();
-        let f1_var = next_type_var();
-        let f2_var = next_type_var();
 
         let t_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
@@ -221,16 +211,6 @@ impl FunctionImpl for JoinFunction {
         let u_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Var(u_var),
-        });
-
-        let f1_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Var(f1_var),
-        });
-
-        let f2_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Var(f2_var),
         });
 
         let list_ctor = gcx.list_type_ctor.expect("List type constructor not registered");
@@ -251,22 +231,10 @@ impl FunctionImpl for JoinFunction {
             },
         });
 
-        let left_selector_ty = ir.types.alloc(Type {
+        // String type for column names
+        let string_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
-            kind: TypeKind::FieldSelector {
-                record_ty: t_ty,
-                field_ty: f1_ty,
-                field: gcx.wildcard_symbol(),
-            },
-        });
-
-        let right_selector_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::FieldSelector {
-                record_ty: u_ty,
-                field_ty: f2_ty,
-                field: gcx.wildcard_symbol(),
-            },
+            kind: TypeKind::Primitive(fossil_lang::ir::PrimitiveType::String),
         });
 
         let return_ty = ir.types.alloc(Type {
@@ -277,12 +245,12 @@ impl FunctionImpl for JoinFunction {
         let fn_ty = ir.types.alloc(Type {
             loc: Loc::generated(),
             kind: TypeKind::Function(
-                vec![left_list_ty, right_list_ty, left_selector_ty, right_selector_ty],
+                vec![left_list_ty, right_list_ty, string_ty, string_ty],
                 return_ty,
             ),
         });
 
-        Polytype::poly(vec![t_var, u_var, v_var, f1_var, f2_var], fn_ty)
+        Polytype::poly(vec![t_var, u_var, v_var], fn_ty)
     }
 
     fn call(&self, args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
@@ -312,36 +280,51 @@ impl FunctionImpl for JoinFunction {
             }
         };
 
-        let left_on = match &args[2] {
-            Value::FieldSelector(s) => s.as_ref().to_string(),
-            _ => {
-                return Err(CompileError::new(
-                    CompileErrorKind::Runtime(
-                        "List::join expects a field selector as third argument".to_string(),
-                    ),
-                    Loc::generated(),
-                ));
+        let left_on = args[2].as_literal_string().ok_or_else(|| {
+            CompileError::new(
+                CompileErrorKind::Runtime(
+                    "List::join expects a string literal as third argument (left column name)"
+                        .to_string(),
+                ),
+                Loc::generated(),
+            )
+        })?;
+
+        let right_on = args[3].as_literal_string().ok_or_else(|| {
+            CompileError::new(
+                CompileErrorKind::Runtime(
+                    "List::join expects a string literal as fourth argument (right column name)"
+                        .to_string(),
+                ),
+                Loc::generated(),
+            )
+        })?;
+
+        use fossil_lang::runtime::value::SourceDescriptor;
+
+        // Build combined schema (left + right, excluding duplicate join column)
+        let mut combined_schema = left_plan.schema.as_ref().clone();
+        for (name, dtype) in right_plan.schema.iter() {
+            if name.as_str() != right_on {
+                combined_schema.insert_at_index(combined_schema.len(), name.clone(), dtype.clone())
+                    .ok(); // Ignore if already exists
             }
+        }
+
+        // Create lazy join - NO materialization!
+        let result_plan = RecordsPlan {
+            source: SourceDescriptor::Join {
+                left: Box::new(left_plan.clone()),
+                right: Box::new(right_plan.clone()),
+                left_on,
+                right_on,
+            },
+            transforms: Vec::new(),
+            type_def_id: None,
+            schema: std::sync::Arc::new(combined_schema),
+            identity_expr: None,
         };
 
-        let right_on = match &args[3] {
-            Value::FieldSelector(s) => s.as_ref().to_string(),
-            _ => {
-                return Err(CompileError::new(
-                    CompileErrorKind::Runtime(
-                        "List::join expects a field selector as fourth argument".to_string(),
-                    ),
-                    Loc::generated(),
-                ));
-            }
-        };
-
-        // Perform inner join (lazy)
-        let result = left_plan
-            .lf
-            .clone()
-            .inner_join(right_plan.lf.clone(), col(&left_on), col(&right_on));
-
-        Ok(Value::Records(RecordsPlan::new(result)))
+        Ok(Value::Records(result_plan))
     }
 }

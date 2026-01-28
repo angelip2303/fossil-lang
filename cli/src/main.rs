@@ -31,8 +31,7 @@ fn main() {
 
     match cli.command {
         Commands::Run { script } => {
-            if let Err(e) = run_script(&script) {
-                eprintln!("Error: {e:?}");
+            if let Err(_) = run_script(&script) {
                 std::process::exit(1);
             }
         }
@@ -75,7 +74,6 @@ fn run_script(script: &PathBuf) -> Result<(), RunError> {
     // 4. Setup compiler context
     let mut gcx = GlobalContext::new();
     gcx.register_provider("csv", fossil_providers::csv::CsvProvider);
-    gcx.register_provider("sql", fossil_providers::sql::SqlProvider);
     gcx.register_provider("shex", fossil_providers::shapes::shex::ShexProvider);
     fossil_stdlib::init(&mut gcx);
 

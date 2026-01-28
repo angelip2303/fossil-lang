@@ -421,15 +421,10 @@ where
                 ctx.alloc_expr(ExprKind::Application { callee, args }, ctx.to_loc(e.span()))
             });
 
-        // Placeholder `_` for field selectors
-        let placeholder = just(Token::Underscore)
-            .map_with(|_, e| ctx.alloc_expr(ExprKind::Placeholder, ctx.to_loc(e.span())));
-
         // Block must come BEFORE record since both start with {
         // Block: { stmt* } parses as statements
         // Record: { field = expr, ... } requires field names with =
         // Function must come BEFORE application and path to avoid parsing 'fn' as identifier
-        // Placeholder must come BEFORE path to avoid `_` being parsed as identifier
         let atom = choice((
             function,
             application,
@@ -438,7 +433,6 @@ where
             list,
             block,
             record,
-            placeholder,
             self_expr,
             path,
         ))

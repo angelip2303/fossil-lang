@@ -19,32 +19,6 @@ use crate::passes::{
     expand::ProviderExpander, parse::Parser, typecheck::TypeChecker, GlobalContext, IrProgram,
 };
 
-/// Result of compilation with access to the GlobalContext
-///
-/// This struct provides both the compilation result (success or errors)
-/// and access to the GlobalContext, which contains the interner needed
-/// for formatting error messages with resolved symbol names.
-pub struct CompilationResult {
-    /// The compiled program (if compilation succeeded)
-    pub program: Option<IrProgram>,
-    /// Compilation errors (empty if successful)
-    pub errors: Vec<CompileError>,
-    /// The GlobalContext containing the interner for symbol resolution
-    pub gcx: GlobalContext,
-}
-
-impl CompilationResult {
-    /// Check if compilation was successful
-    pub fn is_ok(&self) -> bool {
-        self.errors.is_empty() && self.program.is_some()
-    }
-
-    /// Check if compilation failed
-    pub fn is_err(&self) -> bool {
-        !self.errors.is_empty()
-    }
-}
-
 /// Compiler input options
 #[derive(Debug, Clone)]
 pub enum CompilerInput {

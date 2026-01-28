@@ -193,7 +193,6 @@ impl AstToIrConverter {
                 }
             }
 
-            ast::ExprKind::Placeholder => ExprKind::Placeholder,
         };
 
         self.ir.exprs.alloc(Expr {

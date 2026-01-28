@@ -89,28 +89,6 @@ impl Subst {
                 }
             }
 
-            TypeKind::FieldSelector {
-                record_ty,
-                field_ty,
-                field,
-            } => {
-                let new_record_ty = self.apply_with_cache(record_ty, ir, cache);
-                let new_field_ty = self.apply_with_cache(field_ty, ir, cache);
-
-                if new_record_ty == record_ty && new_field_ty == field_ty {
-                    ty_id
-                } else {
-                    ir.types.alloc(Type {
-                        loc: loc.clone(),
-                        kind: TypeKind::FieldSelector {
-                            record_ty: new_record_ty,
-                            field_ty: new_field_ty,
-                            field,
-                        },
-                    })
-                }
-            }
-
             TypeKind::List(inner) => {
                 let new_inner = self.apply_with_cache(inner, ir, cache);
                 if new_inner == inner {

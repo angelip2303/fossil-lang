@@ -10,8 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::context::{
-    AttributeRegistry, AttributeSchema, DefId, DefKind, Definitions, Interner, Kind, Symbol,
-    TypeConstructorInfo, TypeMetadata,
+    DefId, DefKind, Definitions, Interner, Kind, Symbol, TypeConstructorInfo, TypeMetadata,
 };
 use crate::traits::function::FunctionImpl;
 
@@ -41,8 +40,6 @@ pub struct GlobalContext {
     pub interner: Interner,
     /// Definition storage
     pub definitions: Definitions,
-    /// Pre-interned wildcard symbol `_` for use in type signatures
-    wildcard_symbol: Symbol,
 
     // === Type System ===
     /// Registry of type constructors (generic types like List, Entity, Option)
@@ -60,27 +57,19 @@ pub struct GlobalContext {
     pub trait_impls: HashMap<(DefId, DefId), TraitImplInfo>,
     /// Builtin trait DefIds
     pub builtin_traits: BuiltinTraits,
-
-    // === Attributes ===
-    /// Registry of attribute schemas for compile-time validation
-    pub attribute_registry: AttributeRegistry,
 }
 
 impl GlobalContext {
     pub fn new() -> Self {
-        let mut interner = Interner::default();
-        // Pre-intern the wildcard symbol for use in type signatures
-        let wildcard_symbol = interner.intern("_");
+        let interner = Interner::default();
 
         let mut gcx = Self {
             interner,
             definitions: Definitions::default(),
-            wildcard_symbol,
             type_metadata: HashMap::new(),
             pending_type_metadata: HashMap::new(),
             type_constructors: HashMap::new(),
             list_type_ctor: None,
-            attribute_registry: AttributeRegistry::new(),
             trait_impls: HashMap::new(),
             builtin_traits: BuiltinTraits::default(),
         };
@@ -92,37 +81,6 @@ impl GlobalContext {
         gcx.register_builtin_traits();
 
         gcx
-    }
-
-    /// Get the pre-interned wildcard symbol `_`
-    ///
-    /// This symbol is used in type signatures to represent "any field"
-    /// in FieldSelector types.
-    pub fn wildcard_symbol(&self) -> Symbol {
-        self.wildcard_symbol
-    }
-
-    /// Register an attribute schema
-    ///
-    /// This allows external crates (like fossil-stdlib) to register
-    /// their attribute schemas for compile-time validation.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use fossil_lang::passes::GlobalContext;
-    /// use fossil_lang::context::{AttributeSchema, AttributeTarget, ArgSpec, ArgType};
-    ///
-    /// let mut gcx = GlobalContext::new();
-    /// gcx.register_attribute(
-    ///     AttributeSchema::new("rdf", AttributeTarget::Field)
-    ///         .arg("uri", ArgSpec::required(ArgType::String))
-    ///         .arg("prefix", ArgSpec::optional(ArgType::String))
-    /// );
-    /// ```
-    pub fn register_attribute(&mut self, schema: AttributeSchema) {
-        let name_symbol = self.interner.intern(schema.name);
-        self.attribute_registry.register(schema, name_symbol);
     }
 
     /// Register builtin traits (e.g., ToString)

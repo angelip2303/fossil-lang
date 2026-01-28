@@ -290,46 +290,9 @@ impl Definitions {
         }
     }
 
-    pub fn get_children(&self, parent_id: DefId) -> Vec<&Def> {
-        self.items
-            .iter()
-            .filter(|def| def.parent == Some(parent_id))
-            .collect()
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = &Def> {
         self.items.iter()
     }
-
-    /// Update a function definition's implementation
-    ///
-    /// This is used to install runtime implementations for auto-generated functions
-    /// like record constructors.
-    ///
-    /// # Panics
-    /// Panics if the DefId is not a function or doesn't exist
-    pub fn update_function(&mut self, id: DefId, func: Option<Arc<dyn FunctionImpl>>) {
-        let def = &mut self.items[id.index() as usize];
-        match &mut def.kind {
-            DefKind::Func(impl_slot) => {
-                *impl_slot = func;
-            }
-            _ => panic!("Attempted to update non-function definition as function"),
-        }
-    }
-}
-
-/// Metadata about a module for tracking file-based organization
-#[derive(Clone, Debug)]
-pub struct ModuleInfo {
-    /// The DefId of this module
-    pub def_id: DefId,
-    /// Parent module (None for root modules)
-    pub parent: Option<DefId>,
-    /// Source file path for this module
-    pub file_path: PathBuf,
-    /// Child module DefIds
-    pub children: Vec<DefId>,
 }
 
 /// Kind of a type (for kind checking)
@@ -378,10 +341,8 @@ pub struct TypeConstructorInfo {
     pub param_kinds: Vec<Kind>,
 }
 
-pub mod attributes;
 pub mod global;
 pub mod metadata;
 
-pub use self::attributes::*;
 pub use self::global::*;
 pub use self::metadata::*;

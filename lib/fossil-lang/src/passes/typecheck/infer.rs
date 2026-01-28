@@ -6,7 +6,7 @@
 //! The key difference from the previous HIR/THIR-based implementation is that
 //! we now work directly on the unified IR, inferring types in-place.
 
-use crate::error::{CompileError, CompileErrorKind, ErrorSuggestion};
+use crate::error::{CompileError, CompileErrorKind};
 use crate::ir::{
     ExprId, ExprKind, Ident, Literal, Polytype, PrimitiveType, RecordRow, StmtKind, Type, TypeId,
     TypeKind,
@@ -222,59 +222,7 @@ impl TypeChecker {
                 Ok((subst, final_ret_ty))
             }
 
-            ExprKind::Placeholder => {
-                // Standalone placeholder is invalid
-                Err(CompileError::new(CompileErrorKind::InvalidPlaceholder, loc)
-                    .with_context(
-                        "The placeholder `_` must be followed by a field access like `_.field`",
-                    )
-                    .with_suggestion(ErrorSuggestion::Help(
-                        "Use `_.field` to create a type-safe field selector".to_string(),
-                    )))
-            }
-
             ExprKind::FieldAccess { expr, field } => {
-                // Check if this is a field selector (_.field)
-                let inner_expr = self.ir.exprs.get(*expr);
-                if matches!(inner_expr.kind, ExprKind::Placeholder) {
-                    // This is a field selector: _.field
-                    let record_ty = self.fresh_type_var(loc.clone());
-                    let field_ty = self.fresh_type_var(loc.clone());
-
-                    // Constraint: record_ty must have the field
-                    let rest_var = self.tvg.fresh();
-                    let expected_row = RecordRow::Extend {
-                        field: *field,
-                        ty: field_ty,
-                        rest: Box::new(RecordRow::Var(rest_var)),
-                    };
-                    let expected_record = self.record_type(expected_row, loc.clone());
-                    let s1 = self.unify(record_ty, expected_record, loc.clone())?;
-
-                    let resolved_record_ty = s1.apply(record_ty, &mut self.ir);
-                    let resolved_field_ty = s1.apply(field_ty, &mut self.ir);
-
-                    // Create FieldSelector type
-                    let selector_ty = self.ir.types.alloc(Type {
-                        loc: loc.clone(),
-                        kind: TypeKind::FieldSelector {
-                            record_ty: resolved_record_ty,
-                            field_ty: resolved_field_ty,
-                            field: *field,
-                        },
-                    });
-
-                    // Transform the expression from FieldAccess to FieldSelector
-                    // This ensures the evaluator can handle it at runtime
-                    let expr_mut = self.ir.exprs.get_mut(expr_id);
-                    expr_mut.kind = ExprKind::FieldSelector {
-                        field: *field,
-                        record_ty: resolved_record_ty,
-                    };
-
-                    return Ok((s1, selector_ty));
-                }
-
                 // Normal field access
                 let (mut subst, expr_ty) = self.infer(*expr)?;
                 let expr_ty = subst.apply(expr_ty, &mut self.ir);
@@ -340,26 +288,6 @@ impl TypeChecker {
                         Ok((subst, field_ty))
                     }
 
-                    TypeKind::FieldSelector {
-                        field: selector_field,
-                        ..
-                    } => {
-                        let selector_name = self.gcx.interner.resolve(*selector_field);
-                        let field_name = self.gcx.interner.resolve(*field);
-                        Err(CompileError::new(
-                            CompileErrorKind::UndefinedVariable { name: *field },
-                            loc.clone(),
-                        )
-                        .with_context(format!(
-                            "Cannot access field '{}' on a field selector `_.{}`",
-                            field_name, selector_name
-                        ))
-                        .with_suggestion(ErrorSuggestion::Help(
-                            "Field selectors are references to column names, not records."
-                                .to_string(),
-                        )))
-                    }
-
                     _ => Err(CompileError::new(
                         CompileErrorKind::UndefinedVariable { name: *field },
                         loc.clone(),
@@ -369,21 +297,6 @@ impl TypeChecker {
                         self.gcx.interner.resolve(*field)
                     ))),
                 }
-            }
-
-            ExprKind::FieldSelector { field, record_ty } => {
-                // This is already a FieldSelector expression in the IR
-                // Just return its type
-                let field_ty = self.fresh_type_var(loc.clone());
-                let selector_ty = self.ir.types.alloc(Type {
-                    loc: loc.clone(),
-                    kind: TypeKind::FieldSelector {
-                        record_ty: *record_ty,
-                        field_ty,
-                        field: *field,
-                    },
-                });
-                Ok((Subst::default(), selector_ty))
             }
 
             ExprKind::Block { stmts } => {
