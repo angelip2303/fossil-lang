@@ -39,7 +39,7 @@ use fossil_lang::ast::ast::{
     Type as AstType, TypeKind as AstTypeKind,
 };
 use fossil_lang::context::Interner;
-use fossil_lang::error::{CompileErrorKind, ProviderError};
+use fossil_lang::error::{ProviderError, ProviderErrorKind};
 use fossil_lang::traits::provider::{ProviderOutput, ProviderParamInfo, TypeProviderImpl};
 
 use iri_s::IriS;
@@ -48,7 +48,7 @@ use shex_ast::ast::{Schema, ShapeExpr, ShapeExprLabel, TripleExpr};
 use shex_ast::compact::ShExParser;
 
 use crate::shapes::{ShapeField, extract_local_name, xsd_to_fossil_type};
-use crate::utils::*;
+use crate::utils::{extract_string_path, provider_err, validate_extension, validate_path};
 
 /// ShEx Type Provider
 ///
@@ -79,22 +79,21 @@ impl TypeProviderImpl for ShexProvider {
         _type_name: &str,
     ) -> Result<ProviderOutput, ProviderError> {
         let (path, shape_name) = parse_shex_args(args, interner)?;
-        validate_extension(path.as_ref(), &["shex"], interner)?;
-        validate_path(path.as_ref(), interner)?;
+        validate_extension(path.as_ref(), &["shex"]).map_err(provider_err)?;
+        validate_path(path.as_ref()).map_err(provider_err)?;
 
-        let shex_content = fs::read_to_string(path.to_str()).map_err(|e| {
-            ProviderError::new(
-                CompileErrorKind::ProviderError(
-                    interner.intern(&format!("Failed to read ShEx file: {}", e)),
-                ),
-                Loc::generated(),
-            )
+        let path_str = path.to_str().to_string();
+        let shex_content = fs::read_to_string(&path_str).map_err(|e| {
+            provider_err(ProviderErrorKind::ReadError {
+                path: path_str.clone(),
+                cause: e.to_string(),
+            })
         })?;
 
-        let schema = parse_shex_schema(&shex_content, interner)?;
+        let schema = parse_shex_schema(&shex_content)?;
 
         // Find the specified shape
-        let shape_fields = extract_shape_fields(&schema, &shape_name, interner)?;
+        let shape_fields = extract_shape_fields(&schema, &shape_name)?;
 
         // Convert ShEx fields to AST record fields
         let fields = shex_fields_to_ast_fields(shape_fields, ast, interner);
@@ -115,83 +114,65 @@ impl TypeProviderImpl for ShexProvider {
 /// Parse ShEx provider arguments
 fn parse_shex_args(
     args: &[ProviderArgument],
-    interner: &mut Interner,
+    interner: &Interner,
 ) -> Result<(PlPath, String), ProviderError> {
     let mut iter = args.iter().take(2);
-    let path = iter.next();
-    let shape = iter.next();
 
-    if let (Some(arg), Some(shape)) = (path, shape) {
-        let path = match arg {
-            ProviderArgument::Positional(lit) => match lit {
-                Literal::String(sym) => PlPath::from_str(interner.resolve(*sym)),
-                _ => {
-                    return Err(ProviderError::new(
-                        CompileErrorKind::ProviderError(
-                            interner.intern("path argument must be of type string"),
-                        ),
-                        Loc::generated(),
-                    ));
-                }
-            },
-            _ => {
-                return Err(ProviderError::new(
-                    CompileErrorKind::ProviderError(
-                        interner.intern("CSV provider requires a file path"),
-                    ),
-                    Loc::generated(),
-                ));
-            }
-        };
+    // First argument: path (positional)
+    let Some(path_arg) = iter.next() else {
+        return Err(provider_err(ProviderErrorKind::MissingArgument {
+            name: "path",
+            provider: "shex",
+        }));
+    };
 
-        let shape = match shape {
-            ProviderArgument::Named { name, value } => {
-                if *name == interner.intern("shape")
-                    && let Literal::String(shape) = value
-                {
-                    interner.resolve(*shape).to_string()
-                } else {
-                    return Err(ProviderError::new(
-                        CompileErrorKind::ProviderError(
-                            interner.intern("shape argument must be a string"),
-                        ),
-                        Loc::generated(),
-                    ));
-                }
+    let ProviderArgument::Positional(lit) = path_arg else {
+        return Err(provider_err(ProviderErrorKind::MissingArgument {
+            name: "path",
+            provider: "shex",
+        }));
+    };
+
+    let path = extract_string_path(lit, interner).map_err(provider_err)?;
+
+    // Second argument: shape (named)
+    let Some(shape_arg) = iter.next() else {
+        return Err(provider_err(ProviderErrorKind::MissingArgument {
+            name: "shape",
+            provider: "shex",
+        }));
+    };
+
+    let shape = match shape_arg {
+        ProviderArgument::Named { name, value } if interner.resolve(*name) == "shape" => {
+            if let Literal::String(s) = value {
+                interner.resolve(*s).to_string()
+            } else {
+                return Err(provider_err(ProviderErrorKind::InvalidArgumentType {
+                    name: "shape",
+                    expected: "a string",
+                }));
             }
-            _ => {
-                return Err(ProviderError::new(
-                    CompileErrorKind::ProviderError(
-                        interner.intern("CSV provider requires a shape argument"),
-                    ),
-                    Loc::generated(),
-                ));
-            }
-        };
-        return Ok((path, shape));
-    } else {
-        Err(ProviderError::new(
-            CompileErrorKind::ProviderError(
-                interner.intern("CSV provider requires at least a file path argument"),
-            ),
-            Loc::generated(),
-        ))
-    }
+        }
+        _ => {
+            return Err(provider_err(ProviderErrorKind::MissingArgument {
+                name: "shape",
+                provider: "shex",
+            }))
+        }
+    };
+
+    Ok((path, shape))
 }
 
 /// Parse ShEx schema content
-fn parse_shex_schema(content: &str, interner: &mut Interner) -> Result<Schema, ProviderError> {
-    // Create a source IRI for parsing
+fn parse_shex_schema(content: &str) -> Result<Schema, ProviderError> {
     let source_iri = IriS::new_unchecked("file:///schema.shex");
-
-    // Parse the ShEx schema
     ShExParser::parse(content, None, &source_iri).map_err(|e| {
-        ProviderError::new(
-            CompileErrorKind::ProviderError(
-                interner.intern(&format!("Failed to parse ShEx schema: {}", e)),
-            ),
-            Loc::generated(),
-        )
+        provider_err(ProviderErrorKind::ParseError {
+            format: "ShEx",
+            cause: e.to_string(),
+        })
     })
 }
 
@@ -201,32 +182,22 @@ fn parse_shex_schema(content: &str, interner: &mut Interner) -> Result<Schema, P
 fn extract_shape_fields(
     schema: &Schema,
     shape_name: &str,
-    interner: &mut Interner,
 ) -> Result<Vec<ShapeField>, ProviderError> {
-    // Find shape by name in the schema
-    let shapes = schema.shapes().ok_or_else(|| {
-        ProviderError::new(
-            CompileErrorKind::ProviderError(interner.intern("Schema has no shapes defined")),
-            Loc::generated(),
-        )
-    })?;
+    let shapes = schema
+        .shapes()
+        .ok_or_else(|| provider_err(ProviderErrorKind::NoShapesDefined))?;
 
-    // Look for the shape with matching name
     for shape_decl in shapes {
         if shape_label_matches(shape_decl.id(), shape_name) {
             let mut fields = Vec::new();
-            // The shape_expr field contains the actual shape expression
             extract_fields_from_shape_expr(&shape_decl.shape_expr, &mut fields, schema);
             return Ok(fields);
         }
     }
 
-    Err(ProviderError::new(
-        CompileErrorKind::ProviderError(
-            interner.intern(&format!("Shape '{}' not found in schema", shape_name)),
-        ),
-        Loc::generated(),
-    ))
+    Err(provider_err(ProviderErrorKind::ShapeNotFound {
+        name: shape_name.to_string(),
+    }))
 }
 
 /// Check if a shape label matches the given name

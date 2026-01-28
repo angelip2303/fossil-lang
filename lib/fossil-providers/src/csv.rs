@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
-use fossil_lang::ast::Loc;
 use fossil_lang::ast::ast::{
     Ast, Literal, ProviderArgument, Type as AstType, TypeKind as AstTypeKind,
 };
 use fossil_lang::context::Interner;
-use fossil_lang::error::{ProviderError, RuntimeError};
-use fossil_lang::ir::{Ident, Ir, Polytype, Type as IrType, TypeKind as IrTypeKind, TypeVar};
+use fossil_lang::error::{ProviderError, ProviderErrorKind, RuntimeError};
+use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
@@ -15,7 +14,10 @@ use fossil_lang::traits::provider::{
 };
 use polars::prelude::*;
 
-use crate::utils::*;
+use crate::utils::{
+    extract_string_path, lookup_type_id, provider_err, schema_to_ast_fields, validate_extension,
+    validate_path,
+};
 
 /// Configuration options for CSV provider
 #[derive(Debug, Clone)]
@@ -40,67 +42,51 @@ impl Default for CsvOptions {
 /// Parse CSV provider options from provider arguments (positional or named)
 fn parse_csv_options(
     args: &[ProviderArgument],
-    interner: &mut Interner,
+    interner: &Interner,
 ) -> Result<(PlPath, CsvOptions), ProviderError> {
-    use fossil_lang::error::CompileErrorKind;
-
     let mut options = CsvOptions::default();
     let mut iter = args.iter();
 
-    if let Some(arg) = iter.next() {
-        match arg {
-            ProviderArgument::Positional(lit) => {
-                let path = match lit {
-                    Literal::String(sym) => PlPath::from_str(interner.resolve(*sym)),
-                    _ => {
-                        return Err(ProviderError::new(
-                            CompileErrorKind::ProviderError(
-                                interner.intern("path argument must be of type string"),
-                            ),
-                            Loc::generated(),
-                        ));
-                    }
-                };
+    let Some(arg) = iter.next() else {
+        return Err(provider_err(ProviderErrorKind::MissingArgument {
+            name: "path",
+            provider: "csv",
+        }));
+    };
 
-                let delimiter_sym = interner.intern("delimiter");
-                let has_header_sym = interner.intern("has_header");
+    let ProviderArgument::Positional(lit) = arg else {
+        return Err(provider_err(ProviderErrorKind::MissingArgument {
+            name: "path",
+            provider: "csv",
+        }));
+    };
 
-                for arg in iter {
-                    if let ProviderArgument::Named { name, value } = arg {
-                        if *name == delimiter_sym {
-                            if let Literal::String(sym) = value {
-                                let delim_str = interner.resolve(*sym);
-                                if !delim_str.is_empty() {
-                                    options.delimiter = delim_str.as_bytes()[0];
-                                }
-                            }
-                        } else if *name == has_header_sym
-                            && let Literal::Boolean(b) = value
-                        {
-                            options.has_header = *b;
+    let path = extract_string_path(lit, interner).map_err(provider_err)?;
+
+    // Parse optional named arguments
+    for arg in iter {
+        if let ProviderArgument::Named { name, value } = arg {
+            let name_str = interner.resolve(*name);
+            match name_str {
+                "delimiter" => {
+                    if let Literal::String(sym) = value {
+                        let delim_str = interner.resolve(*sym);
+                        if !delim_str.is_empty() {
+                            options.delimiter = delim_str.as_bytes()[0];
                         }
                     }
                 }
-
-                return Ok((path, options));
-            }
-            _ => {
-                return Err(ProviderError::new(
-                    CompileErrorKind::ProviderError(
-                        interner.intern("CSV provider requires a file path"),
-                    ),
-                    Loc::generated(),
-                ));
+                "has_header" => {
+                    if let Literal::Boolean(b) = value {
+                        options.has_header = *b;
+                    }
+                }
+                _ => {}
             }
         }
-    } else {
-        return Err(ProviderError::new(
-            CompileErrorKind::ProviderError(
-                interner.intern("CSV provider requires at least a file path argument"),
-            ),
-            Loc::generated(),
-        ));
     }
+
+    Ok((path, options))
 }
 
 pub struct CsvProvider;
@@ -134,8 +120,8 @@ impl TypeProviderImpl for CsvProvider {
         type_name: &str,
     ) -> Result<ProviderOutput, ProviderError> {
         let (path, options) = parse_csv_options(args, interner)?;
-        validate_extension(path.as_ref(), &["csv"], interner)?;
-        validate_path(path.as_ref(), interner)?;
+        validate_extension(path.as_ref(), &["csv"]).map_err(provider_err)?;
+        validate_path(path.as_ref()).map_err(provider_err)?;
         let schema = infer_csv_schema(path.clone(), &options)?;
         let fields = schema_to_ast_fields(&schema, ast, interner);
 
@@ -206,55 +192,23 @@ impl FunctionImpl for CsvLoadFunction {
     fn signature(
         &self,
         ir: &mut Ir,
-        _next_type_var: &mut dyn FnMut() -> TypeVar,
+        next_type_var: &mut dyn FnMut() -> TypeVar,
         gcx: &GlobalContext,
     ) -> Polytype {
-        // Look up the type DefId by name
-        let type_sym = gcx.interner.lookup(&self.type_name);
-        let type_def_id =
-            type_sym.and_then(|sym| gcx.definitions.get_by_symbol(sym).map(|d| d.id()));
-
-        let result_ty = if let Some(def_id) = type_def_id {
-            // Look up the List type constructor
-            let list_sym = gcx.interner.lookup("List");
-            let list_def_id =
-                list_sym.and_then(|sym| gcx.definitions.get_by_symbol(sym).map(|d| d.id()));
-
-            // Create Named type for the record type
-            let record_ty = ir.types.alloc(IrType {
-                loc: Loc::generated(),
-                kind: IrTypeKind::Named(Ident::Resolved(def_id)),
-            });
-
-            if let Some(list_id) = list_def_id {
-                // Return List<RecordType>
-                ir.types.alloc(IrType {
-                    loc: Loc::generated(),
-                    kind: IrTypeKind::App {
-                        ctor: Ident::Resolved(list_id),
-                        args: vec![record_ty],
-                    },
-                })
-            } else {
-                // Fallback: just return the record type (shouldn't happen)
-                record_ty
+        // () -> List<RecordType>
+        let result_ty = match (
+            lookup_type_id(&self.type_name, gcx),
+            lookup_type_id("List", gcx),
+        ) {
+            (Some(type_id), Some(list_id)) => {
+                let record_ty = ir.named_type(type_id);
+                ir.list_type(record_ty, list_id)
             }
-        } else {
-            // Fallback: use type variable if we can't find the type
-            let t_var = _next_type_var();
-            ir.types.alloc(IrType {
-                loc: Loc::generated(),
-                kind: IrTypeKind::Var(t_var),
-            })
+            (Some(type_id), None) => ir.named_type(type_id),
+            _ => ir.var_type(next_type_var()),
         };
 
-        // Create function type: () -> List<RecordType>
-        let fn_ty = ir.types.alloc(IrType {
-            loc: Loc::generated(),
-            kind: IrTypeKind::Function(vec![], result_ty),
-        });
-
-        Polytype::mono(fn_ty)
+        Polytype::mono(ir.fn_type(vec![], result_ty))
     }
 
     fn call(&self, _args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {

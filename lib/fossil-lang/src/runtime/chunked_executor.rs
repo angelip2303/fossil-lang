@@ -3,10 +3,18 @@
 //! This is the ONLY place where RecordsPlan is materialized into actual data.
 //! All execution goes through this module, ensuring constant memory usage
 //! regardless of dataset size.
+//!
+//! # Lazy Evaluation Guarantee
+//!
+//! This module uses `SafeLazyFrame` internally to build transformation pipelines.
+//! The `.collect()` method is only called here, in `execute_lazy_to_parquet`,
+//! through `SafeLazyFrame::into_inner()`. External code cannot accidentally
+//! materialize data because `SafeLazyFrame` does not expose `.collect()`.
 
 use polars::prelude::*;
 use std::path::Path;
 
+use super::lazy_frame::SafeLazyFrame;
 use super::value::{RecordsPlan, SourceDescriptor, Transform};
 
 /// Executes RecordsPlan in chunks of configurable size
@@ -28,9 +36,9 @@ impl ChunkedExecutor {
     /// This is the ONLY way to materialize a RecordsPlan.
     /// Returns the total number of rows written.
     pub fn execute_plan_to_parquet(&self, plan: &RecordsPlan, path: &str) -> PolarsResult<u64> {
-        // Build the LazyFrame from the plan (internal only!)
-        let lf = self.build_lazy_frame(plan)?;
-        self.execute_lazy_to_parquet(lf, path)
+        // Build the SafeLazyFrame from the plan (internal only!)
+        let safe_lf = self.build_safe_lazy_frame(plan)?;
+        self.execute_safe_lazy_to_parquet(safe_lf, path)
     }
 
     /// Execute a RecordsPlan with additional selection expressions
@@ -42,47 +50,51 @@ impl ChunkedExecutor {
         select_exprs: Vec<Expr>,
         path: &str,
     ) -> PolarsResult<u64> {
-        let mut lf = self.build_lazy_frame(plan)?;
+        let mut safe_lf = self.build_safe_lazy_frame(plan)?;
         if !select_exprs.is_empty() {
-            lf = lf.select(select_exprs);
+            safe_lf = safe_lf.select(select_exprs);
         }
-        self.execute_lazy_to_parquet(lf, path)
+        self.execute_safe_lazy_to_parquet(safe_lf, path)
     }
 
-    /// Build a LazyFrame from a RecordsPlan
+    /// Build a SafeLazyFrame from a RecordsPlan
     ///
     /// PRIVATE: This is internal to the executor. No external code should
     /// be able to get a LazyFrame from a RecordsPlan.
-    fn build_lazy_frame(&self, plan: &RecordsPlan) -> PolarsResult<LazyFrame> {
-        let mut lf = self.build_source_lazy_frame(&plan.source)?;
+    fn build_safe_lazy_frame(&self, plan: &RecordsPlan) -> PolarsResult<SafeLazyFrame> {
+        let mut safe_lf = self.build_source_safe_lazy_frame(&plan.source)?;
 
         // Apply all transforms
         for transform in &plan.transforms {
-            lf = Self::apply_transform(lf, transform);
+            safe_lf = Self::apply_transform(safe_lf, transform);
         }
 
-        Ok(lf)
+        Ok(safe_lf)
     }
 
-    /// Build a LazyFrame from a SourceDescriptor
-    fn build_source_lazy_frame(&self, source: &SourceDescriptor) -> PolarsResult<LazyFrame> {
+    /// Build a SafeLazyFrame from a SourceDescriptor
+    fn build_source_safe_lazy_frame(&self, source: &SourceDescriptor) -> PolarsResult<SafeLazyFrame> {
         match source {
             SourceDescriptor::Csv {
                 path,
                 delimiter,
                 has_header,
-            } => LazyCsvReader::new(PlPath::from_str(path))
-                .with_separator(*delimiter)
-                .with_has_header(*has_header)
-                .finish(),
-
-            SourceDescriptor::Parquet { path } => {
-                LazyFrame::scan_parquet(PlPath::from_str(path), Default::default())
+            } => {
+                let lf = LazyCsvReader::new(PlPath::from_str(path))
+                    .with_separator(*delimiter)
+                    .with_has_header(*has_header)
+                    .finish()?;
+                Ok(SafeLazyFrame::new(lf))
             }
 
-            SourceDescriptor::InMemory(df) => Ok(df.as_ref().clone().lazy()),
+            SourceDescriptor::Parquet { path } => {
+                let lf = LazyFrame::scan_parquet(PlPath::from_str(path), Default::default())?;
+                Ok(SafeLazyFrame::new(lf))
+            }
 
-            SourceDescriptor::Empty => Ok(LazyFrame::default()),
+            SourceDescriptor::InMemory(df) => Ok(SafeLazyFrame::new(df.as_ref().clone().lazy())),
+
+            SourceDescriptor::Empty => Ok(SafeLazyFrame::new(LazyFrame::default())),
 
             SourceDescriptor::Pending { .. } => Err(PolarsError::ComputeError(
                 "Cannot execute a pending transformation - it must be applied to a source first"
@@ -90,11 +102,13 @@ impl ChunkedExecutor {
             )),
 
             SourceDescriptor::Concat(plans) => {
+                // For concat, we need to extract the inner LazyFrames temporarily
                 let lfs: PolarsResult<Vec<LazyFrame>> = plans
                     .iter()
-                    .map(|p| self.build_lazy_frame(p))
+                    .map(|p| self.build_safe_lazy_frame(p).map(|slf| slf.into_inner()))
                     .collect();
-                concat(lfs?, UnionArgs::default())
+                let concatenated = concat(lfs?, UnionArgs::default())?;
+                Ok(SafeLazyFrame::new(concatenated))
             }
 
             SourceDescriptor::Join {
@@ -103,24 +117,28 @@ impl ChunkedExecutor {
                 left_on,
                 right_on,
             } => {
-                let left_lf = self.build_lazy_frame(left)?;
-                let right_lf = self.build_lazy_frame(right)?;
+                let left_lf = self.build_safe_lazy_frame(left)?;
+                let right_lf = self.build_safe_lazy_frame(right)?;
                 Ok(left_lf.inner_join(right_lf, col(left_on), col(right_on)))
             }
         }
     }
 
-    /// Apply a transform to a LazyFrame
-    fn apply_transform(lf: LazyFrame, transform: &Transform) -> LazyFrame {
+    /// Apply a transform to a SafeLazyFrame
+    fn apply_transform(safe_lf: SafeLazyFrame, transform: &Transform) -> SafeLazyFrame {
         match transform {
-            Transform::Select(exprs) => lf.select(exprs.clone()),
-            Transform::Filter(expr) => lf.filter(expr.clone()),
-            Transform::WithColumn(expr) => lf.with_column(expr.clone()),
+            Transform::Select(exprs) => safe_lf.select(exprs.clone()),
+            Transform::Filter(expr) => safe_lf.filter(expr.clone()),
+            Transform::WithColumn(expr) => safe_lf.with_column(expr.clone()),
         }
     }
 
-    /// Execute a LazyFrame to Parquet in chunks
-    fn execute_lazy_to_parquet(&self, mut lf: LazyFrame, path: &str) -> PolarsResult<u64> {
+    /// Execute a SafeLazyFrame to Parquet in chunks
+    ///
+    /// This is the ONLY place where `.collect()` is called, through `into_inner()`.
+    fn execute_safe_lazy_to_parquet(&self, safe_lf: SafeLazyFrame, path: &str) -> PolarsResult<u64> {
+        // Convert to LazyFrame for batched execution - this is the ONLY place we do this
+        let mut lf = safe_lf.into_inner();
         let path = Path::new(path);
         let mut total_rows: u64 = 0;
         let mut offset: i64 = 0;

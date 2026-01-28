@@ -155,9 +155,83 @@ pub enum CompileErrorKind {
     InfiniteType(TypeVar),
     InvalidListElement(TypeId),
     InvalidRecordField(Symbol, TypeId),
-    ProviderError(Symbol),
+    Provider(ProviderErrorKind),
     Runtime(String),
     InternalCompilerError { phase: &'static str, message: String },
+}
+
+// =============================================================================
+// Provider Errors
+// =============================================================================
+
+/// Specific error types for type providers (csv!, shex!, etc.)
+///
+/// Using an enum instead of strings provides:
+/// - Type safety: no typos in error messages
+/// - Consistency: same error always has same message
+/// - Extensibility: easy to add new error types
+/// - Documentation: the enum documents what errors are possible
+#[derive(Clone, Debug, Error)]
+pub enum ProviderErrorKind {
+    // -------------------------------------------------------------------------
+    // Argument Errors
+    // -------------------------------------------------------------------------
+    #[error("{provider} provider requires {name} argument")]
+    MissingArgument {
+        name: &'static str,
+        provider: &'static str,
+    },
+
+    #[error("{name} argument must be {expected}")]
+    InvalidArgumentType {
+        name: &'static str,
+        expected: &'static str,
+    },
+
+    // -------------------------------------------------------------------------
+    // File Errors
+    // -------------------------------------------------------------------------
+    #[error("File not found: {path}")]
+    FileNotFound { path: String },
+
+    #[error("Not a file: {path}")]
+    NotAFile { path: String },
+
+    #[error("Invalid file extension '{found}', expected: {expected}")]
+    InvalidExtension { found: String, expected: String },
+
+    #[error("Failed to read {path}: {cause}")]
+    ReadError { path: String, cause: String },
+
+    // -------------------------------------------------------------------------
+    // Parse Errors
+    // -------------------------------------------------------------------------
+    #[error("Failed to parse {format}: {cause}")]
+    ParseError {
+        format: &'static str,
+        cause: String,
+    },
+
+    // -------------------------------------------------------------------------
+    // Schema Errors (ShEx specific)
+    // -------------------------------------------------------------------------
+    #[error("Schema has no shapes defined")]
+    NoShapesDefined,
+
+    #[error("Shape '{name}' not found in schema")]
+    ShapeNotFound { name: String },
+
+    // -------------------------------------------------------------------------
+    // Polars/Data Errors
+    // -------------------------------------------------------------------------
+    #[error("Data error: {0}")]
+    DataError(String),
+
+    // -------------------------------------------------------------------------
+    // Fallback for edge cases
+    // -------------------------------------------------------------------------
+    #[error("{0}")]
+    Custom(String),
 }
 
 /// A type variable used in error messages
@@ -252,13 +326,7 @@ impl CompileError {
             InvalidRecordField(field, _) => {
                 format!("Invalid record field '{}'", format_symbol(*field, interner))
             }
-            ProviderError(_) => {
-                if let Some(ctx) = &self.context {
-                    ctx.clone()
-                } else {
-                    "Provider error".to_string()
-                }
-            }
+            Provider(kind) => kind.to_string(),
             Runtime(msg) => msg.clone(),
             InternalCompilerError { phase, message } => {
                 format!("Internal compiler error in {}: {}", phase, message)
@@ -324,19 +392,17 @@ pub type ProviderError = CompileError;
 impl From<polars::error::PolarsError> for CompileError {
     fn from(err: polars::error::PolarsError) -> Self {
         CompileError::new(
-            CompileErrorKind::ProviderError(Symbol::synthetic()),
+            CompileErrorKind::Provider(ProviderErrorKind::DataError(err.to_string())),
             crate::ast::Loc::generated(),
         )
-        .with_context(format!("Polars error: {}", err))
     }
 }
 
 impl From<std::io::Error> for CompileError {
     fn from(err: std::io::Error) -> Self {
         CompileError::new(
-            CompileErrorKind::ProviderError(Symbol::synthetic()),
+            CompileErrorKind::Provider(ProviderErrorKind::Custom(format!("IO error: {}", err))),
             crate::ast::Loc::generated(),
         )
-        .with_context(format!("IO error: {}", err))
     }
 }

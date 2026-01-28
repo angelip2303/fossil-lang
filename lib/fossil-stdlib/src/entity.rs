@@ -1,6 +1,6 @@
 use fossil_lang::ast::Loc;
 use fossil_lang::error::RuntimeError;
-use fossil_lang::ir::{Ir, Polytype, PrimitiveType, Type, TypeKind, TypeVar};
+use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
@@ -35,23 +35,9 @@ impl FunctionImpl for EntityWithIdFunction {
     ) -> Polytype {
         // forall T. (T, String) -> T
         let t_var = next_type_var();
-
-        let t_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Var(t_var),
-        });
-
-        let string_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Primitive(PrimitiveType::String),
-        });
-
-        let fn_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Function(vec![t_ty, string_ty], t_ty),
-        });
-
-        Polytype::poly(vec![t_var], fn_ty)
+        let t_ty = ir.var_type(t_var);
+        let string_ty = ir.string_type();
+        Polytype::poly(vec![t_var], ir.fn_type(vec![t_ty, string_ty], t_ty))
     }
 
     fn call(&self, args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, RuntimeError> {

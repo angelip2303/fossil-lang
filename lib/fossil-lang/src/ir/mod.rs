@@ -30,6 +30,90 @@ pub struct Ir {
     pub root: Vec<StmtId>,
 }
 
+// =============================================================================
+// Type Construction Helpers
+// =============================================================================
+//
+// These helpers reduce boilerplate when building function signatures.
+// Instead of 35 lines per signature, you can write 3 lines.
+
+impl Ir {
+    /// Create a String type
+    pub fn string_type(&mut self) -> TypeId {
+        self.types.alloc(Type {
+            loc: Loc::generated(),
+            kind: TypeKind::Primitive(PrimitiveType::String),
+        })
+    }
+
+    /// Create a Unit type
+    pub fn unit_type(&mut self) -> TypeId {
+        self.types.alloc(Type {
+            loc: Loc::generated(),
+            kind: TypeKind::Unit,
+        })
+    }
+
+    /// Create an Int type
+    pub fn int_type(&mut self) -> TypeId {
+        self.types.alloc(Type {
+            loc: Loc::generated(),
+            kind: TypeKind::Primitive(PrimitiveType::Int),
+        })
+    }
+
+    /// Create a Float type
+    pub fn float_type(&mut self) -> TypeId {
+        self.types.alloc(Type {
+            loc: Loc::generated(),
+            kind: TypeKind::Primitive(PrimitiveType::Float),
+        })
+    }
+
+    /// Create a Bool type
+    pub fn bool_type(&mut self) -> TypeId {
+        self.types.alloc(Type {
+            loc: Loc::generated(),
+            kind: TypeKind::Primitive(PrimitiveType::Bool),
+        })
+    }
+
+    /// Create a type variable
+    pub fn var_type(&mut self, var: TypeVar) -> TypeId {
+        self.types.alloc(Type {
+            loc: Loc::generated(),
+            kind: TypeKind::Var(var),
+        })
+    }
+
+    /// Create a function type: (params) -> return_type
+    pub fn fn_type(&mut self, params: Vec<TypeId>, return_type: TypeId) -> TypeId {
+        self.types.alloc(Type {
+            loc: Loc::generated(),
+            kind: TypeKind::Function(params, return_type),
+        })
+    }
+
+    /// Create a List<T> type given the element type and the List type constructor DefId
+    pub fn list_type(&mut self, elem_type: TypeId, list_ctor: DefId) -> TypeId {
+        self.types.alloc(Type {
+            loc: Loc::generated(),
+            kind: TypeKind::App {
+                ctor: Ident::Resolved(list_ctor),
+                args: vec![elem_type],
+            },
+        })
+    }
+
+    /// Create a Named type referencing a defined type by its DefId
+    pub fn named_type(&mut self, def_id: DefId) -> TypeId {
+        self.types.alloc(Type {
+            loc: Loc::generated(),
+            kind: TypeKind::Named(Ident::Resolved(def_id)),
+        })
+    }
+}
+
 /// An identifier that can be unresolved (Path) or resolved (DefId)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ident {

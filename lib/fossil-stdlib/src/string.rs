@@ -4,8 +4,8 @@
 //! particularly for generating URIs from data values.
 
 use fossil_lang::ast::Loc;
-use fossil_lang::ir::{Ir, Polytype, PrimitiveType, Type, TypeKind, TypeVar};
 use fossil_lang::error::RuntimeError;
+use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
@@ -32,33 +32,10 @@ impl FunctionImpl for StringConcatFunction {
         _gcx: &GlobalContext,
     ) -> Polytype {
         // (string, string) -> string
-
-        // First parameter: string
-        let string_ty1 = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Primitive(PrimitiveType::String),
-        });
-
-        // Second parameter: string
-        let string_ty2 = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Primitive(PrimitiveType::String),
-        });
-
-        // Return type: string
-        let return_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Primitive(PrimitiveType::String),
-        });
-
-        // Function type: (string, string) -> string
-        let fn_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Function(vec![string_ty1, string_ty2], return_ty),
-        });
-
-        // Monomorphic type (no type variables)
-        Polytype::mono(fn_ty)
+        let s1 = ir.string_type();
+        let s2 = ir.string_type();
+        let ret = ir.string_type();
+        Polytype::mono(ir.fn_type(vec![s1, s2], ret))
     }
 
     fn call(&self, args: Vec<Value>, _: &RuntimeContext) -> Result<Value, RuntimeError> {
@@ -107,17 +84,10 @@ impl FunctionImpl for StringFormatFunction {
         _gcx: &GlobalContext,
     ) -> Polytype {
         // (String, String) -> String
-        let string_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Primitive(PrimitiveType::String),
-        });
-
-        let fn_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Function(vec![string_ty, string_ty], string_ty),
-        });
-
-        Polytype::mono(fn_ty)
+        let s1 = ir.string_type();
+        let s2 = ir.string_type();
+        let ret = ir.string_type();
+        Polytype::mono(ir.fn_type(vec![s1, s2], ret))
     }
 
     fn call(&self, args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, RuntimeError> {

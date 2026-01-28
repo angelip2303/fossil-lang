@@ -11,7 +11,7 @@
 
 use fossil_lang::ast::Loc;
 use fossil_lang::error::RuntimeError;
-use fossil_lang::ir::{Ident, Ir, Polytype, Type, TypeKind, TypeVar};
+use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::evaluator::IrEvaluator;
 use fossil_lang::runtime::value::{RecordsPlan, Value};
@@ -41,58 +41,17 @@ impl FunctionImpl for MapFunction {
         gcx: &GlobalContext,
     ) -> Polytype {
         // forall T, U. (List<T>, (T -> U)) -> List<U>
-
         let t_var = next_type_var();
         let u_var = next_type_var();
+        let t_ty = ir.var_type(t_var);
+        let u_ty = ir.var_type(u_var);
 
-        // T - element type
-        let t_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Var(t_var),
-        });
+        let list_ctor = gcx.list_type_ctor.expect("List type constructor not registered");
+        let list_t = ir.list_type(t_ty, list_ctor);
+        let list_u = ir.list_type(u_ty, list_ctor);
+        let mapper_fn = ir.fn_type(vec![t_ty], u_ty);
 
-        // U - result element type
-        let u_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Var(u_var),
-        });
-
-        // First parameter: List<T>
-        let list_ctor = gcx
-            .list_type_ctor
-            .expect("List type constructor not registered");
-
-        let list_t_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::App {
-                ctor: Ident::Resolved(list_ctor),
-                args: vec![t_ty],
-            },
-        });
-
-        // Second parameter: (T -> U) function
-        let fn_param_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Function(vec![t_ty], u_ty),
-        });
-
-        // Return type: List<U>
-        let return_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::App {
-                ctor: Ident::Resolved(list_ctor),
-                args: vec![u_ty],
-            },
-        });
-
-        // Function type: (List<T>, (T -> U)) -> List<U>
-        let map_fn_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Function(vec![list_t_ty, fn_param_ty], return_ty),
-        });
-
-        // Polymorphic: forall T, U. (List<T>, (T -> U)) -> List<U>
-        Polytype::poly(vec![t_var, u_var], map_fn_ty)
+        Polytype::poly(vec![t_var, u_var], ir.fn_type(vec![list_t, mapper_fn], list_u))
     }
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
@@ -199,58 +158,24 @@ impl FunctionImpl for JoinFunction {
         next_type_var: &mut dyn FnMut() -> TypeVar,
         gcx: &GlobalContext,
     ) -> Polytype {
+        // forall T, U, V. (List<T>, List<U>, String, String) -> V
         let t_var = next_type_var();
         let u_var = next_type_var();
         let v_var = next_type_var();
 
-        let t_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Var(t_var),
-        });
-
-        let u_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Var(u_var),
-        });
+        let t_ty = ir.var_type(t_var);
+        let u_ty = ir.var_type(u_var);
+        let v_ty = ir.var_type(v_var);
 
         let list_ctor = gcx.list_type_ctor.expect("List type constructor not registered");
+        let left_list = ir.list_type(t_ty, list_ctor);
+        let right_list = ir.list_type(u_ty, list_ctor);
+        let string_ty = ir.string_type();
 
-        let left_list_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::App {
-                ctor: Ident::Resolved(list_ctor),
-                args: vec![t_ty],
-            },
-        });
-
-        let right_list_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::App {
-                ctor: Ident::Resolved(list_ctor),
-                args: vec![u_ty],
-            },
-        });
-
-        // String type for column names
-        let string_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Primitive(fossil_lang::ir::PrimitiveType::String),
-        });
-
-        let return_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Var(v_var),
-        });
-
-        let fn_ty = ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Function(
-                vec![left_list_ty, right_list_ty, string_ty, string_ty],
-                return_ty,
-            ),
-        });
-
-        Polytype::poly(vec![t_var, u_var, v_var], fn_ty)
+        Polytype::poly(
+            vec![t_var, u_var, v_var],
+            ir.fn_type(vec![left_list, right_list, string_ty, string_ty], v_ty),
+        )
     }
 
     fn call(&self, args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
