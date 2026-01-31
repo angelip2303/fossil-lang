@@ -8,7 +8,7 @@ use chumsky::prelude::*;
 use logos::Logos;
 
 use crate::ast::{Loc, ast::Ast};
-use crate::error::{CompileError, CompileErrorKind, CompileErrors};
+use crate::error::{CompileErrors, ParseError};
 use crate::parser::{
     grammar::{AstCtx, parse_stmt},
     lexer::Token,
@@ -19,7 +19,7 @@ pub struct Parser;
 
 impl Parser {
     pub fn parse(src: &str, source_id: usize) -> Result<ParsedProgram, CompileErrors> {
-        Self::parse_with_context(src, source_id, GlobalContext::new())
+        Self::parse_with_context(src, source_id, Default::default())
     }
 
     pub fn parse_with_context(
@@ -28,19 +28,35 @@ impl Parser {
         mut gcx: GlobalContext,
     ) -> Result<ParsedProgram, CompileErrors> {
         // Tokenize with Logos - collect tokens WITH their original byte spans
+        // Lexer errors are converted to Token::Error and reported separately
         let lexer = Token::lexer(src);
         let len = src.len();
+        let mut lexer_errors = Vec::new();
         let tokens: Vec<(Token, SimpleSpan)> = lexer
             .spanned()
             .map(|(token_result, span)| {
+                let simple_span = SimpleSpan::from(span);
                 let token = match token_result {
                     Ok(t) => t,
-                    Err(_) => Token::Let, // placeholder for errors
+                    Err(_) => {
+                        lexer_errors.push(simple_span);
+                        Token::Error
+                    }
                 };
-                // Convert std::ops::Range to chumsky::span::SimpleSpan
-                (token, SimpleSpan::from(span))
+                (token, simple_span)
             })
             .collect();
+
+        // Report lexer errors before parsing
+        if !lexer_errors.is_empty() {
+            let mut compile_errors = CompileErrors::new();
+            for span in lexer_errors {
+                let loc = Loc::new(source_id, span.into_range());
+                let error_msg = gcx.interner.intern("Invalid token");
+                compile_errors.push(ParseError::syntax(error_msg, loc));
+            }
+            return Err(compile_errors);
+        }
 
         // Create AST and interner in Rc for shared access during parsing
         let ast = Rc::new(RefCell::new(Ast::default()));
@@ -99,11 +115,8 @@ impl Parser {
                     let error_msg = interner_ref.intern(&error_message);
                     // Convert SimpleSpan to Loc
                     let simple_span = err.span();
-                    let loc = Loc {
-                        source: source_id,
-                        span: simple_span.into_range(),
-                    };
-                    compile_errors.push(CompileError::new(CompileErrorKind::Parse(error_msg), loc));
+                    let loc = Loc::new(source_id, simple_span.into_range());
+                    compile_errors.push(ParseError::syntax(error_msg, loc));
                 }
 
                 Err(compile_errors)

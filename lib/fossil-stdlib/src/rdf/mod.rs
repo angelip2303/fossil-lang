@@ -1,43 +1,207 @@
 pub mod metadata;
 pub mod serializer;
 
-pub use metadata::RdfMetadata;
-pub use serializer::{OutputFormat, RdfBatchWriter};
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::str::FromStr;
 
-use fossil_lang::ast::Loc;
-use fossil_lang::error::RuntimeError;
+pub use metadata::{RdfFieldInfo, RdfMetadata, RdfTermType};
+pub use serializer::{ColumnarNTriplesWriter, PredicateColumn, RdfBatchWriter};
+
+use fossil_lang::error::{CompileError, RuntimeError};
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
-use fossil_lang::runtime::value::Value;
+use fossil_lang::runtime::chunked_executor::{ChunkedExecutor, estimate_batch_size_from_plan};
+use fossil_lang::runtime::value::{OutputPlan, OutputSpec, RecordsPlan, Value};
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 
+use oxrdf::{NamedNode, Term, TermParseError};
+use oxrdfio::RdfFormat;
 use polars::prelude::*;
+use thiserror::Error;
 
-/// Rdf::serialize function implementation
-///
-/// Signature: (Records, string) -> Unit
-///
-/// Serializes a RecordsPlan to an RDF file using metadata from type-level
-/// and field-level attributes.
-///
-/// # Type-Level Attributes
-///
-/// ```fossil
-/// #[rdf(type = "http://schema.org/Person", id = "http://example.org/${id}")]
-/// type Person = shex!("person.shex", shape: "PersonShape")
-/// ```
-///
-/// - `type`: Generates rdf:type triples for each entity
-/// - `id`: Template for subject URIs (blank nodes if omitted)
-///
-/// # Field-Level Attributes
-///
-/// ```fossil
-/// type Person = {
-///     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
-///     name: string,
-/// }
-/// ```
+/// RDF-specific errors
+#[derive(Debug, Error)]
+pub enum RdfError {
+    // Validation errors
+    #[error("'{0}' is not a valid subject")]
+    InvalidSubject(String),
+    #[error("Invalid predicate '{0}'")]
+    InvalidPredicate(String),
+    #[error(transparent)]
+    TermParse(#[from] TermParseError),
+
+    // Function argument errors
+    #[error("map() requires at least 1 argument: source")]
+    MapMissingSource,
+    #[error("map() first argument must be Records (from a type provider)")]
+    MapInvalidSource,
+    #[error("map() requires at least one transform closure")]
+    MapMissingTransform,
+    #[error("map() transform must return a typed record (e.g., Type {{ field = value }})")]
+    MapTransformNotTyped,
+    #[error("map() transform must return a record type")]
+    MapTransformNotRecord,
+    #[error("map() transform requires at least one parameter")]
+    MapTransformNoParams,
+    #[error("map() expects a function as argument")]
+    MapNotAFunction,
+
+    // Serialize errors
+    #[error("Rdf::serialize requires input and filename")]
+    SerializeMissingArgs,
+    #[error("Rdf::serialize filename must be a string literal")]
+    SerializeInvalidFilename,
+    #[error("Rdf::serialize expects an OutputPlan")]
+    SerializeInvalidInput,
+    #[error("Unsupported RDF format extension: {0}")]
+    UnsupportedFormat(String),
+
+    // I/O errors
+    #[error("Failed to create RDF writer: {0}")]
+    CreateWriter(String),
+    #[error("Failed to write RDF: {0}")]
+    Write(String),
+    #[error("Failed to finalize RDF file: {0}")]
+    Finalize(String),
+}
+
+impl From<RdfError> for CompileError {
+    fn from(err: RdfError) -> Self {
+        CompileError::from(RuntimeError::evaluation(err.to_string(), fossil_lang::ast::Loc::generated()))
+    }
+}
+
+pub fn is_subject(s: &str) -> Result<(), RdfError> {
+    match Term::from_str(s)? {
+        Term::BlankNode(_) | Term::NamedNode(_) | Term::Triple(_) => Ok(()),
+        Term::Literal(_) => Err(RdfError::InvalidSubject(s.into())),
+    }
+}
+
+pub fn is_predicate(s: &str) -> Result<(), RdfError> {
+    NamedNode::from_str(s).map_err(|_| RdfError::InvalidPredicate(s.into()))?;
+    Ok(())
+}
+
+pub struct MapFunction;
+
+impl FunctionImpl for MapFunction {
+    fn signature(
+        &self,
+        ir: &mut Ir,
+        next_type_var: &mut dyn FnMut() -> TypeVar,
+        _gcx: &GlobalContext,
+    ) -> Polytype {
+        // forall S O R. (List<S>, fn(S) -> O) -> R
+        // Where:
+        // - S is the source row type
+        // - O is the output type (inferred from transform return)
+        // - R is the result type (opaque OutputPlan)
+        // Note: Additional closures are accepted at runtime (variadic)
+        let s_var = next_type_var();
+        let o_var = next_type_var();
+        let r_var = next_type_var();
+
+        let s_ty = ir.var_type(s_var);
+        let o_ty = ir.var_type(o_var);
+        let r_ty = ir.var_type(r_var);
+
+        let list_s = ir.list_type(s_ty);
+        let transform_fn = ir.fn_type(vec![s_ty], o_ty);
+
+        Polytype::poly(
+            vec![s_var, o_var, r_var],
+            ir.fn_type(vec![list_s, transform_fn], r_ty),
+        )
+    }
+
+    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, CompileError> {
+        use fossil_lang::runtime::value::SourceDescriptor;
+
+        if args.is_empty() {
+            return Err(RdfError::MapMissingSource.into());
+        }
+
+        let source_plan = match &args[0] {
+            Value::Records(plan) => plan.clone(),
+            _ => return Err(RdfError::MapInvalidSource.into()),
+        };
+
+        let closures = &args[1..];
+        if closures.is_empty() {
+            return Err(RdfError::MapMissingTransform.into());
+        }
+
+        let mut outputs = Vec::with_capacity(closures.len());
+
+        for transform_fn in closures {
+            let row_context = Value::Records(RecordsPlan::new(
+                SourceDescriptor::Empty,
+                source_plan.schema.as_ref().clone(),
+            ));
+
+            let traced_result = trace_transform(transform_fn, row_context, ctx)?;
+
+            let (select_exprs, output_schema, type_def_id, meta_fields) = match traced_result {
+                Value::Records(traced_plan) => {
+                    if let Some(exprs) = traced_plan.source.take_select_exprs() {
+                        let type_def_id = traced_plan
+                            .type_def_id
+                            .ok_or(RdfError::MapTransformNotTyped)?;
+                        (exprs, traced_plan.schema, type_def_id, traced_plan.meta_fields.clone())
+                    } else {
+                        return Err(RdfError::MapTransformNotRecord.into());
+                    }
+                }
+                _ => return Err(RdfError::MapTransformNotRecord.into()),
+            };
+
+            outputs.push(OutputSpec {
+                type_def_id,
+                select_exprs,
+                schema: output_schema,
+                meta_fields,
+            });
+        }
+
+        Ok(Value::OutputPlan(OutputPlan {
+            source: source_plan,
+            outputs,
+        }))
+    }
+}
+
+/// Trace a transformation function to discover the output structure
+fn trace_transform(
+    transform_fn: &Value,
+    row_context: Value,
+    ctx: &RuntimeContext,
+) -> Result<Value, CompileError> {
+    use fossil_lang::runtime::evaluator::IrEvaluator;
+
+    match transform_fn {
+        Value::Closure {
+            params, body, env, ..
+        } => {
+            let mut closure_env = (**env).clone();
+
+            if let Some(first_param) = params.first() {
+                closure_env.bind(first_param.name, row_context);
+            } else {
+                return Err(RdfError::MapTransformNoParams.into());
+            }
+
+            let mut evaluator = IrEvaluator::new(ctx.ir, ctx.gcx, closure_env);
+            evaluator.eval(*body)
+        }
+
+        Value::BuiltinFunction(_, func) => func.call(vec![row_context], ctx),
+
+        _ => Err(RdfError::MapNotAFunction.into()),
+    }
+}
+
 pub struct RdfSerializeFunction;
 
 impl FunctionImpl for RdfSerializeFunction {
@@ -55,259 +219,200 @@ impl FunctionImpl for RdfSerializeFunction {
         Polytype::poly(vec![t_var], ir.fn_type(vec![t_ty, filename_ty], output_ty))
     }
 
-    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
-        use fossil_lang::error::{CompileError, CompileErrorKind};
-
+    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, CompileError> {
         let mut args_iter = args.into_iter();
 
-        let records_value = args_iter.next().ok_or_else(|| {
-            CompileError::new(
-                CompileErrorKind::Runtime(
-                    "Rdf::serialize requires records and filename".to_string(),
-                ),
-                Loc::generated(),
-            )
-        })?;
+        let input_value = args_iter.next().ok_or(RdfError::SerializeMissingArgs)?;
 
         let filename = args_iter
             .next()
             .and_then(|v| v.as_literal_string())
-            .ok_or_else(|| {
-                CompileError::new(
-                    CompileErrorKind::Runtime(
-                        "Rdf::serialize filename must be a string literal".to_string(),
-                    ),
-                    Loc::generated(),
-                )
-            })?;
+            .ok_or(RdfError::SerializeInvalidFilename)?;
 
-        // Extract RecordsPlan
-        let plan = match records_value {
-            Value::Records(plan) => plan,
-            _ => {
-                return Err(CompileError::new(
-                    CompileErrorKind::Runtime("Rdf::serialize expects records".to_string()),
-                    Loc::generated(),
-                ));
-            }
-        };
-
-        // Get RDF metadata from type-level and field-level attributes
-        let rdf_metadata = plan
-            .type_def_id
-            .and_then(|def_id| {
-                ctx.gcx
-                    .type_metadata
-                    .get(&def_id)
-                    .and_then(|tm| RdfMetadata::from_type_metadata(tm, &ctx.gcx.interner))
-            })
-            .ok_or_else(|| {
-                CompileError::new(
-                    CompileErrorKind::Runtime(
-                        "Rdf::serialize requires a typed record with #[rdf(...)] attributes.\n\
-                         Add type-level attributes like:\n\
-                         #[rdf(type = \"http://schema.org/Person\", id = \"http://example.org/${id}\")]\n\
-                         type Person = ..."
-                            .to_string(),
-                    ),
-                    Loc::generated(),
-                )
-            })?;
-
-        serialize_streaming(&plan, &rdf_metadata, &filename, ctx)
+        match input_value {
+            Value::OutputPlan(output_plan) => serialize_rdf(&output_plan, &filename, ctx),
+            _ => Err(RdfError::SerializeInvalidInput.into()),
+        }
     }
 }
 
-/// RDF serialization using chunked execution with Oxigraph
+/// Multi-output RDF serialization
 ///
-/// Uses ChunkedExecutor to process data in fixed-size batches, ensuring constant
-/// memory usage regardless of dataset size. Writes native RDF using Oxigraph.
+/// Iterates the source data ONCE and applies all output transforms,
+/// writing to a single RDF file. This is the streaming implementation
+/// for OutputPlan created by chaining `to()` calls.
 ///
-/// DataFrame schema for batches:
-/// - `_subject`: Generated subject URI from id_template (or blank node `_:bN`)
-/// - `_type`: The rdf:type URI (if specified)
-/// - Predicate columns: Renamed to their RDF URIs
-fn serialize_streaming(
-    plan: &fossil_lang::runtime::value::RecordsPlan,
-    rdf_metadata: &RdfMetadata,
+/// Uses columnar serialization for N-Triples/N-Quads (faster),
+/// falls back to oxigraph for other formats (Turtle, RDF/XML, etc).
+fn serialize_rdf(
+    output_plan: &OutputPlan,
     destination: &str,
     ctx: &RuntimeContext,
-) -> Result<Value, RuntimeError> {
-    use fossil_lang::runtime::chunked_executor::{ChunkedExecutor, estimate_batch_size_from_plan};
-    use fossil_lang::runtime::value::Transform;
-    use std::cell::RefCell;
-
+) -> Result<Value, CompileError> {
     let interner = ctx.gcx.interner.clone();
 
-    // Clone the plan so we can modify its transforms
-    let mut plan = plan.clone();
+    let path = PathBuf::from(destination);
 
-    // If there are subject_columns that need to be preserved from the source,
-    // we need to inject them into any existing Select transform.
-    // This ensures columns referenced in ${...} templates are available even if
-    // they weren't part of the mapped type's fields.
-    if !rdf_metadata.subject_columns.is_empty() {
-        for transform in &mut plan.transforms {
-            if let Transform::Select(exprs) = transform {
-                for col_name in &rdf_metadata.subject_columns {
-                    // Only add if not already present
-                    let already_present = exprs.iter().any(|e| {
-                        // Check if this expression is already selecting this column
-                        matches!(e, Expr::Column(name) if name.to_string() == *col_name)
-                            || matches!(e, Expr::Alias(_, alias) if alias.to_string() == *col_name)
-                    });
-                    if !already_present {
-                        exprs.push(col(col_name));
-                    }
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_else(|| "ttl".to_string());
+
+    let format = RdfFormat::from_extension(&ext)
+        .ok_or_else(|| RdfError::UnsupportedFormat(ext.clone()))?;
+
+    // Use columnar serializer for N-Triples/N-Quads (much faster)
+    let use_columnar = matches!(format, RdfFormat::NTriples | RdfFormat::NQuads);
+
+    // Estimate batch size from source plan schema
+    let batch_size = estimate_batch_size_from_plan(&output_plan.source);
+
+    // Prepare combined selections for each output
+    // Each selection combines: @id meta-field + rdf:type + predicate columns
+    let output_configs: Vec<_> = output_plan
+        .outputs
+        .iter()
+        .map(|output_spec| {
+            // Get RDF metadata for this output type
+            let rdf_metadata = ctx
+                .gcx
+                .type_metadata
+                .get(&output_spec.type_def_id)
+                .and_then(|tm| RdfMetadata::from_type_metadata(tm, &interner))
+                .unwrap_or_default();
+
+            // Build a combined selection that operates on source columns directly
+            let mut combined_selection: Vec<Expr> = Vec::new();
+
+            // 1. Generate _subject column from @id meta-field
+            // Look for @id by comparing symbol names
+            for (name, expr) in &output_spec.meta_fields {
+                let name_str = interner.resolve(*name);
+                if name_str == "id" {
+                    combined_selection.push(expr.clone().alias("_subject"));
+                }
+                // TODO: Handle @graph for named graphs
+            }
+
+            // 2. Add _type column if rdf_type is specified
+            if let Some(ref rdf_type) = rdf_metadata.rdf_type {
+                combined_selection.push(lit(rdf_type.as_str()).alias("_type"));
+            }
+
+            // 3. Add predicate columns by applying transform expressions
+            // and renaming to their URIs
+            for transform_expr in &output_spec.select_exprs {
+                if let Expr::Alias(inner, field_name) = transform_expr
+                    && let Some(field_sym) = interner.lookup(field_name)
+                    && let Some(field_info) = rdf_metadata.fields.get(&field_sym)
+                {
+                    combined_selection.push(inner.as_ref().clone().alias(&field_info.uri));
                 }
             }
-        }
+
+            (combined_selection, rdf_metadata)
+        })
+        .collect();
+
+    if use_columnar {
+        serialize_columnar(path, output_plan, &output_configs, batch_size)
+    } else {
+        serialize_oxigraph(path, format, output_plan, &output_configs, batch_size)
     }
+}
 
-    let mut selection: Vec<Expr> = Vec::new();
+/// Columnar N-Triples serialization (fast path)
+///
+/// Uses Polars vectorized string operations - no per-row function calls.
+fn serialize_columnar(
+    path: PathBuf,
+    output_plan: &OutputPlan,
+    output_configs: &[(Vec<Expr>, RdfMetadata)],
+    batch_size: usize,
+) -> Result<Value, CompileError> {
+    let writer = ColumnarNTriplesWriter::new(path)
+        .map_err(|e| RdfError::CreateWriter(e.to_string()))?;
 
-    // 1. Generate _subject column from id_template (required)
-    let id_template = rdf_metadata.id_template.as_ref().ok_or_else(|| {
-        fossil_lang::error::CompileError::new(
-            fossil_lang::error::CompileErrorKind::Runtime(
-                "Rdf::serialize requires #[rdf(id = \"...\")] attribute.\n\
-                 The id template defines how subject URIs are generated.\n\
-                 Example: #[rdf(id = \"http://example.org/${id}\")]\n\
-                 Use ${column_name} for interpolation."
-                    .to_string(),
-            ),
-            Loc::generated(),
-        )
-    })?;
-    let subject_expr = parse_id_template_to_expr(id_template);
-    selection.push(subject_expr.alias("_subject"));
+    let writer = RefCell::new(Some(writer));
 
-    // 2. Add _type column if rdf_type is specified
-    if let Some(ref rdf_type) = rdf_metadata.rdf_type {
-        selection.push(lit(rdf_type.as_str()).alias("_type"));
-    }
-
-    // 3. Add predicate columns renamed to their URIs
-    for (field_sym, predicate_uri) in &rdf_metadata.predicates {
-        let field_name = interner.resolve(*field_sym);
-        selection.push(col(field_name).alias(predicate_uri));
-    }
-
-    // Infer output format from file extension
-    let format = OutputFormat::from_path(destination);
-
-    // Create the RDF batch writer
-    let writer = RdfBatchWriter::new(destination, format, rdf_metadata).map_err(|e| {
-        fossil_lang::error::CompileError::new(
-            fossil_lang::error::CompileErrorKind::Runtime(format!(
-                "Failed to create RDF writer: {}",
-                e
-            )),
-            Loc::generated(),
-        )
-    })?;
-
-    // Use RefCell to allow mutable access from the closure
-    let writer = RefCell::new(writer);
-
-    // Estimate batch size from plan schema
-    let batch_size = estimate_batch_size_from_plan(&plan);
-
-    // Execute plan with selection - ChunkedExecutor is the ONLY place materialization happens
     let executor = ChunkedExecutor::new(batch_size);
     executor
-        .execute_plan_with_select_batched(&plan, selection, |batch| {
-            writer.borrow_mut().write_batch(&batch)
-        })
-        .map_err(|e| {
-            fossil_lang::error::CompileError::new(
-                fossil_lang::error::CompileErrorKind::Runtime(format!(
-                    "Failed to write RDF: {}",
-                    e
-                )),
-                Loc::generated(),
-            )
-        })?;
+        .execute_plan_batched(&output_plan.source, |batch| {
+            let lazy_batch = batch.clone().lazy();
 
-    // Finish writing and close the file
-    writer.into_inner().finish().map_err(|e| {
-        fossil_lang::error::CompileError::new(
-            fossil_lang::error::CompileErrorKind::Runtime(format!(
-                "Failed to finalize RDF file: {}",
-                e
-            )),
-            Loc::generated(),
-        )
-    })?;
+            for (combined_selection, _rdf_metadata) in output_configs {
+                if combined_selection.is_empty() {
+                    continue;
+                }
+
+                let rdf_batch = lazy_batch
+                    .clone()
+                    .select(combined_selection.clone())
+                    .collect()
+                    .map_err(|e| {
+                        PolarsError::ComputeError(format!("RDF selection failed: {}", e).into())
+                    })?;
+
+                if let Some(ref mut w) = *writer.borrow_mut() {
+                    w.write_batch(&rdf_batch)?;
+                }
+            }
+            Ok(())
+        })
+        .map_err(|e| RdfError::Write(e.to_string()))?;
+
+    if let Some(w) = writer.borrow_mut().take() {
+        w.finish().map_err(|e| RdfError::Finalize(e.to_string()))?;
+    }
 
     Ok(Value::Unit)
 }
 
-/// Parse an id_template like "http://example.org/${id}/${name}" into a Polars concat_str expression
+/// Oxigraph-based serialization (supports all RDF formats)
 ///
-/// The template supports `${column_name}` interpolation which references columns in the data.
-///
-/// # Example
-/// ```text
-/// "http://example.org/${id}" -> concat_str([lit("http://example.org/"), col("id")])
-/// "urn:${a}:${b}"            -> concat_str([lit("urn:"), col("a"), lit(":"), col("b")])
-/// ```
-fn parse_id_template_to_expr(template: &str) -> Expr {
-    let mut parts: Vec<Expr> = Vec::new();
-    let mut current_pos = 0;
-    let bytes = template.as_bytes();
+/// Used for Turtle, RDF/XML, and other formats that need special handling.
+fn serialize_oxigraph(
+    path: PathBuf,
+    format: RdfFormat,
+    output_plan: &OutputPlan,
+    output_configs: &[(Vec<Expr>, RdfMetadata)],
+    batch_size: usize,
+) -> Result<Value, CompileError> {
+    let writer = RdfBatchWriter::new(path, format)
+        .map_err(|e| RdfError::CreateWriter(e.to_string()))?;
 
-    while current_pos < template.len() {
-        // Find next ${
-        if let Some(start) = template[current_pos..].find("${") {
-            let start_abs = current_pos + start;
+    let writer = RefCell::new(writer);
 
-            // Add literal part before ${
-            if start_abs > current_pos {
-                parts.push(lit(&template[current_pos..start_abs]));
-            }
+    let executor = ChunkedExecutor::new(batch_size);
+    executor
+        .execute_plan_batched(&output_plan.source, |batch| {
+            let lazy_batch = batch.clone().lazy();
 
-            // Find matching }
-            let expr_start = start_abs + 2;
-            let mut brace_depth = 1;
-            let mut expr_end = expr_start;
-
-            while expr_end < template.len() && brace_depth > 0 {
-                match bytes[expr_end] {
-                    b'{' => brace_depth += 1,
-                    b'}' => brace_depth -= 1,
-                    _ => {}
+            for (combined_selection, _rdf_metadata) in output_configs {
+                if combined_selection.is_empty() {
+                    continue;
                 }
-                if brace_depth > 0 {
-                    expr_end += 1;
-                }
-            }
 
-            if brace_depth == 0 {
-                // Extract column name and add as col() expression
-                let column_name = &template[expr_start..expr_end];
-                parts.push(col(column_name).cast(DataType::String));
-                current_pos = expr_end + 1;
-            } else {
-                // Unmatched brace - treat rest as literal
-                parts.push(lit(&template[current_pos..]));
-                break;
-            }
-        } else {
-            // No more interpolations, add remaining text
-            if current_pos < template.len() {
-                parts.push(lit(&template[current_pos..]));
-            }
-            break;
-        }
-    }
+                let rdf_batch = lazy_batch
+                    .clone()
+                    .select(combined_selection.clone())
+                    .collect()
+                    .map_err(|e| {
+                        PolarsError::ComputeError(
+                            format!("Failed to apply RDF selection: {}", e).into(),
+                        )
+                    })?;
 
-    // Combine all parts with concat_str
-    if parts.is_empty() {
-        lit(template)
-    } else if parts.len() == 1 {
-        parts.pop().unwrap()
-    } else {
-        concat_str(parts, "", true)
-    }
+                writer.borrow_mut().write_batch(&rdf_batch)?;
+            }
+            Ok(())
+        })
+        .map_err(|e| RdfError::Write(e.to_string()))?;
+
+    writer
+        .into_inner()
+        .finish()
+        .map_err(|e| RdfError::Finalize(e.to_string()))?;
+
+    Ok(Value::Unit)
 }

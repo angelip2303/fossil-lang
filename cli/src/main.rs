@@ -1,17 +1,28 @@
-use std::env;
-use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use thiserror::Error;
+
 use fossil_lang::compiler::{Compiler, CompilerInput};
-use fossil_lang::error::CompileError;
+use fossil_lang::error::{CompileError, CompileErrors};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::executor::IrExecutor;
 
+#[derive(Debug, Error)]
+enum RunError {
+    #[error("I/O error")]
+    Io(#[from] std::io::Error),
+
+    #[error("Compilation failed with {0} error(s)")]
+    Compile(#[from] CompileErrors),
+
+    #[error("Runtime error")]
+    Runtime(#[from] CompileError),
+}
+
 #[derive(Parser)]
 #[command(name = "fossil")]
-#[command(about = "Fossil - functional data transformation language")]
+#[command(about = "Fossil - A small language for living data")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -21,84 +32,29 @@ struct Cli {
 enum Commands {
     /// Run a Fossil script
     Run {
-        /// Path to the .fossil script
-        script: PathBuf,
+        /// Path to the Fossil script to run
+        #[arg(short, long)]
+        path: PathBuf,
     },
 }
 
-fn main() {
+fn main() -> Result<(), RunError> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { script } => {
-            if let Err(_) = run_script(&script) {
-                std::process::exit(1);
-            }
-        }
+        Commands::Run { path } => run(path),
     }
 }
 
-#[derive(Debug)]
-enum RunError {
-    Io(std::io::Error),
-    Compile(CompileError),
-}
-
-impl From<std::io::Error> for RunError {
-    fn from(e: std::io::Error) -> Self {
-        RunError::Io(e)
-    }
-}
-
-impl From<CompileError> for RunError {
-    fn from(e: CompileError) -> Self {
-        RunError::Compile(e)
-    }
-}
-
-fn run_script(script: &PathBuf) -> Result<(), RunError> {
-    // 1. Read source file
-    let source = fs::read_to_string(script)?;
-
-    // 2. Expand environment variables
-    let expanded = expand_env_vars(&source);
-
-    // 3. Write to temp file (to use File mode which handles types correctly)
-    let temp_dir = std::env::temp_dir();
-    let temp_path = temp_dir.join("fossil_script.fossil");
-    {
-        let mut file = fs::File::create(&temp_path)?;
-        file.write_all(expanded.as_bytes())?;
-    }
-
-    // 4. Setup compiler context
-    let mut gcx = GlobalContext::new();
+fn run(path: PathBuf) -> Result<(), RunError> {
+    let mut gcx = GlobalContext::default();
     gcx.register_provider("csv", fossil_providers::csv::CsvProvider);
     gcx.register_provider("shex", fossil_providers::shapes::shex::ShexProvider);
     fossil_stdlib::init(&mut gcx);
 
-    // 5. Compile using File mode
     let compiler = Compiler::with_context(gcx);
-    let program = compiler.compile(CompilerInput::File(temp_path))?;
-
-    // 6. Execute
+    let program = compiler.compile(CompilerInput::File(path))?;
     IrExecutor::execute(program)?;
 
     Ok(())
-}
-
-/// Expand ${VAR} patterns with environment variables
-fn expand_env_vars(source: &str) -> String {
-    let re = regex::Regex::new(r"\$\{([^}]+)\}").unwrap();
-    let mut result = source.to_string();
-
-    for cap in re.captures_iter(source) {
-        let full_match = &cap[0];
-        let var_name = &cap[1];
-        if let Ok(value) = env::var(var_name) {
-            result = result.replace(full_match, &value);
-        }
-    }
-
-    result
 }

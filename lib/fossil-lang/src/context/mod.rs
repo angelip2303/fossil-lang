@@ -9,6 +9,12 @@ use crate::ast::ast::Path;
 use crate::traits::function::FunctionImpl;
 use crate::traits::provider::TypeProviderImpl;
 
+pub mod global;
+pub mod metadata;
+
+pub use self::global::*;
+pub use self::metadata::*;
+
 pub struct NodeId<T> {
     idx: u32,
     _marker: PhantomData<T>,
@@ -92,12 +98,35 @@ impl<T> Arena<T> {
             .enumerate()
             .map(|(idx, item)| (NodeId::new(idx), item))
     }
+}
 
-    pub fn into_iter(self) -> impl Iterator<Item = (NodeId<T>, T)> {
-        self.items
-            .into_iter()
-            .enumerate()
+impl<T> IntoIterator for Arena<T> {
+    type Item = (NodeId<T>, T);
+    type IntoIter = ArenaIntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        ArenaIntoIter {
+            inner: self.items.into_iter().enumerate(),
+        }
+    }
+}
+
+/// Iterator for consuming an Arena
+pub struct ArenaIntoIter<T> {
+    inner: std::iter::Enumerate<std::vec::IntoIter<T>>,
+}
+
+impl<T> Iterator for ArenaIntoIter<T> {
+    type Item = (NodeId<T>, T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next()
             .map(|(idx, item)| (NodeId::new(idx), item))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 
@@ -183,9 +212,6 @@ pub struct Def {
 
 #[derive(Clone)]
 pub enum DefKind {
-    /// A module definition
-    /// - file_path: The source file for this module (None for inline/builtin modules)
-    /// - is_inline: Whether this is an inline module definition (vs file-based)
     Mod {
         file_path: Option<PathBuf>,
         is_inline: bool,
@@ -195,12 +221,6 @@ pub enum DefKind {
     Type,
     Func(Option<Arc<dyn FunctionImpl>>),
     Provider(Arc<dyn TypeProviderImpl>),
-    /// A trait definition
-    Trait {
-        methods: Vec<Symbol>,
-    },
-    /// A method within a trait
-    TraitMethod,
 }
 
 impl Def {
@@ -326,23 +346,9 @@ pub struct TypeConstructorInfo {
     /// The DefId of this type constructor
     pub def_id: DefId,
     /// Number of type parameters this constructor expects
-    ///
-    /// Examples:
-    /// - `List` has arity 1: `List<T>`
-    /// - `Entity` has arity 1: `Entity<T>`
-    /// - `Map` would have arity 2: `Map<K, V>`
     pub arity: usize,
     /// Name of the type constructor (for error messages)
     pub name: Symbol,
     /// Kinds of the type parameters
-    ///
-    /// Currently all parameters have kind `Type`, but this will be extended
-    /// to support higher-kinded types in the future.
     pub param_kinds: Vec<Kind>,
 }
-
-pub mod global;
-pub mod metadata;
-
-pub use self::global::*;
-pub use self::metadata::*;

@@ -1,15 +1,15 @@
-//! Helper functions for type construction
+//! Helper functions for type checking
 //!
-//! This module provides convenient helpers to reduce boilerplate
-//! when creating types in the IR arena.
+//! Provides helpers for type variable generation and formatting.
 
 use crate::ast::Loc;
-use crate::ir::{Ident, PrimitiveType, RecordRow, Type, TypeId, TypeKind};
+use crate::error::{CompileError, TypeError};
+use crate::ir::{Ident, RecordFields, Type, TypeId, TypeKind};
 
 use super::TypeChecker;
 
 impl TypeChecker {
-    /// Create a fresh type variable with the given location
+    /// Create a fresh type variable
     pub fn fresh_type_var(&mut self, loc: Loc) -> TypeId {
         let var = self.tvg.fresh();
         self.ir.types.alloc(Type {
@@ -18,55 +18,9 @@ impl TypeChecker {
         })
     }
 
-    /// Create a fresh type variable with a generated (empty) location
+    /// Create a fresh type variable with generated location
     pub fn fresh_type_var_generated(&mut self) -> TypeId {
-        let var = self.tvg.fresh();
-        self.ir.types.alloc(Type {
-            loc: Loc::generated(),
-            kind: TypeKind::Var(var),
-        })
-    }
-
-    /// Create a primitive type with the given location
-    pub fn primitive_type(&mut self, prim: PrimitiveType, loc: Loc) -> TypeId {
-        self.ir.types.alloc(Type {
-            loc,
-            kind: TypeKind::Primitive(prim),
-        })
-    }
-
-    /// Create a list type with the given element type and location
-    ///
-    /// Creates a `List<T>` type using the App representation:
-    /// `App { ctor: List, args: [elem_ty] }`
-    pub fn list_type(&mut self, elem_ty: TypeId, loc: Loc) -> TypeId {
-        let list_ctor = self.gcx.list_type_ctor
-            .expect("SAFETY: List type constructor is registered in GlobalContext::new() as a builtin type. \
-                     It is guaranteed to be present in all GlobalContext instances.");
-
-        self.ir.types.alloc(Type {
-            loc,
-            kind: TypeKind::App {
-                ctor: Ident::Resolved(list_ctor),
-                args: vec![elem_ty],
-            },
-        })
-    }
-
-    /// Create a record type with the given row and location
-    pub fn record_type(&mut self, row: RecordRow, loc: Loc) -> TypeId {
-        self.ir.types.alloc(Type {
-            loc,
-            kind: TypeKind::Record(row),
-        })
-    }
-
-    /// Create a function type with the given parameters, return type, and location
-    pub fn function_type(&mut self, params: Vec<TypeId>, ret: TypeId, loc: Loc) -> TypeId {
-        self.ir.types.alloc(Type {
-            loc,
-            kind: TypeKind::Function(params, ret),
-        })
+        self.ir.var_type(self.tvg.fresh())
     }
 
     /// Format a type in a human-readable way for error messages
@@ -102,28 +56,62 @@ impl TypeChecker {
                 let param_strs: Vec<_> = params.iter().map(|p| self.format_type(*p)).collect();
                 format!("fn({}) -> {}", param_strs.join(", "), self.format_type(*ret))
             }
-            TypeKind::Record(row) => {
-                format!("{{{}}}", self.format_row(row))
+            TypeKind::Record(fields) => {
+                format!("{{{}}}", self.format_fields(fields))
             }
             TypeKind::List(elem) => format!("[{}]", self.format_type(*elem)),
             TypeKind::Provider { .. } => "<provider>".to_string(),
         }
     }
 
-    /// Format a record row for error messages
-    fn format_row(&self, row: &RecordRow) -> String {
-        match row {
-            RecordRow::Empty => String::new(),
-            RecordRow::Var(v) => format!("...'r{}", v.0),
-            RecordRow::Extend { field, ty, rest } => {
-                let field_name = self.gcx.interner.resolve(*field);
+    /// Format record fields for error messages
+    fn format_fields(&self, fields: &RecordFields) -> String {
+        fields
+            .fields
+            .iter()
+            .map(|(name, ty)| {
+                let field_name = self.gcx.interner.resolve(*name);
                 let ty_str = self.format_type(*ty);
-                let rest_str = self.format_row(rest);
-                if rest_str.is_empty() {
-                    format!("{}: {}", field_name, ty_str)
-                } else {
-                    format!("{}: {}, {}", field_name, ty_str, rest_str)
-                }
+                format!("{}: {}", field_name, ty_str)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Extract the element type from a list type
+    ///
+    /// Returns the element type T if the given type is [T],
+    /// or an error if it's not a list type.
+    pub fn extract_list_element_type(
+        &mut self,
+        list_ty: TypeId,
+        loc: Loc,
+    ) -> Result<TypeId, CompileError> {
+        let ty = self.ir.types.get(list_ty);
+
+        match &ty.kind {
+            TypeKind::List(elem_ty) => Ok(*elem_ty),
+
+            TypeKind::Var(_) => {
+                let elem_ty = self.fresh_type_var(loc);
+                let expected_list = self.ir.list_type(elem_ty);
+                self.unify(list_ty, expected_list, loc)?;
+                Ok(elem_ty)
+            }
+
+            // Record/Named types are valid sources (lazy data)
+            TypeKind::Record(_) | TypeKind::Named(_) => Ok(self.fresh_type_var(loc)),
+
+            _ => {
+                let elem_var = self.fresh_type_var(loc);
+                let expected = self.ir.list_type(elem_var);
+                Err(TypeError::mismatch_with_context(
+                    expected,
+                    list_ty,
+                    loc,
+                    format!("expected [T] or Records, got {}", self.format_type(list_ty)),
+                )
+                .into())
             }
         }
     }

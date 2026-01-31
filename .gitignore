@@ -49,6 +49,7 @@ book
 *.rdf
 *.nt
 *.nq
+!output.nq
 *.owl
 *.ttl.gz
 *.rdf.gz

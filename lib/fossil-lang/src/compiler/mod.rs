@@ -1,35 +1,22 @@
-//! Compiler orchestration module
-//!
-//! This module coordinates the compilation pipeline:
-//! Source -> Parse -> Expand -> Convert to IR -> Resolve -> TypeCheck
-//!
-//! The unified IR-based pipeline:
-//! 1. Parse source code into AST
-//! 2. Expand type providers (still on AST)
-//! 3. Convert AST to IR
-//! 4. Resolve names in IR
-//! 5. Type check IR
-
+use std::fs::read_to_string;
 use std::path::PathBuf;
 
-use crate::context::extract_pending_type_metadata;
-use crate::error::CompileError;
-use crate::ir;
+use crate::ast::Loc;
+use crate::context::extract_type_metadata;
+use crate::error::{CompileError, CompileErrors};
+use crate::passes;
+use crate::passes::resolve::IrResolver;
 use crate::passes::{
-    expand::ProviderExpander, parse::Parser, typecheck::TypeChecker, GlobalContext, IrProgram,
+    GlobalContext, IrProgram, expand::ProviderExpander, parse::Parser, typecheck::TypeChecker,
 };
 
-/// Compiler input options
 #[derive(Debug, Clone)]
 pub enum CompilerInput {
-    /// Compile a single file as entry point
     File(PathBuf),
 }
 
 pub struct Compiler {
-    /// The source ID for error reporting
     source_id: usize,
-    /// Optional custom GlobalContext (for provider registration, etc.)
     gcx: Option<GlobalContext>,
 }
 
@@ -43,17 +30,11 @@ impl Compiler {
 
     /// Create a compiler with a custom GlobalContext
     ///
-    /// This allows registering type providers:
     /// ```ignore
-    /// use fossil_lang::compiler::Compiler;
-    /// use fossil_lang::passes::GlobalContext;
-    /// use std::sync::Arc;
-    ///
-    /// let mut gcx = GlobalContext::new();
-    /// gcx.register_provider("csv", Arc::new(CsvProvider));
-    ///
+    /// let mut gcx = GlobalContext::default();
+    /// gcx.register_provider("csv", CsvProvider);
     /// let compiler = Compiler::with_context(gcx);
-    /// compiler.compile(src)?;
+    /// let program = compiler.compile(CompilerInput::File(path))?;
     /// ```
     pub fn with_context(gcx: GlobalContext) -> Self {
         Self {
@@ -62,97 +43,26 @@ impl Compiler {
         }
     }
 
-    /// Compile input through the full pipeline
-    ///
-    /// Pipeline: Parse → Expand → Convert to IR → Resolve → TypeCheck
-    pub fn compile(&self, input: CompilerInput) -> Result<IrProgram, CompileError> {
+    pub fn compile(&self, input: CompilerInput) -> Result<IrProgram, CompileErrors> {
         match input {
             CompilerInput::File(path) => self.compile_file(path),
         }
     }
 
-    /// Compile a single file
-    ///
-    /// Pipeline: Parse → Expand → Convert to IR → Resolve → TypeCheck
-    fn compile_file(&self, path: PathBuf) -> Result<IrProgram, CompileError> {
-        // Read source file
-        let src = std::fs::read_to_string(&path).map_err(|e| {
-            CompileError::new(
-                crate::error::CompileErrorKind::Runtime(format!(
-                    "Failed to read file '{}': {}",
-                    path.display(),
-                    e
-                )),
-                crate::ast::Loc::generated(),
-            )
-        })?;
+    fn compile_file(&self, path: PathBuf) -> Result<IrProgram, CompileErrors> {
+        let msg = format!("Failed to read file '{}'", path.display());
+        let loc = Loc::generated();
+        let src = read_to_string(&path).map_err(|_| CompileError::internal("io", msg, loc))?;
 
-        // Get or create GlobalContext
         let gcx = self.gcx.clone().unwrap_or_default();
 
-        // Phase 1: Parse source → AST
-        let parsed = Parser::parse_with_context(&src, self.source_id, gcx).map_err(|errors| {
-            errors.0.into_iter().next().unwrap_or_else(|| {
-                CompileError::new(
-                    crate::error::CompileErrorKind::Runtime("Parse failed".to_string()),
-                    crate::ast::Loc::generated(),
-                )
-            })
-        })?;
-
-        // Phase 2: Expand type providers (still on AST)
-        let (expanded_ast, mut gcx) = ProviderExpander::new((parsed.ast, parsed.gcx))
-            .expand()
-            .map_err(|errors| {
-                errors.0.into_iter().next().unwrap_or_else(|| {
-                    CompileError::new(
-                        crate::error::CompileErrorKind::Runtime(
-                            "Provider expansion failed".to_string(),
-                        ),
-                        crate::ast::Loc::generated(),
-                    )
-                })
-            })?;
-
-        // Phase 2.5: Extract type metadata from AST before conversion
-        // This captures field attributes (like #[rdf(uri = "...")]) from record types
-        // and stores them by type name. The IrResolver will transfer to DefId keys later.
-        extract_pending_type_metadata(&expanded_ast, &mut gcx);
-
-        // Phase 3: Convert AST → IR
-        let ir = ir::ast_to_ir(expanded_ast);
-
-        // Phase 4: Resolve names in IR
-        let (ir, gcx) =
-            ir::IrResolver::new(ir, gcx)
-                .resolve()
-                .map_err(|errors| {
-                    errors.0.into_iter().next().unwrap_or_else(|| {
-                        CompileError::new(
-                            crate::error::CompileErrorKind::Runtime(
-                                "Name resolution failed".to_string(),
-                            ),
-                            crate::ast::Loc::generated(),
-                        )
-                    })
-                })?;
-
-        // Phase 5: Type check IR
-        let program = TypeChecker::new(ir, gcx).check().map_err(|errors| {
-            errors.0.into_iter().next().unwrap_or_else(|| {
-                CompileError::new(
-                    crate::error::CompileErrorKind::Runtime("Type checking failed".to_string()),
-                    crate::ast::Loc::generated(),
-                )
-            })
-        })?;
+        let parsed = Parser::parse_with_context(&src, self.source_id, gcx)?;
+        let (expanded_ast, gcx) = ProviderExpander::new((parsed.ast, parsed.gcx)).expand()?;
+        let ty = extract_type_metadata(&expanded_ast);
+        let ir = passes::convert::ast_to_ir(expanded_ast);
+        let (ir, gcx) = IrResolver::new(ir, gcx).with_type_metadata(ty).resolve()?;
+        let program = TypeChecker::new(ir, gcx).check()?;
 
         Ok(program)
-    }
-}
-
-impl Default for Compiler {
-    fn default() -> Self {
-        Self::new()
     }
 }

@@ -14,8 +14,10 @@ rust-version.workspace = true
 
 [dependencies]
 # external dependencies
+thiserror.workspace = true
 polars.workspace = true
-oxigraph = "0.5.4"
+oxrdfio = "0.2.2"
+oxrdf = "0.3.2"
 
 # internal dependencies
 fossil-lang.workspace = true

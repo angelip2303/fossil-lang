@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::ast::ast::*;
 use crate::context::{DefKind, Symbol};
-use crate::error::{CompileError, CompileErrorKind, CompileErrors};
+use crate::error::{CompileError, CompileErrors, ResolutionError};
 use crate::passes::GlobalContext;
 use crate::traits::provider::ModuleSpec;
 
@@ -15,7 +15,11 @@ pub struct ProviderExpander {
 
 impl ProviderExpander {
     pub fn new((ast, gcx): (Ast, GlobalContext)) -> Self {
-        Self { ast, gcx, const_values: HashMap::new() }
+        Self {
+            ast,
+            gcx,
+            const_values: HashMap::new(),
+        }
     }
 
     /// Collect const bindings with string literal values from the AST
@@ -50,11 +54,14 @@ impl ProviderExpander {
                     chars.next();
                 }
                 // Look up the const value
-                if let Some(sym) = self.gcx.interner.lookup(&name) {
-                    if let Some(value) = self.const_values.get(&sym) {
-                        result.push_str(value);
-                        continue;
-                    }
+                if let Some(value) = self
+                    .gcx
+                    .interner
+                    .lookup(&name)
+                    .and_then(|sym| self.const_values.get(&sym))
+                {
+                    result.push_str(value);
+                    continue;
                 }
                 // Not found - keep original
                 result.push_str(&format!("${{{}}}", name));
@@ -125,29 +132,28 @@ impl ProviderExpander {
         let (provider_path, args, loc) = {
             let ty = self.ast.types.get(type_id);
             match &ty.kind {
-                TypeKind::Provider { provider, args } => {
-                    (provider.clone(), args.clone(), ty.loc.clone())
-                }
+                TypeKind::Provider { provider, args } => (provider.clone(), args.clone(), ty.loc),
                 _ => return Ok(()),
             }
         };
 
         // Resolve provider path to DefId
-        let provider_def_id = self.gcx.definitions
+        let provider_def_id = self
+            .gcx
+            .definitions
             .resolve(&provider_path)
-            .ok_or_else(|| CompileError::new(
-                CompileErrorKind::UndefinedType(provider_path.clone()),
-                loc.clone(),
-            ))?;
+            .ok_or_else(|| {
+                CompileError::from(ResolutionError::undefined_type(provider_path.clone(), loc))
+            })?;
 
         // Get the provider implementation
         let provider_impl = match &self.gcx.definitions.get(provider_def_id).kind {
             DefKind::Provider(provider) => provider.clone(),
             _ => {
-                return Err(CompileError::new(
-                    CompileErrorKind::UndefinedType(provider_path),
+                return Err(CompileError::from(ResolutionError::NotAProvider {
+                    path: provider_path,
                     loc,
-                ))
+                }));
             }
         };
 
@@ -155,19 +161,6 @@ impl ProviderExpander {
         let mut resolved_args: Vec<ProviderArgument> = Vec::with_capacity(args.len());
         for arg in &args {
             let resolved = match arg {
-                ProviderArgument::ConstRef(sym) => {
-                    if let Some(value) = self.const_values.get(sym) {
-                        let new_sym = self.gcx.interner.intern(value);
-                        ProviderArgument::Positional(Literal::String(new_sym))
-                    } else {
-                        return Err(CompileError::new(
-                            CompileErrorKind::UndefinedVariable { name: *sym },
-                            loc.clone(),
-                        ).with_context(
-                            "Only `const` bindings with string literal values can be used as provider arguments"
-                        ));
-                    }
-                }
                 ProviderArgument::Positional(Literal::String(s)) => {
                     let original = self.gcx.interner.resolve(*s);
                     let resolved = self.resolve_const_interpolation(original);
@@ -178,12 +171,18 @@ impl ProviderExpander {
                         arg.clone()
                     }
                 }
-                ProviderArgument::Named { name, value: Literal::String(s) } => {
+                ProviderArgument::Named {
+                    name,
+                    value: Literal::String(s),
+                } => {
                     let original = self.gcx.interner.resolve(*s);
                     let resolved = self.resolve_const_interpolation(original);
                     if resolved != original {
                         let new_sym = self.gcx.interner.intern(&resolved);
-                        ProviderArgument::Named { name: *name, value: Literal::String(new_sym) }
+                        ProviderArgument::Named {
+                            name: *name,
+                            value: Literal::String(new_sym),
+                        }
                     } else {
                         arg.clone()
                     }
@@ -200,6 +199,7 @@ impl ProviderExpander {
             &mut self.ast,
             &mut self.gcx.interner,
             &type_name_str,
+            loc,
         )?;
 
         // Replace the Provider type node with the generated AST type

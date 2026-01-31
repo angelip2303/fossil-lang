@@ -15,21 +15,14 @@ rust-version.workspace = true
 [dependencies]
 # external dependencies
 polars.workspace = true
-
-# ShEx and SHACL support (rudof project)
-rudof_lib = "0.1"
 shex_ast = "0.1"
-shacl_ast = "0.1"
-shacl_rdf = "0.1"
-srdf = "0.1"
 iri_s = "0.1"
-prefixmap = "0.1"
 
 # internal dependencies
 fossil-lang.workspace = true
 
 [dev-dependencies]
-fossil-stdlib.workspace = true
-
-oxrdfio = "0.2.2"
 thiserror.workspace = true
+oxrdfio = "0.2.2"
+
+fossil-stdlib.workspace = true

@@ -7,15 +7,9 @@
 //!
 //! This design enables in-place mutation and avoids rebuilding the tree at each pass.
 
-use polars::prelude::DataType;
-
 use crate::ast::Loc;
 use crate::ast::ast::Attribute;
 use crate::context::{Arena, DefId, NodeId, Symbol};
-
-// Re-exports for backwards compatibility (passes are now in crate::passes)
-pub use crate::passes::convert::ast_to_ir;
-pub use crate::passes::resolve::IrResolver;
 
 pub type StmtId = NodeId<Stmt>;
 pub type ExprId = NodeId<Expr>;
@@ -27,16 +21,8 @@ pub struct Ir {
     pub stmts: Arena<Stmt>,
     pub exprs: Arena<Expr>,
     pub types: Arena<Type>,
-    /// Root statement IDs of the program
     pub root: Vec<StmtId>,
 }
-
-// =============================================================================
-// Type Construction Helpers
-// =============================================================================
-//
-// These helpers reduce boilerplate when building function signatures.
-// Instead of 35 lines per signature, you can write 3 lines.
 
 impl Ir {
     /// Create a String type
@@ -95,14 +81,11 @@ impl Ir {
         })
     }
 
-    /// Create a List<T> type given the element type and the List type constructor DefId
-    pub fn list_type(&mut self, elem_type: TypeId, list_ctor: DefId) -> TypeId {
+    /// Create a List type with the given element type
+    pub fn list_type(&mut self, elem_type: TypeId) -> TypeId {
         self.types.alloc(Type {
             loc: Loc::generated(),
-            kind: TypeKind::App {
-                ctor: Ident::Resolved(list_ctor),
-                args: vec![elem_type],
-            },
+            kind: TypeKind::List(elem_type),
         })
     }
 
@@ -182,10 +165,6 @@ impl From<TypeId> for TypeRef {
     }
 }
 
-// =============================================================================
-// Statements
-// =============================================================================
-
 #[derive(Debug, Clone)]
 pub struct Stmt {
     pub loc: Loc,
@@ -218,42 +197,16 @@ pub enum StmtKind {
     Type {
         name: Symbol,
         ty: TypeId,
-        /// Type-level attributes (e.g., #[rdf(type = "...", id = "...")])
         attrs: Vec<Attribute>,
-    },
-    /// A trait definition `trait Name { method: type, ... }`
-    Trait {
-        name: Symbol,
-        def_id: Option<DefId>,
-        methods: Vec<TraitMethod>,
-    },
-    /// A trait implementation `impl Trait for Type { method = expr, ... }`
-    Impl {
-        trait_name: Ident,
-        type_name: Ident,
-        methods: Vec<(Symbol, ExprId)>,
     },
     /// An expression statement `expr`
     Expr(ExprId),
 }
 
-/// A method signature in a trait definition
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TraitMethod {
-    pub name: Symbol,
-    pub def_id: Option<DefId>,
-    pub ty: TypeId,
-}
-
-// =============================================================================
-// Expressions
-// =============================================================================
-
 #[derive(Debug, Clone)]
 pub struct Expr {
     pub loc: Loc,
     pub kind: ExprKind,
-    /// Type of this expression (filled in during type checking)
     pub ty: TypeRef,
 }
 
@@ -268,10 +221,21 @@ pub enum ExprKind {
     Literal(Literal),
     /// A list `[expr, expr, ...]`
     List(Vec<ExprId>),
-    /// A record `{ field = expr, field = expr, ... }`
-    Record(Vec<(Symbol, ExprId)>),
+    /// A named record construction `TypeName { @id = ..., field = value, ... }`
+    NamedRecordConstruction {
+        /// Identifier for the type (resolved to DefId after resolution)
+        type_ident: Ident,
+        /// Named fields (field_name, value_expr)
+        fields: Vec<(Symbol, ExprId)>,
+        /// Meta-fields (@name = expr) - keys are names without the @ prefix
+        meta_fields: Vec<(Symbol, ExprId)>,
+    },
     /// A function definition `fn (param1, param2, ...) -> expr`
-    Function { params: Vec<Param>, body: ExprId },
+    Function {
+        params: Vec<Param>,
+        body: ExprId,
+        attrs: Vec<Attribute>,
+    },
     /// A function application `callee(arg1, arg2, ...)` with positional and named arguments
     Application { callee: ExprId, args: Vec<Argument> },
     /// A pipe expression `lhs |> rhs` (only present before resolution, desugared after)
@@ -320,10 +284,6 @@ pub enum Literal {
     Boolean(bool),
 }
 
-// =============================================================================
-// Types
-// =============================================================================
-
 #[derive(Debug, Clone)]
 pub struct Type {
     pub loc: Loc,
@@ -348,8 +308,8 @@ pub enum TypeKind {
     Function(Vec<TypeId>, TypeId),
     /// A list type `[T]`
     List(TypeId),
-    /// A record type with extensible rows
-    Record(RecordRow),
+    /// A record type with named fields (no row polymorphism)
+    Record(RecordFields),
     /// An applied type `Name<T1, T2, ...>`
     App { ctor: Ident, args: Vec<TypeId> },
     /// A type variable (for type inference)
@@ -428,32 +388,11 @@ pub enum PrimitiveType {
     Bool,
 }
 
-impl From<DataType> for PrimitiveType {
-    fn from(value: DataType) -> Self {
-        match value {
-            DataType::Boolean => PrimitiveType::Bool,
-            DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::Int128
-            | DataType::UInt8
-            | DataType::UInt16
-            | DataType::UInt32
-            | DataType::UInt64 => PrimitiveType::Int,
-            DataType::Float32 | DataType::Float64 => PrimitiveType::Float,
-            DataType::String => PrimitiveType::String,
-            _ => todo!("Unsupported data type: {:?}", value),
-        }
-    }
-}
-
 /// Provider argument
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProviderArgument {
     Positional(Literal),
     Named { name: Symbol, value: Literal },
-    ConstRef(Symbol),
 }
 
 impl ProviderArgument {
@@ -461,66 +400,54 @@ impl ProviderArgument {
         match self {
             ProviderArgument::Positional(lit) => lit,
             ProviderArgument::Named { value, .. } => value,
-            ProviderArgument::ConstRef(_) => {
-                panic!("ConstRef must be resolved before accessing value")
-            }
         }
     }
 }
 
-/// Row type for extensible records (supports row polymorphism)
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum RecordRow {
-    /// Empty row
-    Empty,
-    /// Field extension: (| field :: Type | rest |)
-    Extend {
-        field: Symbol,
-        ty: TypeId,
-        rest: Box<RecordRow>,
-    },
-    /// Row variable for polymorphism
-    Var(TypeVar),
+/// Simplified record type - just a map from field names to types
+/// No row polymorphism - records are closed/concrete.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct RecordFields {
+    pub fields: Vec<(Symbol, TypeId)>,
 }
 
-impl RecordRow {
-    /// Convert a vector of fields into a RecordRow
+impl RecordFields {
+    /// Create from a vector of fields
     pub fn from_fields(fields: Vec<(Symbol, TypeId)>) -> Self {
-        fields
-            .into_iter()
-            .rev()
-            .fold(RecordRow::Empty, |acc, (field, ty)| RecordRow::Extend {
-                field,
-                ty,
-                rest: Box::new(acc),
-            })
+        Self { fields }
     }
 
-    /// Look up a field in the row
+    /// Look up a field by name
     pub fn lookup(&self, field: Symbol) -> Option<TypeId> {
-        match self {
-            RecordRow::Empty => None,
-            RecordRow::Extend { field: f, ty, rest } => {
-                if *f == field {
-                    Some(*ty)
-                } else {
-                    rest.lookup(field)
-                }
-            }
-            RecordRow::Var(_) => None,
-        }
+        self.fields
+            .iter()
+            .find(|(f, _)| *f == field)
+            .map(|(_, ty)| *ty)
     }
 
-    /// Convert to a vector of fields (if concrete)
-    pub fn to_fields(&self) -> Option<Vec<(Symbol, TypeId)>> {
-        match self {
-            RecordRow::Empty => Some(Vec::new()),
-            RecordRow::Extend { field, ty, rest } => rest.to_fields().map(|mut fields| {
-                fields.push((*field, *ty));
-                fields
-            }),
-            RecordRow::Var(_) => None,
-        }
+    /// Convert to a vector of fields
+    pub fn to_fields(&self) -> Vec<(Symbol, TypeId)> {
+        self.fields.clone()
+    }
+
+    /// Check if the record has a field
+    pub fn contains(&self, field: Symbol) -> bool {
+        self.fields.iter().any(|(f, _)| *f == field)
+    }
+
+    /// Get all field names
+    pub fn field_names(&self) -> Vec<Symbol> {
+        self.fields.iter().map(|(f, _)| *f).collect()
+    }
+
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+
+    /// Number of fields
+    pub fn len(&self) -> usize {
+        self.fields.len()
     }
 }
 
@@ -534,36 +461,19 @@ impl std::fmt::Display for TypeVar {
     }
 }
 
-/// A trait constraint on a type variable
-#[derive(Clone, Debug)]
-pub struct TraitConstraint {
-    pub ty: TypeId,
-    pub trait_def_id: DefId,
-    pub loc: Loc,
-}
-
 /// Polytypes (type schemes) with quantified variables
 #[derive(Clone, Debug)]
 pub struct Polytype {
     pub forall: Vec<TypeVar>,
-    pub constraints: Vec<TraitConstraint>,
     pub ty: TypeId,
 }
 
 impl Polytype {
     pub fn mono(ty: TypeId) -> Self {
-        Polytype {
-            forall: vec![],
-            constraints: vec![],
-            ty,
-        }
+        Polytype { forall: vec![], ty }
     }
 
     pub fn poly(forall: Vec<TypeVar>, ty: TypeId) -> Self {
-        Polytype {
-            forall,
-            constraints: vec![],
-            ty,
-        }
+        Polytype { forall, ty }
     }
 }

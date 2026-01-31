@@ -12,17 +12,13 @@
 //!     /// Extracted from #[rdf(type = "...")]
 //!     #[attr("rdf.type")]
 //!     rdf_type: Option<String>,
-//!
-//!     /// Extracted from #[rdf(id = "...")]
-//!     #[attr("rdf.id")]
-//!     id_template: Option<String>,
 //! }
 //!
 //! // Field-level attributes
 //! #[derive(FromAttrs)]
 //! struct RdfFieldAttrs {
 //!     /// Extracted from #[rdf(uri = "...")] on a field
-//!     #[attr("rdf.uri")]
+//!     #[attr("rdf.uri", field)]
 //!     uri: Option<String>,
 //! }
 //! ```
@@ -265,26 +261,26 @@ fn generate_field_extractor(
 
 /// Check if a type is Option<T> and return (is_option, inner_type)
 fn unwrap_option_type(ty: &Type) -> (bool, Type) {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            if segment.ident == "Option" {
-                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                        return (true, inner.clone());
-                    }
-                }
-            }
-        }
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+        && segment.ident == "Option"
+        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return (true, inner.clone());
     }
     (false, ty.clone())
 }
 
 /// Get the simple type name from a Type
 fn get_type_name(ty: &Type) -> String {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            return segment.ident.to_string();
-        }
-    }
-    panic!("Cannot determine type name for attribute field")
+    let Type::Path(type_path) = ty else {
+        panic!("Cannot determine type name for attribute field")
+    };
+    type_path
+        .path
+        .segments
+        .last()
+        .map(|seg| seg.ident.to_string())
+        .expect("Cannot determine type name for attribute field")
 }

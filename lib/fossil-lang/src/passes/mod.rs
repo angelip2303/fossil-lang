@@ -7,8 +7,7 @@ pub mod parse;
 pub mod resolve;
 pub mod typecheck;
 
-// Re-export GlobalContext and related types from context module
-pub use crate::context::{BuiltinTraits, GlobalContext, TraitImplInfo};
+pub use crate::context::GlobalContext;
 
 /// Parsed program (AST representation)
 pub struct ParsedProgram {

@@ -1,7 +1,7 @@
 use fossil_lang::ast::Loc;
 use fossil_lang::ast::ast::{Ast, Literal, PrimitiveType, RecordField, Type, TypeKind};
 use fossil_lang::context::{DefId, Interner};
-use fossil_lang::error::{CompileErrorKind, ProviderError, ProviderErrorKind};
+use fossil_lang::error::{ProviderError, ProviderErrorKind};
 use fossil_lang::passes::GlobalContext;
 use polars::prelude::{PlPath, PlPathRef, Schema};
 
@@ -9,11 +9,12 @@ use polars::prelude::{PlPath, PlPathRef, Schema};
 // Error Construction
 // =============================================================================
 
-/// Create a ProviderError from a ProviderErrorKind
+/// Create a ProviderError from a ProviderErrorKind with explicit location
 ///
 /// This is the main way to create provider errors with typed variants.
-pub fn provider_err(kind: ProviderErrorKind) -> ProviderError {
-    ProviderError::new(CompileErrorKind::Provider(kind), Loc::generated())
+/// Always provide the actual source location when available.
+pub fn provider_err(kind: ProviderErrorKind, loc: Loc) -> ProviderError {
+    ProviderError::new(kind, loc)
 }
 
 // =============================================================================

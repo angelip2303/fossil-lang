@@ -6,17 +6,14 @@ pub enum TestSuiteError {
     NotEquals,
 
     #[error("Failed to compile program")]
-    Compilation,
+    MultipleCompilationFailures(#[from] fossil_lang::error::CompileErrors),
+
+    #[error("Failed to compile program")]
+    SingleCompilationFailure(#[from] fossil_lang::error::CompileError),
 
     #[error("Failed to read file")]
     IO(#[from] std::io::Error),
 
     #[error("Failed to parse RDF")]
     RDF(#[from] oxrdfio::RdfParseError),
-}
-
-impl From<fossil_lang::error::CompileError> for TestSuiteError {
-    fn from(_: fossil_lang::error::CompileError) -> Self {
-        TestSuiteError::Compilation
-    }
 }

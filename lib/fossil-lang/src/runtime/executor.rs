@@ -3,7 +3,7 @@
 //! This module provides execution of complete IR programs.
 //! It processes top-level statements and returns the final results.
 
-use crate::error::RuntimeError;
+use crate::error::CompileError;
 use crate::ir::StmtKind;
 use crate::passes::IrProgram;
 use crate::runtime::evaluator::IrEvaluator;
@@ -39,14 +39,11 @@ impl IrExecutor {
     /// let ir = compiler.compile(input)?;
     /// let results = IrExecutor::execute(ir)?;
     /// ```
-    pub fn execute(program: IrProgram) -> Result<Vec<Value>, RuntimeError> {
+    pub fn execute(program: IrProgram) -> Result<Vec<Value>, CompileError> {
         let IrProgram { ir, gcx, .. } = program;
 
-        // Create environment for top-level bindings
-        let mut env = Environment::new();
-
-        // Create evaluator
-        let mut evaluator = IrEvaluator::new(&ir, &gcx, env.clone());
+        // Create evaluator with empty environment
+        let mut evaluator = IrEvaluator::new(&ir, &gcx, Environment::new());
 
         // Process each top-level statement
         let mut results = Vec::new();
@@ -54,50 +51,21 @@ impl IrExecutor {
         for &stmt_id in &ir.root {
             let stmt = ir.stmts.get(stmt_id);
             match &stmt.kind {
-                StmtKind::Let { name, value, .. } => {
-                    // Evaluate the value
+                // Let and Const are identical at runtime
+                StmtKind::Let { name, value, .. } | StmtKind::Const { name, value, .. } => {
                     let val = evaluator.eval(*value)?;
-
-                    // Bind it in the environment
-                    env.bind(*name, val.clone());
-
-                    // Update evaluator's environment
-                    evaluator = IrEvaluator::new(&ir, &gcx, env.clone());
-
-                    // Add to results
-                    results.push(val);
-                }
-
-                StmtKind::Const { name, value, .. } => {
-                    // Evaluate the value
-                    let val = evaluator.eval(*value)?;
-
-                    // Bind it in the environment (same as let at runtime)
-                    env.bind(*name, val.clone());
-
-                    // Update evaluator's environment
-                    evaluator = IrEvaluator::new(&ir, &gcx, env.clone());
-
-                    // Add to results
+                    // Bind directly in evaluator's environment - no clone needed
+                    evaluator.bind(*name, val.clone());
                     results.push(val);
                 }
 
                 StmtKind::Expr(expr_id) => {
-                    // Evaluate the expression
                     let val = evaluator.eval(*expr_id)?;
                     results.push(val);
                 }
 
                 StmtKind::Type { .. } => {
-                    // Type declarations are compile time only, nothing to do at runtime
-                }
-
-                StmtKind::Trait { .. } => {
-                    // Trait declarations are compile time only, nothing to do at runtime
-                }
-
-                StmtKind::Impl { .. } => {
-                    // Impl declarations are compile time only, nothing to do at runtime
+                    // Type declarations are compile-time only
                 }
             }
         }

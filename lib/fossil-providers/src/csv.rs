@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
+use fossil_lang::ast::Loc;
 use fossil_lang::ast::ast::{
     Ast, Literal, ProviderArgument, Type as AstType, TypeKind as AstTypeKind,
 };
 use fossil_lang::context::Interner;
-use fossil_lang::error::{ProviderError, ProviderErrorKind, RuntimeError};
+use fossil_lang::error::{CompileError, ProviderError, ProviderErrorKind};
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
@@ -12,6 +13,7 @@ use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 use fossil_lang::traits::provider::{
     FunctionDef, ModuleSpec, ProviderOutput, ProviderParamInfo, TypeProviderImpl,
 };
+
 use polars::prelude::*;
 
 use crate::utils::{
@@ -43,25 +45,32 @@ impl Default for CsvOptions {
 fn parse_csv_options(
     args: &[ProviderArgument],
     interner: &Interner,
+    loc: Loc,
 ) -> Result<(PlPath, CsvOptions), ProviderError> {
     let mut options = CsvOptions::default();
     let mut iter = args.iter();
 
     let Some(arg) = iter.next() else {
-        return Err(provider_err(ProviderErrorKind::MissingArgument {
-            name: "path",
-            provider: "csv",
-        }));
+        return Err(provider_err(
+            ProviderErrorKind::MissingArgument {
+                name: "path",
+                provider: "csv",
+            },
+            loc,
+        ));
     };
 
     let ProviderArgument::Positional(lit) = arg else {
-        return Err(provider_err(ProviderErrorKind::MissingArgument {
-            name: "path",
-            provider: "csv",
-        }));
+        return Err(provider_err(
+            ProviderErrorKind::MissingArgument {
+                name: "path",
+                provider: "csv",
+            },
+            loc,
+        ));
     };
 
-    let path = extract_string_path(lit, interner).map_err(provider_err)?;
+    let path = extract_string_path(lit, interner).map_err(|kind| provider_err(kind, loc))?;
 
     // Parse optional named arguments
     for arg in iter {
@@ -118,15 +127,17 @@ impl TypeProviderImpl for CsvProvider {
         ast: &mut Ast,
         interner: &mut Interner,
         type_name: &str,
+        loc: Loc,
     ) -> Result<ProviderOutput, ProviderError> {
-        let (path, options) = parse_csv_options(args, interner)?;
-        validate_extension(path.as_ref(), &["csv"]).map_err(provider_err)?;
-        validate_path(path.as_ref()).map_err(provider_err)?;
-        let schema = infer_csv_schema(path.clone(), &options)?;
+        let (path, options) = parse_csv_options(args, interner, loc)?;
+        validate_extension(path.as_ref(), &["csv"]).map_err(|kind| provider_err(kind, loc))?;
+        validate_path(path.as_ref()).map_err(|kind| provider_err(kind, loc))?;
+        let schema = infer_csv_schema(path.clone(), &options, loc)?;
         let fields = schema_to_ast_fields(&schema, ast, interner);
 
+        // Use the provider invocation location for the generated type
         let record_ty = ast.types.alloc(AstType {
-            loc: fossil_lang::ast::Loc::generated(),
+            loc,
             kind: AstTypeKind::Record(fields),
         });
 
@@ -138,6 +149,7 @@ impl TypeProviderImpl for CsvProvider {
                     uri: path,
                     options: options.clone(),
                     type_name: type_name.to_string(),
+                    loc,
                 }),
             }],
             submodules: vec![],
@@ -150,14 +162,16 @@ impl TypeProviderImpl for CsvProvider {
     }
 }
 
-fn infer_csv_schema(path: PlPath, options: &CsvOptions) -> Result<Schema, ProviderError> {
+fn infer_csv_schema(path: PlPath, options: &CsvOptions, loc: Loc) -> Result<Schema, ProviderError> {
     let schema = LazyCsvReader::new(path)
         .with_has_header(options.has_header)
         .with_infer_schema_length(options.infer_schema_length)
         .with_separator(options.delimiter)
         .with_quote_char(options.quote_char)
-        .finish()?
-        .collect_schema()?
+        .finish()
+        .map_err(|e| ProviderError::from_polars(e, loc))?
+        .collect_schema()
+        .map_err(|e| ProviderError::from_polars(e, loc))?
         .as_ref()
         .clone();
 
@@ -186,6 +200,7 @@ pub struct CsvLoadFunction {
     uri: PlPath,
     options: CsvOptions,
     type_name: String,
+    loc: Loc,
 }
 
 impl FunctionImpl for CsvLoadFunction {
@@ -195,23 +210,19 @@ impl FunctionImpl for CsvLoadFunction {
         next_type_var: &mut dyn FnMut() -> TypeVar,
         gcx: &GlobalContext,
     ) -> Polytype {
-        // () -> List<RecordType>
-        let result_ty = match (
-            lookup_type_id(&self.type_name, gcx),
-            lookup_type_id("List", gcx),
-        ) {
-            (Some(type_id), Some(list_id)) => {
+        // () -> [RecordType]
+        let result_ty = match lookup_type_id(&self.type_name, gcx) {
+            Some(type_id) => {
                 let record_ty = ir.named_type(type_id);
-                ir.list_type(record_ty, list_id)
+                ir.list_type(record_ty)
             }
-            (Some(type_id), None) => ir.named_type(type_id),
-            _ => ir.var_type(next_type_var()),
+            None => ir.var_type(next_type_var()),
         };
 
         Polytype::mono(ir.fn_type(vec![], result_ty))
     }
 
-    fn call(&self, _args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
+    fn call(&self, _args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, CompileError> {
         use fossil_lang::runtime::value::{RecordsPlan, SourceDescriptor};
 
         // Extract path string from PlPath
@@ -233,8 +244,10 @@ impl FunctionImpl for CsvLoadFunction {
             .with_infer_schema_length(self.options.infer_schema_length)
             .with_separator(self.options.delimiter)
             .with_quote_char(self.options.quote_char)
-            .finish()?
-            .collect_schema()?
+            .finish()
+            .map_err(|e| CompileError::from_polars(e, self.loc))?
+            .collect_schema()
+            .map_err(|e| CompileError::from_polars(e, self.loc))?
             .as_ref()
             .clone();
 

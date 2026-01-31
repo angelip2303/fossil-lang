@@ -13,8 +13,11 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# external dependencies
+thiserror.workspace = true
 clap = { version = "4", features = ["derive"] }
-regex = "1"
+
+# internal dependencies
 fossil-lang = { workspace = true }
 fossil-stdlib = { workspace = true }
 fossil-providers = { workspace = true }

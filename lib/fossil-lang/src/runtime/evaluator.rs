@@ -9,7 +9,7 @@ use polars::prelude::*;
 
 use crate::ast::Loc;
 use crate::context::{DefId, Symbol};
-use crate::error::RuntimeError;
+use crate::error::{CompileError, RuntimeError};
 use crate::ir::{Argument, ExprId, ExprKind, Ident, Ir, StmtId, StmtKind, TypeKind, TypeRef};
 use crate::passes::GlobalContext;
 use crate::runtime::value::Value;
@@ -118,8 +118,16 @@ impl<'a> IrEvaluator<'a> {
         }
     }
 
+    /// Bind a value in the evaluator's environment
+    ///
+    /// This allows the executor to add top-level bindings without
+    /// recreating the evaluator (avoiding environment clones).
+    pub fn bind(&mut self, name: Symbol, value: Value) {
+        self.env.bind(name, value);
+    }
+
     /// Evaluate an expression and return its value
-    pub fn eval(&mut self, expr_id: ExprId) -> Result<Value, RuntimeError> {
+    pub fn eval(&mut self, expr_id: ExprId) -> Result<Value, CompileError> {
         let expr = self.ir.exprs.get(expr_id);
 
         match &expr.kind {
@@ -144,7 +152,7 @@ impl<'a> IrEvaluator<'a> {
                 let def_id = match ident {
                     Ident::Resolved(id) => *id,
                     Ident::Unresolved(_) => {
-                        return Err(self.make_error("Unresolved identifier at runtime"))
+                        return Err(self.make_error("Unresolved identifier at runtime"));
                     }
                 };
 
@@ -175,14 +183,23 @@ impl<'a> IrEvaluator<'a> {
                 }
             }
 
-            ExprKind::Record(fields) => self.eval_record(fields),
+            ExprKind::NamedRecordConstruction {
+                type_ident,
+                fields,
+                meta_fields,
+            } => self.eval_named_record(type_ident, fields, meta_fields),
 
             ExprKind::List(items) => self.eval_list(items),
 
-            ExprKind::Function { params, body } => Ok(Value::Closure {
+            ExprKind::Function {
+                params,
+                body,
+                attrs,
+            } => Ok(Value::Closure {
                 params: params.clone(),
                 body: *body,
                 env: Rc::new(self.env.clone()),
+                attrs: attrs.clone(),
             }),
 
             ExprKind::Application { callee, args } => self.eval_application(*callee, args),
@@ -212,7 +229,7 @@ impl<'a> IrEvaluator<'a> {
         &mut self,
         parts: &[Symbol],
         exprs: &[ExprId],
-    ) -> Result<Value, RuntimeError> {
+    ) -> Result<Value, CompileError> {
         let mut concat_parts: Vec<Expr> = Vec::new();
 
         for (i, part) in parts.iter().enumerate() {
@@ -240,105 +257,45 @@ impl<'a> IrEvaluator<'a> {
         Ok(Value::Expr(concat_expr))
     }
 
-    /// General trait method dispatch: given a value, its expression (for type info),
-    /// and a trait, finds and calls the user-defined impl method.
-    /// Returns None if no user-defined impl exists (primitives, unresolved types).
-    /// This is the core extensibility mechanism — any trait registered in GCX can
-    /// be dispatched at runtime without modifying the evaluator.
-    pub fn dispatch_trait_method(
-        &mut self,
-        value: &Value,
-        expr_id: ExprId,
-        trait_def_id: DefId,
-    ) -> Result<Option<Value>, RuntimeError> {
-        // Get the expression's type DefId from IR
-        let type_def_id = match self.get_expr_type_def_id(expr_id) {
-            Some(id) => id,
-            None => return Ok(None),
-        };
-
-        // Find the impl method expression in IR
-        let method_expr_id = match self.find_trait_impl_method(trait_def_id, type_def_id) {
-            Some(id) => id,
-            None => return Ok(None),
-        };
-
-        // Evaluate the method expression to get its closure
-        let value_clone = value.clone();
-        let method_val = self.eval(method_expr_id)?;
-
-        // Call the closure with self = value
-        match method_val {
-            Value::Closure { params, body, env } => {
-                let mut closure_env = (*env).clone();
-                // Bind self parameter to the value
-                if let Some(param) = params.first() {
-                    closure_env.bind(param.name, value_clone);
-                }
-                let saved_env = std::mem::replace(&mut self.env, closure_env);
-                let result = self.eval(body);
-                self.env = saved_env;
-                Ok(Some(result?))
-            }
-            _ => Ok(None),
-        }
-    }
-
-    /// Extract the type DefId from an expression's IR type.
-    fn get_expr_type_def_id(&self, expr_id: ExprId) -> Option<DefId> {
-        let expr = self.ir.exprs.get(expr_id);
-        let ty_id = match &expr.ty {
-            TypeRef::Known(id) => *id,
-            TypeRef::Unknown => return None,
-        };
-        let ty = self.ir.types.get(ty_id);
-        match &ty.kind {
-            TypeKind::Named(ident) => match ident {
-                Ident::Resolved(def_id) => Some(*def_id),
-                _ => None,
-            },
-            TypeKind::App { ctor, .. } => match ctor {
-                Ident::Resolved(def_id) => Some(*def_id),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    /// Find the first method ExprId for a trait impl by searching IR Impl statements.
-    /// This is a general lookup: it finds any impl for the given (trait, type) pair.
-    fn find_trait_impl_method(&self, trait_def_id: DefId, type_def_id: DefId) -> Option<ExprId> {
-        for stmt_id in &self.ir.root {
-            let stmt = self.ir.stmts.get(*stmt_id);
-            if let StmtKind::Impl {
-                trait_name,
-                type_name,
-                methods,
-            } = &stmt.kind
-            {
-                // Check if both trait and type are resolved to the expected DefIds
-                let trait_matches = matches!(trait_name, Ident::Resolved(id) if *id == trait_def_id);
-                let type_matches = matches!(type_name, Ident::Resolved(id) if *id == type_def_id);
-
-                if trait_matches && type_matches {
-                    // Return the first method's expression
-                    if let Some((_name, expr_id)) = methods.first() {
-                        return Some(*expr_id);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    /// Evaluate a record expression
+    /// Evaluate a named record construction `TypeName { @id = ..., field = value, ... }`
     ///
     /// All field values are Expr, so we always build a lazy plan.
-    fn eval_record(&mut self, fields: &[(Symbol, ExprId)]) -> Result<Value, RuntimeError> {
-        use crate::runtime::value::{RecordsPlan, SourceDescriptor};
+    /// The type_ident provides the DefId for metadata lookup.
+    /// Meta-fields (@name = expr) are evaluated and stored separately.
+    fn eval_named_record(
+        &mut self,
+        type_ident: &Ident,
+        fields: &[(Symbol, ExprId)],
+        meta_fields: &[(Symbol, ExprId)],
+    ) -> Result<Value, CompileError> {
+        use crate::runtime::value::{MetaFields, RecordsPlan, SourceDescriptor};
+
+        // Get the DefId from the resolved type identifier
+        let type_def_id = match type_ident {
+            Ident::Resolved(def_id) => Some(*def_id),
+            Ident::Unresolved(_) => {
+                return Err(self.make_error("Unresolved type identifier in record construction"));
+            }
+        };
+
+        // Evaluate meta-field expressions
+        let evaluated_meta_fields: MetaFields = meta_fields
+            .iter()
+            .filter_map(|(name, expr_id)| {
+                let val = self.eval(*expr_id).ok()?;
+                if let Value::Expr(e) = val {
+                    Some((*name, e))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         if fields.is_empty() {
-            return Ok(Value::Records(RecordsPlan::empty()));
+            let mut plan = RecordsPlan::empty();
+            plan.type_def_id = type_def_id;
+            plan.meta_fields = evaluated_meta_fields;
+            return Ok(Value::Records(plan));
         }
 
         // Build select expressions from all fields
@@ -352,17 +309,18 @@ impl<'a> IrEvaluator<'a> {
                     _ => Ok(lit(NULL).alias(name_str)),
                 }
             })
-            .collect::<Result<Vec<_>, RuntimeError>>()?;
+            .collect::<Result<Vec<_>, CompileError>>()?;
 
         // Build schema from expressions
         let schema = build_schema_from_exprs(&select_exprs);
 
-        // Store as pending transformation - will be applied to source by List::map
+        // Store as pending transformation with type info and meta-fields
         Ok(Value::Records(RecordsPlan {
             source: SourceDescriptor::Pending { select_exprs },
             transforms: Vec::new(),
-            type_def_id: None,
+            type_def_id,
             schema: std::sync::Arc::new(schema),
+            meta_fields: evaluated_meta_fields,
         }))
     }
 
@@ -370,7 +328,7 @@ impl<'a> IrEvaluator<'a> {
     ///
     /// Lists of records get concatenated lazily.
     /// Lists of primitives (Expr) are not typical in this DSL.
-    fn eval_list(&mut self, items: &[ExprId]) -> Result<Value, RuntimeError> {
+    fn eval_list(&mut self, items: &[ExprId]) -> Result<Value, CompileError> {
         use crate::runtime::value::{RecordsPlan, SourceDescriptor};
 
         if items.is_empty() {
@@ -401,6 +359,7 @@ impl<'a> IrEvaluator<'a> {
 
                 // Preserve metadata from first plan
                 let type_def_id = plans.first().and_then(|p| p.type_def_id);
+                let meta_fields = plans.first().map(|p| p.meta_fields.clone()).unwrap_or_default();
 
                 // Create lazy concat source - NO materialization!
                 let result_plan = RecordsPlan {
@@ -408,6 +367,7 @@ impl<'a> IrEvaluator<'a> {
                     transforms: Vec::new(),
                     type_def_id,
                     schema: std::sync::Arc::new(schema),
+                    meta_fields,
                 };
 
                 Ok(Value::Records(result_plan))
@@ -415,14 +375,14 @@ impl<'a> IrEvaluator<'a> {
 
             // Lists of primitives are not typical in this DataFrame-based DSL
             // The type system should guide users toward Records
-            _ => Err(self.make_error(
-                "Lists must contain records. Use type providers to load data.",
-            )),
+            _ => {
+                Err(self.make_error("Lists must contain records. Use type providers to load data."))
+            }
         }
     }
 
     /// Check if we've exceeded the maximum recursion depth
-    fn check_recursion_depth(&self) -> Result<(), RuntimeError> {
+    fn check_recursion_depth(&self) -> Result<(), CompileError> {
         if self.call_stack.depth() >= MAX_CALL_DEPTH {
             Err(self.make_error_with_stack(format!(
                 "Stack overflow: maximum recursion depth ({}) exceeded",
@@ -438,12 +398,12 @@ impl<'a> IrEvaluator<'a> {
         &mut self,
         callee: ExprId,
         args: &[Argument],
-    ) -> Result<Value, RuntimeError> {
+    ) -> Result<Value, CompileError> {
         // Check recursion depth before proceeding
         self.check_recursion_depth()?;
 
         let callee_expr = self.ir.exprs.get(callee);
-        let callee_loc = callee_expr.loc.clone();
+        let callee_loc = callee_expr.loc;
         let callee_val = self.eval(callee)?;
 
         // Evaluate arguments (extracting values from Argument enum)
@@ -455,7 +415,9 @@ impl<'a> IrEvaluator<'a> {
             .collect::<Result<Vec<_>, _>>()?;
 
         match callee_val {
-            Value::Closure { params, body, env } => {
+            Value::Closure {
+                params, body, env, ..
+            } => {
                 // Get function name for stack trace
                 let function_name =
                     if let ExprKind::Identifier(Ident::Resolved(def_id)) = &callee_expr.kind {
@@ -557,7 +519,7 @@ impl<'a> IrEvaluator<'a> {
                 // All values are Expr - build select expressions for lazy transformation
                 let select_exprs: Vec<Expr> = field_names
                     .iter()
-                    .zip(arg_values.into_iter())
+                    .zip(arg_values)
                     .map(|(field_name, value)| {
                         let name_str = self.gcx.interner.resolve(*field_name);
                         match value {
@@ -586,7 +548,7 @@ impl<'a> IrEvaluator<'a> {
     ///
     /// Returns Value::Expr(col("field")) for lazy column access.
     /// The actual selection happens at sink time (e.g., Rdf::serialize).
-    fn eval_field_access(&mut self, expr: ExprId, field: Symbol) -> Result<Value, RuntimeError> {
+    fn eval_field_access(&mut self, expr: ExprId, field: Symbol) -> Result<Value, CompileError> {
         let value = self.eval(expr)?;
         let field_name = self.gcx.interner.resolve(field);
 
@@ -609,7 +571,7 @@ impl<'a> IrEvaluator<'a> {
     }
 
     /// Evaluate a block of statements
-    fn eval_block(&mut self, stmts: &[StmtId]) -> Result<Value, RuntimeError> {
+    fn eval_block(&mut self, stmts: &[StmtId]) -> Result<Value, CompileError> {
         let mut last_value = Value::Unit;
 
         for stmt_id in stmts {
@@ -633,14 +595,6 @@ impl<'a> IrEvaluator<'a> {
                 StmtKind::Type { .. } => {
                     // Type declarations are compile time only, skip at runtime
                 }
-
-                StmtKind::Trait { .. } => {
-                    // Trait declarations are compile time only, skip at runtime
-                }
-
-                StmtKind::Impl { .. } => {
-                    // Impl declarations are compile time only, skip at runtime
-                }
             }
         }
 
@@ -648,63 +602,42 @@ impl<'a> IrEvaluator<'a> {
     }
 
     /// Get the field names for a record type by its name
-    fn get_record_field_names(&self, type_name: Symbol) -> Result<Vec<Symbol>, RuntimeError> {
-        use crate::ir::RecordRow;
-
+    fn get_record_field_names(&self, type_name: Symbol) -> Result<Vec<Symbol>, CompileError> {
         // Find the type definition in the IR root statements
-        for stmt_id in &self.ir.root {
+        let type_def = self.ir.root.iter().find_map(|stmt_id| {
             let stmt = self.ir.stmts.get(*stmt_id);
-            if let StmtKind::Type { name, ty, .. } = &stmt.kind {
-                if *name == type_name {
-                    // Found the type, extract field names from the RecordRow
-                    let ty = self.ir.types.get(*ty);
-                    if let TypeKind::Record(row) = &ty.kind {
-                        let mut fields = Vec::new();
-                        let mut current_row = row.clone();
-                        loop {
-                            match current_row {
-                                RecordRow::Empty => break,
-                                RecordRow::Var(_) => break,
-                                RecordRow::Extend { field, rest, .. } => {
-                                    fields.push(field);
-                                    current_row = *rest;
-                                }
-                            }
-                        }
-                        return Ok(fields);
-                    } else {
-                        return Err(self.make_error(format!(
-                            "Type '{}' is not a record type",
-                            self.gcx.interner.resolve(type_name)
-                        )));
-                    }
-                }
+            match &stmt.kind {
+                StmtKind::Type { name, ty, .. } if *name == type_name => Some(*ty),
+                _ => None,
             }
-        }
+        });
 
-        Err(self.make_error(format!(
-            "Record type '{}' not found",
-            self.gcx.interner.resolve(type_name)
-        )))
+        let Some(ty_id) = type_def else {
+            return Err(self.make_error(format!(
+                "Record type '{}' not found",
+                self.gcx.interner.resolve(type_name)
+            )));
+        };
+
+        let ty = self.ir.types.get(ty_id);
+        let TypeKind::Record(fields) = &ty.kind else {
+            return Err(self.make_error(format!(
+                "Type '{}' is not a record type",
+                self.gcx.interner.resolve(type_name)
+            )));
+        };
+
+        Ok(fields.field_names())
     }
 
     /// Helper to create runtime errors
-    fn make_error(&self, msg: impl Into<String>) -> RuntimeError {
+    fn make_error(&self, msg: impl Into<String>) -> CompileError {
         self.make_error_with_stack(msg)
     }
 
     /// Create a runtime error with the current call stack
-    fn make_error_with_stack(&self, msg: impl Into<String>) -> RuntimeError {
-        use crate::error::{CompileError, CompileErrorKind};
-
-        let mut error = CompileError::new(CompileErrorKind::Runtime(msg.into()), Loc::generated());
-
-        // Add call stack if not empty
-        if !self.call_stack.is_empty() {
-            error = error.with_context(self.call_stack.format(&self.gcx.interner));
-        }
-
-        error
+    fn make_error_with_stack(&self, msg: impl Into<String>) -> CompileError {
+        CompileError::from(RuntimeError::evaluation(msg.into(), Loc::generated()))
     }
 }
 
@@ -718,7 +651,10 @@ fn build_schema_from_exprs(exprs: &[Expr]) -> Schema {
         .filter_map(|expr| {
             // Extract alias name from expression
             if let Expr::Alias(_, name) = expr {
-                Some(Field::new(name.clone(), DataType::Unknown(Default::default())))
+                Some(Field::new(
+                    name.clone(),
+                    DataType::Unknown(Default::default()),
+                ))
             } else {
                 None
             }

@@ -3,6 +3,9 @@ use logos::Logos;
 #[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(skip r"[ \t\n\f]+", skip r"//.*")]
 pub enum Token<'a> {
+    /// Lexer error - invalid token
+    Error,
+
     #[token("let")]
     Let,
     #[token("const")]
@@ -11,14 +14,6 @@ pub enum Token<'a> {
     Type,
     #[token("fn")]
     Func,
-    #[token("trait")]
-    Trait,
-    #[token("impl")]
-    Impl,
-    #[token("for")]
-    For,
-    #[token("self")]
-    SelfKw,
     #[token("+")]
     Plus,
     #[token("true")]
@@ -68,8 +63,8 @@ pub enum Token<'a> {
     ModuleSep,
     #[token("!")]
     Bang,
-    #[token("_", priority = 3)]
-    Underscore,
+    #[token("@")]
+    At,
 
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice(), priority = 2)]
     Identifier(&'a str),

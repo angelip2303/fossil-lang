@@ -5,9 +5,11 @@
 
 use std::collections::HashMap;
 
+use std::sync::Arc;
+
 use crate::ast::Loc;
-use crate::context::{DefId, DefKind, Symbol};
-use crate::error::{CompileError, CompileErrorKind, CompileErrors};
+use crate::context::{DefId, DefKind, Symbol, TypeMetadata};
+use crate::error::{CompileError, CompileErrors, ResolutionError};
 use crate::ir::{Argument, ExprId, ExprKind, Ident, Ir, Path, StmtId, StmtKind, TypeId, TypeKind};
 use crate::passes::GlobalContext;
 
@@ -66,6 +68,8 @@ pub struct IrResolver {
     gcx: GlobalContext,
     ir: Ir,
     scopes: ScopeStack,
+    /// Type metadata extracted from AST, keyed by type name
+    pending_metadata: HashMap<Symbol, TypeMetadata>,
 }
 
 impl IrResolver {
@@ -74,7 +78,14 @@ impl IrResolver {
             gcx,
             ir,
             scopes: ScopeStack::new(),
+            pending_metadata: HashMap::new(),
         }
+    }
+
+    /// Add type metadata to be transferred during resolution
+    pub fn with_type_metadata(mut self, metadata: HashMap<Symbol, TypeMetadata>) -> Self {
+        self.pending_metadata = metadata;
+        self
     }
 
     pub fn resolve(mut self) -> Result<(Ir, GlobalContext), CompileErrors> {
@@ -108,7 +119,7 @@ impl IrResolver {
         let root = self.ir.root.clone();
         for stmt_id in root {
             let stmt = self.ir.stmts.get(stmt_id);
-            let loc = stmt.loc.clone();
+            let loc = stmt.loc;
 
             match &stmt.kind.clone() {
                 StmtKind::Let { name, value, .. } => {
@@ -116,10 +127,11 @@ impl IrResolver {
                     let expr = self.ir.exprs.get(*value);
                     if matches!(expr.kind, ExprKind::Function { .. }) {
                         if self.scopes.current_mut().values.contains_key(name) {
-                            errors.push(CompileError::new(
-                                CompileErrorKind::AlreadyDefined(*name),
-                                loc,
-                            ));
+                            errors.push(ResolutionError::AlreadyDefined {
+                                name: *name,
+                                first_def: loc,
+                                second_def: loc,
+                            });
                         } else {
                             let def_id = self.gcx.definitions.insert(None, *name, DefKind::Let);
                             self.scopes.current_mut().values.insert(*name, def_id);
@@ -129,10 +141,11 @@ impl IrResolver {
 
                 StmtKind::Const { name, .. } => {
                     if self.scopes.current_mut().values.contains_key(name) {
-                        errors.push(CompileError::new(
-                            CompileErrorKind::AlreadyDefined(*name),
-                            loc,
-                        ));
+                        errors.push(ResolutionError::AlreadyDefined {
+                            name: *name,
+                            first_def: loc,
+                            second_def: loc,
+                        });
                     } else {
                         let def_id = self.gcx.definitions.insert(None, *name, DefKind::Const);
                         self.scopes.current_mut().values.insert(*name, def_id);
@@ -141,37 +154,24 @@ impl IrResolver {
 
                 StmtKind::Type { name, .. } => {
                     if self.scopes.current_mut().types.contains_key(name) {
-                        errors.push(CompileError::new(
-                            CompileErrorKind::AlreadyDefined(*name),
-                            loc,
-                        ));
+                        errors.push(ResolutionError::AlreadyDefined {
+                            name: *name,
+                            first_def: loc,
+                            second_def: loc,
+                        });
                     } else {
                         let def_id = self.gcx.definitions.insert(None, *name, DefKind::Type);
                         self.scopes.current_mut().types.insert(*name, def_id);
 
-                        // Transfer pending type metadata from Symbol key to DefId key
-                        if let Some(mut metadata) = self.gcx.pending_type_metadata.remove(name) {
+                        // Transfer type metadata from pending to final storage
+                        if let Some(mut metadata) = self.pending_metadata.remove(name) {
                             metadata.def_id = def_id;
-                            self.gcx
-                                .type_metadata
-                                .insert(def_id, std::sync::Arc::new(metadata));
+                            self.gcx.type_metadata.insert(def_id, Arc::new(metadata));
                         }
                     }
                 }
 
-                StmtKind::Trait { name, methods, .. } => {
-                    let method_names: Vec<_> = methods.iter().map(|m| m.name).collect();
-                    let def_id = self.gcx.definitions.insert(
-                        None,
-                        *name,
-                        DefKind::Trait {
-                            methods: method_names,
-                        },
-                    );
-                    self.scopes.current_mut().types.insert(*name, def_id);
-                }
-
-                StmtKind::Impl { .. } | StmtKind::Expr(_) => {}
+                StmtKind::Expr(_) => {}
             }
         }
     }
@@ -180,7 +180,9 @@ impl IrResolver {
         let stmt = self.ir.stmts.get(stmt_id).clone();
 
         match &stmt.kind {
-            StmtKind::Let { name, ty, value, .. } => {
+            StmtKind::Let {
+                name, ty, value, ..
+            } => {
                 // Resolve type if present
                 if let Some(type_id) = ty {
                     self.resolve_type(*type_id, errors);
@@ -190,14 +192,11 @@ impl IrResolver {
                 self.resolve_expr(*value, errors);
 
                 // Get or create DefId
-                let def_id = self
-                    .scopes
-                    .lookup_value(*name)
-                    .unwrap_or_else(|| {
-                        let def_id = self.gcx.definitions.insert(None, *name, DefKind::Let);
-                        self.scopes.current_mut().values.insert(*name, def_id);
-                        def_id
-                    });
+                let def_id = self.scopes.lookup_value(*name).unwrap_or_else(|| {
+                    let def_id = self.gcx.definitions.insert(None, *name, DefKind::Let);
+                    self.scopes.current_mut().values.insert(*name, def_id);
+                    def_id
+                });
 
                 // Update statement with DefId
                 let stmt_mut = self.ir.stmts.get_mut(stmt_id);
@@ -209,7 +208,10 @@ impl IrResolver {
             StmtKind::Const { name, value, .. } => {
                 self.resolve_expr(*value, errors);
 
-                let def_id = self.scopes.lookup_value(*name).expect("Const should be declared");
+                let def_id = self
+                    .scopes
+                    .lookup_value(*name)
+                    .expect("Const should be declared");
 
                 let stmt_mut = self.ir.stmts.get_mut(stmt_id);
                 if let StmtKind::Const { def_id: d, .. } = &mut stmt_mut.kind {
@@ -226,50 +228,6 @@ impl IrResolver {
                 self.generate_record_constructor(*name, *ty, type_def_id);
             }
 
-            StmtKind::Trait { name, methods, .. } => {
-                let trait_def_id = self.scopes.lookup_type(*name).expect("Trait should be declared");
-
-                // Resolve method types
-                for method in methods {
-                    self.resolve_type(method.ty, errors);
-                }
-
-                // Update statement with DefId
-                let stmt_mut = self.ir.stmts.get_mut(stmt_id);
-                if let StmtKind::Trait { def_id: d, .. } = &mut stmt_mut.kind {
-                    *d = Some(trait_def_id);
-                }
-            }
-
-            StmtKind::Impl {
-                trait_name,
-                type_name,
-                methods,
-            } => {
-                // Resolve trait and type names
-                let trait_def_id = self.resolve_type_ident(trait_name, &stmt.loc, errors);
-                let type_def_id = self.resolve_type_ident(type_name, &stmt.loc, errors);
-
-                // Resolve method expressions
-                for (_, expr_id) in methods {
-                    self.resolve_expr(*expr_id, errors);
-                }
-
-                // Update impl with resolved identifiers
-                if let (Some(trait_id), Some(type_id)) = (trait_def_id, type_def_id) {
-                    let stmt_mut = self.ir.stmts.get_mut(stmt_id);
-                    if let StmtKind::Impl {
-                        trait_name: tn,
-                        type_name: tyn,
-                        ..
-                    } = &mut stmt_mut.kind
-                    {
-                        *tn = Ident::Resolved(trait_id);
-                        *tyn = Ident::Resolved(type_id);
-                    }
-                }
-            }
-
             StmtKind::Expr(expr_id) => {
                 self.resolve_expr(*expr_id, errors);
             }
@@ -281,11 +239,11 @@ impl IrResolver {
 
         match &expr.kind {
             ExprKind::Identifier(ident) => {
-                if let Ident::Unresolved(path) = ident {
-                    if let Some(def_id) = self.resolve_value_path(path, &expr.loc, errors) {
-                        let expr_mut = self.ir.exprs.get_mut(expr_id);
-                        expr_mut.kind = ExprKind::Identifier(Ident::Resolved(def_id));
-                    }
+                if let Ident::Unresolved(path) = ident
+                    && let Some(def_id) = self.resolve_value_path(path, expr.loc, errors)
+                {
+                    let expr_mut = self.ir.exprs.get_mut(expr_id);
+                    expr_mut.kind = ExprKind::Identifier(Ident::Resolved(def_id));
                 }
             }
 
@@ -295,13 +253,35 @@ impl IrResolver {
                 }
             }
 
-            ExprKind::Record(fields) => {
-                for (_, expr) in fields {
-                    self.resolve_expr(*expr, errors);
+            ExprKind::NamedRecordConstruction {
+                type_ident,
+                fields,
+                meta_fields,
+            } => {
+                // Resolve the type identifier
+                if let Ident::Unresolved(path) = type_ident
+                    && let Some(def_id) = self.resolve_type_path(path, expr.loc, errors)
+                {
+                    let expr_mut = self.ir.exprs.get_mut(expr_id);
+                    if let ExprKind::NamedRecordConstruction { type_ident: ti, .. } =
+                        &mut expr_mut.kind
+                    {
+                        *ti = Ident::Resolved(def_id);
+                    }
+                }
+
+                // Resolve field expressions
+                for (_, field_expr) in fields {
+                    self.resolve_expr(*field_expr, errors);
+                }
+
+                // Resolve meta-field expressions
+                for (_, meta_expr) in meta_fields {
+                    self.resolve_expr(*meta_expr, errors);
                 }
             }
 
-            ExprKind::Function { params, body } => {
+            ExprKind::Function { params, body, .. } => {
                 self.scopes.push();
 
                 // Add parameters to scope and update their DefIds
@@ -370,11 +350,11 @@ impl IrResolver {
 
         match &ty.kind {
             TypeKind::Named(ident) => {
-                if let Ident::Unresolved(path) = ident {
-                    if let Some(def_id) = self.resolve_type_path(path, &ty.loc, errors) {
-                        let ty_mut = self.ir.types.get_mut(type_id);
-                        ty_mut.kind = TypeKind::Named(Ident::Resolved(def_id));
-                    }
+                if let Ident::Unresolved(path) = ident
+                    && let Some(def_id) = self.resolve_type_path(path, ty.loc, errors)
+                {
+                    let ty_mut = self.ir.types.get_mut(type_id);
+                    ty_mut.kind = TypeKind::Named(Ident::Resolved(def_id));
                 }
             }
 
@@ -389,18 +369,18 @@ impl IrResolver {
                 self.resolve_type(*inner, errors);
             }
 
-            TypeKind::Record(row) => {
-                self.resolve_record_row(row, errors);
+            TypeKind::Record(fields) => {
+                self.resolve_record_fields(fields, errors);
             }
 
             TypeKind::App { ctor, args } => {
                 // Resolve constructor
-                if let Ident::Unresolved(path) = ctor {
-                    if let Some(def_id) = self.resolve_type_path(path, &ty.loc, errors) {
-                        let ty_mut = self.ir.types.get_mut(type_id);
-                        if let TypeKind::App { ctor: c, .. } = &mut ty_mut.kind {
-                            *c = Ident::Resolved(def_id);
-                        }
+                if let Ident::Unresolved(path) = ctor
+                    && let Some(def_id) = self.resolve_type_path(path, ty.loc, errors)
+                {
+                    let ty_mut = self.ir.types.get_mut(type_id);
+                    if let TypeKind::App { ctor: c, .. } = &mut ty_mut.kind {
+                        *c = Ident::Resolved(def_id);
                     }
                 }
 
@@ -417,26 +397,24 @@ impl IrResolver {
                 }
             }
 
-            TypeKind::Unit
-            | TypeKind::Primitive(_)
-            | TypeKind::Var(_) => {}
+            TypeKind::Unit | TypeKind::Primitive(_) | TypeKind::Var(_) => {}
         }
     }
 
-    fn resolve_record_row(&mut self, row: &crate::ir::RecordRow, errors: &mut CompileErrors) {
-        match row {
-            crate::ir::RecordRow::Empty | crate::ir::RecordRow::Var(_) => {}
-            crate::ir::RecordRow::Extend { ty, rest, .. } => {
-                self.resolve_type(*ty, errors);
-                self.resolve_record_row(rest, errors);
-            }
+    fn resolve_record_fields(
+        &mut self,
+        fields: &crate::ir::RecordFields,
+        errors: &mut CompileErrors,
+    ) {
+        for (_, ty) in &fields.fields {
+            self.resolve_type(*ty, errors);
         }
     }
 
     fn resolve_value_path(
         &self,
         path: &Path,
-        loc: &Loc,
+        loc: Loc,
         errors: &mut CompileErrors,
     ) -> Option<DefId> {
         match path {
@@ -445,32 +423,31 @@ impl IrResolver {
                     return Some(def_id);
                 }
 
-                if let Some(def_id) = self.gcx.definitions.resolve(&crate::ast::ast::Path::Simple(*name)) {
+                if let Some(def_id) = self
+                    .gcx
+                    .definitions
+                    .resolve(&crate::ast::ast::Path::Simple(*name))
+                {
                     return Some(def_id);
                 }
 
-                errors.push(CompileError::new(
-                    CompileErrorKind::UndefinedVariable { name: *name },
-                    loc.clone(),
-                ));
+                errors.push(ResolutionError::undefined_variable(*name, loc));
                 None
             }
 
             Path::Qualified(parts) => {
                 let ast_path = crate::ast::ast::Path::Qualified(parts.clone());
                 self.gcx.definitions.resolve(&ast_path).or_else(|| {
-                    errors.push(CompileError::new(
-                        CompileErrorKind::UndefinedPath { path: ast_path },
-                        loc.clone(),
-                    ));
+                    errors.push(ResolutionError::undefined_path(ast_path, loc));
                     None
                 })
             }
 
             Path::Relative { .. } => {
-                errors.push(CompileError::new(
-                    CompileErrorKind::Runtime("Relative paths not supported in IR resolver".into()),
-                    loc.clone(),
+                errors.push(CompileError::internal(
+                    "resolve",
+                    "Relative paths not supported in IR resolver",
+                    loc,
                 ));
                 None
             }
@@ -480,7 +457,7 @@ impl IrResolver {
     fn resolve_type_path(
         &self,
         path: &Path,
-        loc: &Loc,
+        loc: Loc,
         errors: &mut CompileErrors,
     ) -> Option<DefId> {
         match path {
@@ -489,13 +466,17 @@ impl IrResolver {
                     return Some(def_id);
                 }
 
-                if let Some(def_id) = self.gcx.definitions.resolve(&crate::ast::ast::Path::Simple(*name)) {
+                if let Some(def_id) = self
+                    .gcx
+                    .definitions
+                    .resolve(&crate::ast::ast::Path::Simple(*name))
+                {
                     return Some(def_id);
                 }
 
-                errors.push(CompileError::new(
-                    CompileErrorKind::UndefinedType(crate::ast::ast::Path::Simple(*name)),
-                    loc.clone(),
+                errors.push(ResolutionError::undefined_type(
+                    crate::ast::ast::Path::Simple(*name),
+                    loc,
                 ));
                 None
             }
@@ -503,37 +484,28 @@ impl IrResolver {
             Path::Qualified(parts) => {
                 let ast_path = crate::ast::ast::Path::Qualified(parts.clone());
                 self.gcx.definitions.resolve(&ast_path).or_else(|| {
-                    errors.push(CompileError::new(
-                        CompileErrorKind::UndefinedType(ast_path),
-                        loc.clone(),
-                    ));
+                    errors.push(ResolutionError::undefined_type(ast_path, loc));
                     None
                 })
             }
 
             Path::Relative { .. } => {
-                errors.push(CompileError::new(
-                    CompileErrorKind::Runtime("Relative paths not supported in IR resolver".into()),
-                    loc.clone(),
+                errors.push(CompileError::internal(
+                    "resolve",
+                    "Relative paths not supported in IR resolver",
+                    loc,
                 ));
                 None
             }
         }
     }
 
-    fn resolve_type_ident(
-        &self,
-        ident: &Ident,
-        loc: &Loc,
-        errors: &mut CompileErrors,
-    ) -> Option<DefId> {
-        match ident {
-            Ident::Resolved(def_id) => Some(*def_id),
-            Ident::Unresolved(path) => self.resolve_type_path(path, loc, errors),
-        }
-    }
-
-    fn generate_record_constructor(&mut self, type_name: Symbol, type_id: TypeId, type_def_id: Option<DefId>) {
+    fn generate_record_constructor(
+        &mut self,
+        type_name: Symbol,
+        type_id: TypeId,
+        type_def_id: Option<DefId>,
+    ) {
         let ty = self.ir.types.get(type_id);
         if let TypeKind::Record(_) = &ty.kind {
             // Check if constructor name already exists
@@ -542,8 +514,14 @@ impl IrResolver {
             }
 
             // Register constructor with type's DefId as parent (for metadata lookup)
-            let ctor_def_id = self.gcx.definitions.insert(type_def_id, type_name, DefKind::Func(None));
-            self.scopes.current_mut().values.insert(type_name, ctor_def_id);
+            let ctor_def_id =
+                self.gcx
+                    .definitions
+                    .insert(type_def_id, type_name, DefKind::Func(None));
+            self.scopes
+                .current_mut()
+                .values
+                .insert(type_name, ctor_def_id);
         }
     }
 

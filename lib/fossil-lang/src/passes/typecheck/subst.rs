@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{Ir, RecordRow, Type, TypeId, TypeKind, TypeVar};
+use crate::ir::{Ir, RecordFields, Type, TypeId, TypeKind, TypeVar};
 
 /// Substitution: mapping from type variables to types
 #[derive(Clone, Debug, Default)]
@@ -32,7 +32,7 @@ impl Subst {
         // Clone what we need before any mutable operations
         let ty = ir.types.get(ty_id);
         let kind = ty.kind.clone();
-        let loc = ty.loc.clone();
+        let loc = ty.loc;
 
         let result = match kind {
             TypeKind::Var(var) => match self.map.get(&var) {
@@ -51,22 +51,22 @@ impl Subst {
                     ty_id
                 } else {
                     ir.types.alloc(Type {
-                        loc: loc.clone(),
+                        loc,
                         kind: TypeKind::App { ctor, args: new_args },
                     })
                 }
             }
 
-            TypeKind::Record(row) => {
-                let old_row = row.clone();
-                let new_row = self.apply_row(row, ir, cache);
+            TypeKind::Record(fields) => {
+                let old_fields = fields.clone();
+                let new_fields = self.apply_fields(fields, ir, cache);
 
-                if new_row == old_row {
+                if new_fields.fields == old_fields.fields {
                     ty_id
                 } else {
                     ir.types.alloc(Type {
-                        loc: loc.clone(),
-                        kind: TypeKind::Record(new_row),
+                        loc,
+                        kind: TypeKind::Record(new_fields),
                     })
                 }
             }
@@ -83,7 +83,7 @@ impl Subst {
                     ty_id
                 } else {
                     ir.types.alloc(Type {
-                        loc: loc.clone(),
+                        loc,
                         kind: TypeKind::Function(new_params, new_ret),
                     })
                 }
@@ -95,7 +95,7 @@ impl Subst {
                     ty_id
                 } else {
                     ir.types.alloc(Type {
-                        loc: loc.clone(),
+                        loc,
                         kind: TypeKind::List(new_inner),
                     })
                 }
@@ -132,41 +132,18 @@ impl Subst {
         self.map.insert(var, ty);
     }
 
-    /// Apply substitution to a record row
-    pub fn apply_row(
+    /// Apply substitution to record fields
+    pub fn apply_fields(
         &self,
-        row: RecordRow,
+        fields: RecordFields,
         ir: &mut Ir,
         cache: &mut HashMap<TypeId, TypeId>,
-    ) -> RecordRow {
-        match row {
-            RecordRow::Empty => RecordRow::Empty,
-            RecordRow::Extend { field, ty, rest } => {
-                let new_ty = self.apply_with_cache(ty, ir, cache);
-                let new_rest = Box::new(self.apply_row(*rest, ir, cache));
-                RecordRow::Extend {
-                    field,
-                    ty: new_ty,
-                    rest: new_rest,
-                }
-            }
-            RecordRow::Var(v) => {
-                // Check if v is bound in the substitution
-                if let Some(&bound_ty) = self.map.get(&v) {
-                    // First, recursively apply substitution to the bound type
-                    let resolved_ty = self.apply_with_cache(bound_ty, ir, cache);
-                    // Extract the row from the resolved type
-                    let resolved = ir.types.get(resolved_ty);
-                    if let TypeKind::Record(row) = &resolved.kind {
-                        // Recursively apply to the extracted row as well
-                        self.apply_row(row.clone(), ir, cache)
-                    } else {
-                        RecordRow::Var(v)
-                    }
-                } else {
-                    RecordRow::Var(v)
-                }
-            }
-        }
+    ) -> RecordFields {
+        let new_fields = fields
+            .fields
+            .iter()
+            .map(|(name, ty)| (*name, self.apply_with_cache(*ty, ir, cache)))
+            .collect();
+        RecordFields { fields: new_fields }
     }
 }

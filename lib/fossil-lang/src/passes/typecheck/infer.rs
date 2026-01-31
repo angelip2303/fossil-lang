@@ -6,13 +6,13 @@
 //! The key difference from the previous HIR/THIR-based implementation is that
 //! we now work directly on the unified IR, inferring types in-place.
 
-use crate::error::{CompileError, CompileErrorKind};
+use crate::error::{ResolutionError, TypeError};
 use crate::ir::{
-    ExprId, ExprKind, Ident, Literal, Polytype, PrimitiveType, RecordRow, StmtKind, Type, TypeId,
-    TypeKind,
+    ExprId, ExprKind, Ident, Literal, Polytype, PrimitiveType, StmtKind, Type, TypeId, TypeKind,
 };
+use crate::error::CompileError;
 
-use super::{subst::Subst, TypeChecker};
+use super::{TypeChecker, subst::Subst};
 
 impl TypeChecker {
     /// Algorithm W: infer the type of an expression
@@ -31,12 +31,12 @@ impl TypeChecker {
 
         let expr = self.ir.exprs.get(expr_id);
         let expr_kind = expr.kind.clone();
-        let loc = expr.loc.clone();
+        let loc = expr.loc;
 
         let result = match &expr_kind {
             ExprKind::Unit => {
                 let ty = self.ir.types.alloc(Type {
-                    loc: loc.clone(),
+                    loc,
                     kind: TypeKind::Unit,
                 });
                 Ok((Subst::default(), ty))
@@ -48,7 +48,10 @@ impl TypeChecker {
                     Literal::String(_) => PrimitiveType::String,
                     Literal::Boolean(_) => PrimitiveType::Bool,
                 };
-                let ty = self.primitive_type(prim, loc.clone());
+                let ty = self.ir.types.alloc(Type {
+                    loc,
+                    kind: TypeKind::Primitive(prim),
+                });
                 Ok((Subst::default(), ty))
             }
 
@@ -61,13 +64,9 @@ impl TypeChecker {
                             .lookup(*def_id)
                             .ok_or_else(|| {
                                 let def = self.gcx.definitions.get(*def_id);
-                                CompileError::new(
-                                    CompileErrorKind::UndefinedVariable { name: def.name },
-                                    loc.clone(),
-                                )
-                                .with_context(format!(
-                                    "Variable '{}' is used before it has been assigned a type",
-                                    self.gcx.interner.resolve(def.name)
+                                CompileError::from(ResolutionError::undefined_variable(
+                                    def.name,
+                                    loc,
                                 ))
                             })?
                             .clone();
@@ -85,9 +84,10 @@ impl TypeChecker {
                         Ok((Subst::default(), ty))
                     }
                     Ident::Unresolved(path) => {
-                        // Should not happen after resolution
-                        Err(CompileError::new(
-                            CompileErrorKind::Runtime(format!("Unresolved identifier: {:?}", path)),
+                        // Should not happen after resolution - this is an internal error
+                        Err(CompileError::internal(
+                            "typecheck",
+                            format!("Unresolved identifier reached type checker: {:?}", path),
                             loc,
                         ))
                     }
@@ -97,8 +97,8 @@ impl TypeChecker {
             ExprKind::List(items) => {
                 if items.is_empty() {
                     // Empty list: [α] where α is fresh
-                    let elem_ty = self.fresh_type_var(loc.clone());
-                    let list_ty = self.list_type(elem_ty, loc.clone());
+                    let elem_ty = self.fresh_type_var(loc);
+                    let list_ty = self.ir.list_type(elem_ty);
                     Ok((Subst::default(), list_ty))
                 } else {
                     // Infer first element
@@ -110,57 +110,55 @@ impl TypeChecker {
                         subst = subst.compose(&s1, &mut self.ir);
 
                         let elem_ty_applied = subst.apply(elem_ty, &mut self.ir);
-                        let s2 = self.unify(elem_ty_applied, item_ty, loc.clone())?;
+                        let s2 = self.unify(elem_ty_applied, item_ty, loc)?;
                         subst = subst.compose(&s2, &mut self.ir);
                     }
 
                     let final_elem_ty = subst.apply(elem_ty, &mut self.ir);
-                    let list_ty = self.list_type(final_elem_ty, loc.clone());
+                    let list_ty = self.ir.list_type(final_elem_ty);
                     Ok((subst, list_ty))
                 }
             }
 
-            ExprKind::Record(fields) => {
-                let mut subst = Subst::default();
-                let mut field_types = Vec::new();
+            ExprKind::NamedRecordConstruction {
+                type_ident,
+                fields,
+                meta_fields,
+            } => {
+                // Get the type from the resolved identifier
+                let type_def_id = type_ident.def_id();
 
-                for (name, field_expr) in fields {
-                    let (s, field_ty) = self.infer(*field_expr)?;
+                // Infer types for all fields
+                let mut subst = Subst::default();
+
+                for (_name, field_expr) in fields {
+                    let (s, _field_ty) = self.infer(*field_expr)?;
                     subst = subst.compose(&s, &mut self.ir);
-                    let field_ty = subst.apply(field_ty, &mut self.ir);
-                    field_types.push((*name, field_ty));
                 }
 
-                // Convert to RecordRow
-                let row = RecordRow::from_fields(field_types);
-                let record_ty = self.record_type(row, loc.clone());
+                // Infer meta-field expressions
+                for (_name, meta_expr) in meta_fields {
+                    let (s, _) = self.infer(*meta_expr)?;
+                    subst = subst.compose(&s, &mut self.ir);
+                }
 
-                Ok((subst, record_ty))
+                // The type is the named type from the identifier
+                let named_ty = self.ir.named_type(type_def_id);
+
+                Ok((subst, named_ty))
             }
 
-            ExprKind::Function { params, body } => {
-                // Create type variables (or use annotations) for parameters
+            ExprKind::Function { params, body, .. } => {
                 let mut param_types = Vec::new();
                 let mut local_env = self.env.clone();
 
                 for param in params {
-                    let param_ty = if let Some(self_ty) = self.self_type {
-                        // Check if this param is named "self"
-                        let self_sym = self.gcx.interner.intern("self");
-                        if param.name == self_sym {
-                            self_ty
-                        } else if let Some(annotation_ty) = param.ty {
-                            annotation_ty
-                        } else {
-                            self.fresh_type_var(loc.clone())
-                        }
-                    } else if let Some(annotation_ty) = param.ty {
+                    let param_ty = if let Some(annotation_ty) = param.ty {
                         annotation_ty
                     } else {
-                        self.fresh_type_var(loc.clone())
+                        self.fresh_type_var(loc)
                     };
 
-                    // Add parameter to local type environment (if it has a DefId)
                     if let Some(def_id) = param.def_id {
                         local_env.insert(def_id, Polytype::mono(param_ty));
                     }
@@ -177,7 +175,7 @@ impl TypeChecker {
                     .map(|ty| subst.apply(ty, &mut self.ir))
                     .collect();
 
-                let func_ty = self.function_type(param_types, ret_ty, loc.clone());
+                let func_ty = self.ir.fn_type(param_types, ret_ty);
 
                 // Restore environment
                 self.env = saved_env;
@@ -188,6 +186,15 @@ impl TypeChecker {
             ExprKind::Application { callee, args } => {
                 // Save local_subst
                 let saved_local_subst = std::mem::take(&mut self.local_subst);
+
+                // Check if callee is a variadic function
+                let callee_expr = self.ir.exprs.get(*callee);
+                let is_variadic =
+                    if let ExprKind::Identifier(Ident::Resolved(def_id)) = &callee_expr.kind {
+                        self.gcx.is_variadic(*def_id)
+                    } else {
+                        false
+                    };
 
                 // Infer callee type
                 let (mut subst, callee_ty) = self.infer(*callee)?;
@@ -205,14 +212,29 @@ impl TypeChecker {
                 }
 
                 // Create fresh return type
-                let ret_ty = self.fresh_type_var(loc.clone());
+                let ret_ty = self.fresh_type_var(loc);
 
-                // Expected function type
-                let expected_ty = self.function_type(arg_types, ret_ty, loc.clone());
+                // For variadic functions, only unify with declared parameters
+                let callee_ty_applied = subst.apply(callee_ty, &mut self.ir);
+                let callee_type_kind = self.ir.types.get(callee_ty_applied).kind.clone();
+
+                let args_for_unification = if is_variadic {
+                    // Get the number of declared parameters from the function type
+                    if let TypeKind::Function(params, _) = &callee_type_kind {
+                        // Only use first N argument types for unification
+                        arg_types.iter().take(params.len()).cloned().collect()
+                    } else {
+                        arg_types.clone()
+                    }
+                } else {
+                    arg_types.clone()
+                };
+
+                // Expected function type (with possibly fewer args for variadic)
+                let expected_ty = self.ir.fn_type(args_for_unification, ret_ty);
 
                 // Unify callee with expected function type
-                let callee_ty = subst.apply(callee_ty, &mut self.ir);
-                let s = self.unify(callee_ty, expected_ty, loc)?;
+                let s = self.unify(callee_ty_applied, expected_ty, loc)?;
                 subst = subst.compose(&s, &mut self.ir);
 
                 // Restore local_subst
@@ -224,77 +246,50 @@ impl TypeChecker {
 
             ExprKind::FieldAccess { expr, field } => {
                 // Normal field access
-                let (mut subst, expr_ty) = self.infer(*expr)?;
+                let (subst, expr_ty) = self.infer(*expr)?;
                 let expr_ty = subst.apply(expr_ty, &mut self.ir);
 
                 let ty = self.ir.types.get(expr_ty);
                 match &ty.kind {
-                    TypeKind::Record(row) => {
-                        if let Some(field_ty) = row.lookup(*field) {
+                    TypeKind::Record(fields) => {
+                        if let Some(field_ty) = fields.lookup(*field) {
                             Ok((subst, field_ty))
                         } else {
-                            // Row might be extensible
-                            let field_ty = self.fresh_type_var(loc.clone());
-                            let rest_var = self.tvg.fresh();
-                            let expected_row = RecordRow::Extend {
-                                field: *field,
-                                ty: field_ty,
-                                rest: Box::new(RecordRow::Var(rest_var)),
-                            };
-                            let expected_ty = self.record_type(expected_row, loc.clone());
-                            let s = self.unify(expr_ty, expected_ty, loc)?;
-                            subst = subst.compose(&s, &mut self.ir);
-                            Ok((subst, field_ty))
+                            // Field not found - error (no row polymorphism)
+                            Err(CompileError::from(TypeError::record_field_mismatch(
+                                *field,
+                                loc,
+                            )))
                         }
                     }
 
                     TypeKind::Named(Ident::Resolved(def_id)) => {
                         // Named type - resolve to underlying record type
-                        if let Some(underlying_ty) = self.resolve_named_type(*def_id) {
-                            let underlying = self.ir.types.get(underlying_ty);
-                            if let TypeKind::Record(row) = &underlying.kind {
-                                if let Some(field_ty) = row.lookup(*field) {
-                                    return Ok((subst, field_ty));
-                                }
-                            }
+                        if let Some(underlying_ty) = self.resolve_named_type(*def_id)
+                            && let TypeKind::Record(fields) =
+                                &self.ir.types.get(underlying_ty).kind
+                            && let Some(field_ty) = fields.lookup(*field)
+                        {
+                            return Ok((subst, field_ty));
                         }
 
-                        // Fallback: treat as type variable
-                        let field_ty = self.fresh_type_var(loc.clone());
-                        let rest_var = self.tvg.fresh();
-                        let row = RecordRow::Extend {
-                            field: *field,
-                            ty: field_ty,
-                            rest: Box::new(RecordRow::Var(rest_var)),
-                        };
-                        let record_ty = self.record_type(row, loc.clone());
-                        let s = self.unify(expr_ty, record_ty, loc)?;
-                        subst = subst.compose(&s, &mut self.ir);
-                        Ok((subst, field_ty))
+                        // Field not found - error
+                        Err(CompileError::from(TypeError::record_field_mismatch(
+                            *field,
+                            loc,
+                        )))
                     }
 
                     TypeKind::Var(_) => {
-                        // Polymorphic access on type variable
-                        let field_ty = self.fresh_type_var(loc.clone());
-                        let rest_var = self.tvg.fresh();
-                        let row = RecordRow::Extend {
-                            field: *field,
-                            ty: field_ty,
-                            rest: Box::new(RecordRow::Var(rest_var)),
-                        };
-                        let record_ty = self.record_type(row, loc.clone());
-                        let s = self.unify(expr_ty, record_ty, loc)?;
-                        subst = subst.compose(&s, &mut self.ir);
+                        // Type variable - create a fresh type for the field
+                        // (simplified: just return a fresh type var without constraining the record)
+                        let field_ty = self.fresh_type_var(loc);
                         Ok((subst, field_ty))
                     }
 
-                    _ => Err(CompileError::new(
-                        CompileErrorKind::UndefinedVariable { name: *field },
-                        loc.clone(),
-                    )
-                    .with_context(format!(
-                        "Cannot access field '{}' on a non-record type",
-                        self.gcx.interner.resolve(*field)
+                    _ => Err(CompileError::from(TypeError::record_field_mismatch(
+                        *field,
+                        loc,
                     ))),
                 }
             }
@@ -323,7 +318,7 @@ impl TypeChecker {
 
                 let final_ty = block_ty.unwrap_or_else(|| {
                     self.ir.types.alloc(Type {
-                        loc: loc.clone(),
+                        loc,
                         kind: TypeKind::Unit,
                     })
                 });
@@ -332,20 +327,13 @@ impl TypeChecker {
 
             ExprKind::StringInterpolation { parts: _, exprs } => {
                 // String interpolation always produces a string
+                // All types are serializable via Polars - no trait check needed
                 let mut subst = Subst::default();
                 for &expr in exprs {
-                    let (s, inferred_ty) = self.infer(expr)?;
+                    let (s, _) = self.infer(expr)?;
                     subst = subst.compose(&s, &mut self.ir);
-
-                    // Record ToString constraint for deferred verification
-                    if let Some(to_string_trait) = self.gcx.builtin_traits.to_string {
-                        let expr_loc = self.ir.exprs.get(expr).loc.clone();
-                        let resolved_ty = subst.apply(inferred_ty, &mut self.ir);
-                        self.trait_constraints
-                            .push((resolved_ty, to_string_trait, expr_loc));
-                    }
                 }
-                let ty = self.primitive_type(PrimitiveType::String, loc);
+                let ty = self.ir.string_type();
                 Ok((subst, ty))
             }
 
@@ -358,10 +346,10 @@ impl TypeChecker {
                 let subst = s1.compose(&s2, &mut self.ir);
 
                 // Create fresh return type
-                let ret_ty = self.fresh_type_var(loc.clone());
+                let ret_ty = self.fresh_type_var(loc);
 
                 // Expected: right should be a function taking left's type
-                let expected_fn = self.function_type(vec![left_ty], ret_ty, loc.clone());
+                let expected_fn = self.ir.fn_type(vec![left_ty], ret_ty);
                 let s3 = self.unify(right_ty, expected_fn, loc)?;
                 let subst = subst.compose(&s3, &mut self.ir);
 

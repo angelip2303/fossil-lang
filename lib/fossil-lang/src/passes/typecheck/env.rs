@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::context::DefId;
-use crate::ir::{Ir, Polytype, RecordRow, TypeId, TypeKind, TypeVar};
+use crate::ir::{Ir, Polytype, RecordFields, TypeId, TypeKind, TypeVar};
 
 /// Type environment: maps DefIds to polytypes
 #[derive(Clone, Debug, Default)]
@@ -49,7 +49,7 @@ impl TypeEnv {
                 .iter()
                 .flat_map(|arg| self.free_vars_type(*arg, ir))
                 .collect(),
-            TypeKind::Record(row) => self.free_vars_row(row, ir),
+            TypeKind::Record(fields) => self.free_vars_fields(fields, ir),
             TypeKind::Function(params, ret) => {
                 let mut vars: HashSet<_> = params
                     .iter()
@@ -66,20 +66,12 @@ impl TypeEnv {
         }
     }
 
-    pub fn free_vars_row(&self, row: &RecordRow, ir: &Ir) -> HashSet<TypeVar> {
-        match row {
-            RecordRow::Empty => HashSet::new(),
-            RecordRow::Extend { ty, rest, .. } => {
-                let mut vars = self.free_vars_type(*ty, ir);
-                vars.extend(self.free_vars_row(rest, ir));
-                vars
-            }
-            RecordRow::Var(v) => {
-                let mut set = HashSet::new();
-                set.insert(*v);
-                set
-            }
-        }
+    pub fn free_vars_fields(&self, fields: &RecordFields, ir: &Ir) -> HashSet<TypeVar> {
+        fields
+            .fields
+            .iter()
+            .flat_map(|(_, ty)| self.free_vars_type(*ty, ir))
+            .collect()
     }
 
     /// Generalize a type to a polytype
@@ -88,10 +80,6 @@ impl TypeEnv {
         let ty_vars = self.free_vars_type(ty_id, ir);
         let mut forall: Vec<_> = ty_vars.difference(&env_vars).copied().collect();
         forall.sort_by_key(|v| v.0);
-        Polytype {
-            forall,
-            constraints: vec![],
-            ty: ty_id,
-        }
+        Polytype { forall, ty: ty_id }
     }
 }

@@ -1,15 +1,7 @@
-pub mod list;
 pub mod rdf;
-pub mod string;
-
-// DataFrame iteration and transformation
-pub use list::{JoinFunction, MapFunction};
 
 // RDF serialization
-pub use rdf::{RdfMetadata, RdfSerializeFunction};
-
-// String operations
-pub use string::{StringConcatFunction, StringFormatFunction};
+pub use rdf::{MapFunction, RdfMetadata, RdfSerializeFunction};
 
 use fossil_lang::passes::GlobalContext;
 
@@ -29,18 +21,14 @@ use fossil_lang::passes::GlobalContext;
 /// use fossil_lang::passes::GlobalContext;
 /// use fossil_stdlib;
 ///
-/// let mut gcx = GlobalContext::new();
+/// let mut gcx = GlobalContext::default();
 /// fossil_stdlib::init(&mut gcx);
 /// ```
 pub fn init(gcx: &mut GlobalContext) {
-    // Register string operations
-    gcx.register_function("String", "concat", StringConcatFunction);
-    gcx.register_function("String", "format", StringFormatFunction);
-
-    // Register List functions
-    gcx.register_function("List", "map", MapFunction);
-    gcx.register_function("List", "join", JoinFunction);
-
     // Register RDF serialization functions
     gcx.register_function("Rdf", "serialize", RdfSerializeFunction);
+
+    // Register map() as a variadic function for multi-output streaming
+    // Accepts: map(source, fn1, fn2, fn3, ...)
+    gcx.register_variadic_toplevel_function("map", MapFunction);
 }

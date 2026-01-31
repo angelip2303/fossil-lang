@@ -10,7 +10,6 @@ pub struct Ast {
     pub stmts: Arena<Stmt>,
     pub exprs: Arena<Expr>,
     pub types: Arena<Type>,
-    /// Root statement IDs of the program
     pub root: Vec<StmtId>,
 }
 
@@ -32,38 +31,13 @@ pub enum StmtKind {
     /// A constant binding `const name = expr`
     Const { name: Symbol, value: ExprId },
     /// A type definition `type name = type` with optional type-level attributes
-    ///
-    /// # Example
-    /// ```fossil
-    /// #[rdf(type = "http://schema.org/Person", id = "http://example.org/${id}")]
-    /// type Person = shex!("person.shex", shape: "PersonShape")
-    /// ```
     Type {
         name: Symbol,
         ty: TypeId,
-        /// Type-level attributes (e.g., #[rdf(type = "...", id = "...")])
         attrs: Vec<Attribute>,
-    },
-    /// A trait definition `trait Name { method: type, ... }`
-    Trait {
-        name: Symbol,
-        methods: Vec<TraitMethod>,
-    },
-    /// A trait implementation `impl Trait for Type { method = expr, ... }`
-    Impl {
-        trait_name: Path,
-        type_name: Path,
-        methods: Vec<(Symbol, ExprId)>,
     },
     /// An expression declaration `expr`
     Expr(ExprId),
-}
-
-/// A method signature in a trait definition
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TraitMethod {
-    pub name: Symbol,
-    pub ty: TypeId,
 }
 
 #[derive(Debug)]
@@ -71,6 +45,17 @@ pub struct Expr {
     pub loc: Loc,
     pub kind: ExprKind,
 }
+
+/// Meta-fields for record construction (@name = expr)
+///
+/// Meta-fields are special fields prefixed with `@` that provide
+/// contextual metadata. Functions like `map()` and `Rdf::serialize`
+/// interpret these fields according to their semantics.
+///
+/// Common meta-fields:
+/// - `@id`: Entity identifier (interpreted by RDF as subject URI)
+/// - `@graph`: Named graph (interpreted by RDF as graph URI)
+pub type RecordMetadata = Vec<(Symbol, ExprId)>;
 
 /// An expression in the language
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -83,10 +68,24 @@ pub enum ExprKind {
     Literal(Literal),
     /// A list `[expr, expr, ...]`
     List(Vec<ExprId>),
-    /// A record `{ field = expr, field = expr, ... }`
-    Record(Vec<(Symbol, ExprId)>),
+    /// A named record construction `TypeName { @id = ..., field = value, ... }`
+    /// Supports @id and @graph metadata fields
+    NamedRecordConstruction {
+        /// Path to the type (e.g., Person, mod::Person)
+        type_path: Path,
+        /// Named fields (field_name, value_expr)
+        fields: Vec<(Symbol, ExprId)>,
+        /// Metadata fields (@id, @graph)
+        metadata: RecordMetadata,
+    },
     /// A function definition `fn (param1, param2, ...) -> expr`
-    Function { params: Vec<Param>, body: ExprId },
+    /// Optionally with attributes: `#[rdf(id = "...")] fn(r) -> ...`
+    Function {
+        params: Vec<Param>,
+        body: ExprId,
+        /// Optional attributes on the function (e.g., for projections)
+        attrs: Vec<Attribute>,
+    },
     /// A function application `callee(arg1, arg2, ...)` with positional and named arguments
     Application { callee: ExprId, args: Vec<Argument> },
     /// A pipe expression `lhs |> rhs`
@@ -94,9 +93,6 @@ pub enum ExprKind {
     /// Field access `expr.field`
     FieldAccess { expr: ExprId, field: Symbol },
     /// A block expression `{ stmt* }`
-    /// Contains zero or more statements.
-    /// If the last statement is Stmt::Expr(e), the block returns e.
-    /// Otherwise, returns Unit.
     Block { stmts: Vec<StmtId> },
     /// A string interpolation `"Hello ${name}, you are ${age} years old!"`
     /// Invariant: parts.len() == exprs.len() + 1
@@ -133,7 +129,6 @@ pub enum TypeKind {
     /// A record type `{ field: T, field: T, ... }`
     Record(Vec<RecordField>),
     /// An applied type (type constructor application) `Name<T1, T2, ...>`
-    /// For example: `Entity<Person>`, `List<Int>`, `Map<String, Int>`
     App { ctor: Path, args: Vec<TypeId> },
 }
 
@@ -145,9 +140,6 @@ pub enum Path {
     /// A qualified path with multiple components: `std::list::map`
     Qualified(Vec<Symbol>),
     /// A relative path starting with ./ or ../
-    /// - dots = 0 means ./ (current directory)
-    /// - dots = 1 means ../ (parent directory)
-    /// - dots = 2 means ../../ (grandparent directory), etc.
     Relative { dots: u8, components: Vec<Symbol> },
 }
 
@@ -168,26 +160,15 @@ impl Path {
         match self {
             Path::Simple(_) => None,
             Path::Qualified(parts) => parts.get(parts.len() - 2).copied(),
-            Path::Relative { components, .. } => {
-                components.get(components.len().saturating_sub(2)).copied()
-            }
+            Path::Relative { components: p, .. } => p.get(p.len().saturating_sub(2)).copied(),
         }
     }
 
     pub fn item(&self) -> Symbol {
         match self {
             Path::Simple(sym) => *sym,
-            Path::Qualified(parts) => {
-                // SAFETY: Qualified paths are validated to be non-empty at construction
-                // via Path::qualified() which converts single-element paths to Simple.
-                *parts.last().expect("BUG: Qualified path with zero parts")
-            }
-            Path::Relative { components, .. } => {
-                // Relative paths must have at least one component
-                *components
-                    .last()
-                    .expect("BUG: Relative path with zero components")
-            }
+            Path::Qualified(parts) => *parts.last().expect("Qualified path with zero parts"),
+            Path::Relative { components: p, .. } => *p.last().expect("Relative path has no parts"),
         }
     }
 
@@ -244,9 +225,7 @@ pub enum Literal {
 /// An argument in a function call (positional or named)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Argument {
-    /// A positional argument: `func(expr)`
     Positional(ExprId),
-    /// A named argument: `func(name: expr)`
     Named { name: Symbol, value: ExprId },
 }
 
@@ -260,31 +239,20 @@ impl Argument {
     }
 }
 
-/// A provider argument (literal-based, positional or named)
+/// A provider argument (literal-based or positional)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProviderArgument {
     /// A positional argument: `csv!("file.csv")`
     Positional(Literal),
     /// A named argument: `csv!(path: "file.csv")`
     Named { name: Symbol, value: Literal },
-    /// A reference to a compile-time const: `sql!(DB, "customers")`
-    ConstRef(Symbol),
 }
 
 impl ProviderArgument {
-    /// Get the literal value of this argument
-    ///
-    /// # Panics
-    /// Panics if called on a `ConstRef` that hasn't been resolved during expansion.
     pub fn value(&self) -> &Literal {
         match self {
             ProviderArgument::Positional(lit) => lit,
             ProviderArgument::Named { value, .. } => value,
-            ProviderArgument::ConstRef(_) => {
-                panic!(
-                    "ConstRef must be resolved during provider expansion before accessing its value"
-                )
-            }
         }
     }
 }
@@ -292,9 +260,7 @@ impl ProviderArgument {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Param {
     pub name: Symbol,
-    /// Optional type annotation for this parameter (e.g., `fn(x: int)`)
     pub ty: Option<TypeId>,
-    /// Optional default value for this parameter
     pub default: Option<ExprId>,
 }
 
@@ -329,8 +295,6 @@ impl From<polars::prelude::DataType> for PrimitiveType {
 }
 
 /// Attribute annotation on record fields
-///
-/// Supports named arguments like `#[rdf(uri = "...", required = true)]`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Attribute {
     pub name: Symbol,
@@ -339,8 +303,6 @@ pub struct Attribute {
 }
 
 /// A single argument in an attribute
-///
-/// Represents `key = value` pairs like `uri = "http://..."`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AttributeArg {
     pub key: Symbol,

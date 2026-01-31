@@ -97,6 +97,8 @@ pub struct RecordsPlan {
     pub type_def_id: Option<DefId>,
     /// Schema of the output (known at compile-time)
     pub schema: Arc<Schema>,
+    /// Meta-fields from record construction (@name = expr)
+    pub meta_fields: MetaFields,
 }
 
 impl RecordsPlan {
@@ -107,6 +109,7 @@ impl RecordsPlan {
             transforms: Vec::new(),
             type_def_id: None,
             schema: Arc::new(schema),
+            meta_fields: Vec::new(),
         }
     }
 
@@ -117,6 +120,7 @@ impl RecordsPlan {
             transforms: Vec::new(),
             type_def_id: Some(type_def_id),
             schema: Arc::new(schema),
+            meta_fields: Vec::new(),
         }
     }
 
@@ -130,6 +134,7 @@ impl RecordsPlan {
             transforms: Vec::new(),
             type_def_id: Some(type_def_id),
             schema: Arc::new(schema),
+            meta_fields: Vec::new(),
         }
     }
 
@@ -140,6 +145,7 @@ impl RecordsPlan {
             transforms: Vec::new(),
             type_def_id: None,
             schema: Arc::new(Schema::default()),
+            meta_fields: Vec::new(),
         }
     }
 
@@ -187,6 +193,66 @@ impl RecordsPlan {
     // This ensures no accidental materialization can happen.
 }
 
+/// Output specification for a single type in an OutputPlan
+///
+/// Contains the type's DefId (for metadata lookup), the transformation
+/// expressions to apply to the source data, and projection attributes.
+#[derive(Clone)]
+pub struct OutputSpec {
+    /// DefId of the output type (for obtaining RdfMetadata)
+    pub type_def_id: DefId,
+    /// Transformation expressions to apply to source data
+    /// These are built from tracing a closure against the source schema
+    pub select_exprs: Vec<Expr>,
+    /// Output schema after transformation
+    pub schema: Arc<Schema>,
+    /// Meta-fields from record construction (@name = expr)
+    pub meta_fields: MetaFields,
+}
+
+/// Meta-fields from record construction (@name = expr)
+///
+/// These are contextual metadata evaluated at runtime.
+/// Keys are the meta-field names (without @), values are Polars expressions.
+pub type MetaFields = Vec<(crate::context::Symbol, Expr)>;
+
+/// Multi-output plan for streaming RDF serialization
+///
+/// Enables a single pass over source data to produce multiple outputs.
+/// Created by chaining `to()` calls:
+///
+/// ```fossil
+/// source
+/// |> to(Student, fn(row) -> Student { name = row.name })
+/// |> to(Sport, fn(row) -> Sport { name = row.sport })
+/// |> Rdf::serialize("output.nq")
+/// ```
+///
+/// Each `to()` adds an output to the plan without consuming the source.
+/// `Rdf::serialize` then iterates the source ONCE, applying each transform.
+#[derive(Clone)]
+pub struct OutputPlan {
+    /// The source data plan
+    pub source: RecordsPlan,
+    /// Output specifications for each type
+    pub outputs: Vec<OutputSpec>,
+}
+
+impl OutputPlan {
+    /// Create a new OutputPlan from a source with an initial output
+    pub fn new(source: RecordsPlan, first_output: OutputSpec) -> Self {
+        Self {
+            source,
+            outputs: vec![first_output],
+        }
+    }
+
+    /// Add another output to the plan
+    pub fn add_output(&mut self, output: OutputSpec) {
+        self.outputs.push(output);
+    }
+}
+
 /// Runtime values in the Fossil language
 ///
 /// All data values are represented as Polars expressions (`Expr`), enabling
@@ -213,8 +279,12 @@ pub enum Value {
 
     /// A lazy plan for record processing (source + transforms)
     /// Everything stays lazy until a sink executes the plan.
-    /// Also used as tracing context in List::map (with Empty source).
+    /// Also used as tracing context in to() (with Empty source).
     Records(RecordsPlan),
+
+    /// Multi-output plan for streaming RDF serialization
+    /// Created by to() chains, consumed by Rdf::serialize
+    OutputPlan(OutputPlan),
 
     // ===== FUNCTIONS (code, not data) =====
     /// User-defined function with captured environment
@@ -222,6 +292,8 @@ pub enum Value {
         params: Vec<Param>,
         body: ExprId,
         env: Rc<Environment>,
+        /// Optional attributes on the closure (e.g., #[rdf(id = "...")])
+        attrs: Vec<crate::ast::ast::Attribute>,
     },
 
     /// Builtin function from stdlib
@@ -262,98 +334,69 @@ impl Value {
     }
 }
 
-/// Extract a string literal from a Polars expression
+/// Generic helper to extract a value from a Polars literal expression
 ///
-/// Handles both dynamic literals (from `lit("string")`) and scalar values.
-fn extract_literal_string(expr: &polars::prelude::Expr) -> Option<String> {
-    use polars::prelude::{AnyValue, Expr, LiteralValue};
+/// Handles both dynamic literals (from `lit(...)`) and scalar values.
+fn extract_literal<T>(
+    expr: &polars::prelude::Expr,
+    extract_from_any: impl Fn(&polars::prelude::AnyValue<'_>) -> Option<T>,
+) -> Option<T> {
+    use polars::prelude::{Expr, LiteralValue};
 
     match expr {
         Expr::Literal(lv) => {
-            // Try to convert to AnyValue and extract string
-            if let Some(av) = lv.to_any_value() {
-                match av {
-                    AnyValue::String(s) => return Some(s.to_string()),
-                    AnyValue::StringOwned(s) => return Some(s.to_string()),
-                    _ => {}
-                }
+            // Try to convert to AnyValue first
+            if let Some(av) = lv.to_any_value()
+                && let Some(val) = extract_from_any(&av)
+            {
+                return Some(val);
             }
             // Also handle Scalar directly
             if let LiteralValue::Scalar(scalar) = lv {
-                match scalar.value() {
-                    AnyValue::String(s) => return Some(s.to_string()),
-                    AnyValue::StringOwned(s) => return Some(s.to_string()),
-                    _ => {}
-                }
+                return extract_from_any(scalar.value());
             }
             None
         }
         _ => None,
     }
+}
+
+/// Extract a string literal from a Polars expression
+fn extract_literal_string(expr: &polars::prelude::Expr) -> Option<String> {
+    use polars::prelude::AnyValue;
+
+    extract_literal(expr, |av| match av {
+        AnyValue::String(s) => Some(s.to_string()),
+        AnyValue::StringOwned(s) => Some(s.to_string()),
+        _ => None,
+    })
 }
 
 /// Extract an integer literal from a Polars expression
 fn extract_literal_int(expr: &polars::prelude::Expr) -> Option<i64> {
-    use polars::prelude::{AnyValue, Expr, LiteralValue};
+    use polars::prelude::AnyValue;
 
-    match expr {
-        Expr::Literal(lv) => {
-            // Try to convert to AnyValue and extract int
-            if let Some(av) = lv.to_any_value() {
-                match av {
-                    AnyValue::Int64(i) => return Some(i),
-                    AnyValue::Int32(i) => return Some(i as i64),
-                    AnyValue::Int16(i) => return Some(i as i64),
-                    AnyValue::Int8(i) => return Some(i as i64),
-                    AnyValue::UInt64(i) => return Some(i as i64),
-                    AnyValue::UInt32(i) => return Some(i as i64),
-                    AnyValue::UInt16(i) => return Some(i as i64),
-                    AnyValue::UInt8(i) => return Some(i as i64),
-                    _ => {}
-                }
-            }
-            // Also handle Scalar directly
-            if let LiteralValue::Scalar(scalar) = lv {
-                match scalar.value() {
-                    AnyValue::Int64(i) => return Some(*i),
-                    AnyValue::Int32(i) => return Some(*i as i64),
-                    AnyValue::Int16(i) => return Some(*i as i64),
-                    AnyValue::Int8(i) => return Some(*i as i64),
-                    AnyValue::UInt64(i) => return Some(*i as i64),
-                    AnyValue::UInt32(i) => return Some(*i as i64),
-                    AnyValue::UInt16(i) => return Some(*i as i64),
-                    AnyValue::UInt8(i) => return Some(*i as i64),
-                    _ => {}
-                }
-            }
-            None
-        }
+    extract_literal(expr, |av| match av {
+        AnyValue::Int64(i) => Some(*i),
+        AnyValue::Int32(i) => Some(*i as i64),
+        AnyValue::Int16(i) => Some(*i as i64),
+        AnyValue::Int8(i) => Some(*i as i64),
+        AnyValue::UInt64(i) => Some(*i as i64),
+        AnyValue::UInt32(i) => Some(*i as i64),
+        AnyValue::UInt16(i) => Some(*i as i64),
+        AnyValue::UInt8(i) => Some(*i as i64),
         _ => None,
-    }
+    })
 }
 
 /// Extract a boolean literal from a Polars expression
 fn extract_literal_bool(expr: &polars::prelude::Expr) -> Option<bool> {
-    use polars::prelude::{AnyValue, Expr, LiteralValue};
+    use polars::prelude::AnyValue;
 
-    match expr {
-        Expr::Literal(lv) => {
-            // Try to convert to AnyValue and extract bool
-            if let Some(av) = lv.to_any_value() {
-                if let AnyValue::Boolean(b) = av {
-                    return Some(b);
-                }
-            }
-            // Also handle Scalar directly
-            if let LiteralValue::Scalar(scalar) = lv {
-                if let AnyValue::Boolean(b) = scalar.value() {
-                    return Some(*b);
-                }
-            }
-            None
-        }
+    extract_literal(expr, |av| match av {
+        AnyValue::Boolean(b) => Some(*b),
         _ => None,
-    }
+    })
 }
 
 /// Environment for variable bindings during execution

@@ -89,6 +89,59 @@ impl ChunkedExecutor {
         Ok(total_rows)
     }
 
+    /// Execute a RecordsPlan without selection and process batches via callback
+    ///
+    /// Similar to `execute_plan_with_select_batched` but without a selection step.
+    /// Used for multi-output processing where transformations are applied per-output.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The RecordsPlan to execute
+    /// * `process_batch` - Callback called for each batch DataFrame
+    ///
+    /// # Returns
+    ///
+    /// Total number of rows processed
+    pub fn execute_plan_batched<F>(
+        &self,
+        plan: &RecordsPlan,
+        mut process_batch: F,
+    ) -> PolarsResult<u64>
+    where
+        F: FnMut(DataFrame) -> PolarsResult<()>,
+    {
+        let safe_lf = self.build_safe_lazy_frame(plan)?;
+
+        // Convert to LazyFrame for batched execution
+        let lf = safe_lf.into_inner();
+        let mut total_rows: u64 = 0;
+        let mut offset: i64 = 0;
+
+        loop {
+            // Get a batch using slice - THIS is where materialization happens
+            let batch_lf = lf.clone().slice(offset, self.batch_size as u32);
+            let batch_df = batch_lf.collect()?;
+
+            let batch_len = batch_df.height();
+            if batch_len == 0 {
+                break;
+            }
+
+            // Call the callback with this batch
+            process_batch(batch_df)?;
+
+            total_rows += batch_len as u64;
+            offset += batch_len as i64;
+
+            // If we got fewer rows than requested, we're done
+            if batch_len < self.batch_size {
+                break;
+            }
+        }
+
+        Ok(total_rows)
+    }
+
     /// Build a SafeLazyFrame from a RecordsPlan
     ///
     /// PRIVATE: This is internal to the executor. No external code should

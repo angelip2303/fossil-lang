@@ -1,147 +1,165 @@
-//! RDF serialization using Oxigraph
-//!
-//! This module provides streaming RDF serialization from DataFrames to various
-//! RDF formats using Oxigraph's serialization capabilities.
-
 use std::fs::File;
-use std::io::BufWriter;
-use std::path::Path;
+use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 
-use oxigraph::io::{RdfFormat, RdfSerializer};
-use oxigraph::model::{BlankNodeRef, GraphNameRef, LiteralRef, NamedNodeRef, NamedOrBlankNodeRef, QuadRef, TermRef};
+use oxrdf::{BlankNode, GraphNameRef, Literal, NamedNode, NamedOrBlankNode, QuadRef, Term};
+use oxrdfio::{RdfFormat, RdfSerializer, WriterQuadSerializer};
 use polars::prelude::*;
 
-use super::RdfMetadata;
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+const BNODE_PREFIX: &str = "_:";
 
-/// Supported RDF output formats
-///
-/// Infers format from file extension for KISS design.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputFormat {
-    /// N-Triples (.nt) - simple line-based format
-    NTriples,
-    /// N-Quads (.nq) - N-Triples with graph name
-    NQuads,
-    /// Turtle (.ttl) - compact, human-readable
-    Turtle,
-    /// TriG (.trig) - Turtle with named graphs
-    TriG,
-    /// RDF/XML (.rdf, .xml) - XML-based format
-    RdfXml,
+/// Parsed subject with pre-computed type for efficient iteration
+enum ParsedSubject {
+    BlankNode(BlankNode),
+    NamedNode(NamedNode),
 }
 
-impl OutputFormat {
-    /// Infer output format from file extension
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the output file
-    ///
-    /// # Returns
-    ///
-    /// The detected format, defaulting to N-Quads if unknown
-    pub fn from_path<P: AsRef<Path>>(path: P) -> Self {
-        let ext = path
-            .as_ref()
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-
-        match ext.to_lowercase().as_str() {
-            "nt" => OutputFormat::NTriples,
-            "nq" => OutputFormat::NQuads,
-            "ttl" => OutputFormat::Turtle,
-            "trig" => OutputFormat::TriG,
-            "rdf" | "xml" => OutputFormat::RdfXml,
-            _ => OutputFormat::NQuads, // Default
-        }
-    }
-
-    /// Convert to Oxigraph's RdfFormat
-    fn to_rdf_format(self) -> RdfFormat {
+impl ParsedSubject {
+    fn as_ref(&self) -> NamedOrBlankNode {
         match self {
-            OutputFormat::NTriples => RdfFormat::NTriples,
-            OutputFormat::NQuads => RdfFormat::NQuads,
-            OutputFormat::Turtle => RdfFormat::Turtle,
-            OutputFormat::TriG => RdfFormat::TriG,
-            OutputFormat::RdfXml => RdfFormat::RdfXml,
+            ParsedSubject::BlankNode(b) => b.clone().into(),
+            ParsedSubject::NamedNode(n) => n.clone().into(),
         }
     }
 }
 
-/// Batch writer for converting DataFrames to RDF triples
-///
-/// Processes DataFrame batches and serializes them as RDF using Oxigraph.
-/// Supports streaming/batched execution for constant memory usage.
+#[inline]
+fn clean_subject(s: &str) -> &str {
+    s.strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(s)
+}
+
+fn parse_subject_cleaned(s: &str) -> Result<ParsedSubject, PolarsError> {
+    if let Some(id) = s.strip_prefix(BNODE_PREFIX) {
+        let bnode = BlankNode::new(id)
+            .map_err(|_| PolarsError::ComputeError(format!("Invalid blank node: {s}").into()))?;
+        return Ok(ParsedSubject::BlankNode(bnode));
+    }
+
+    let node = NamedNode::new(s)
+        .map_err(|_| PolarsError::ComputeError(format!("Invalid subject URI: {s}").into()))?;
+    Ok(ParsedSubject::NamedNode(node))
+}
+
+fn parse_predicate(s: &str) -> Result<NamedNode, PolarsError> {
+    let uri = s
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(s);
+    NamedNode::new(uri)
+        .map_err(|_| PolarsError::ComputeError(format!("Invalid predicate: {s}").into()))
+}
+
+#[inline]
+fn parse_object(s: &str) -> Result<Term, PolarsError> {
+    if let Some(id) = s.strip_prefix(BNODE_PREFIX) {
+        let bnode = BlankNode::new(id)
+            .map_err(|_| PolarsError::ComputeError(format!("Invalid blank node: {s}").into()))?;
+        return Ok(bnode.into());
+    }
+
+    if let Some(uri) = s.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+        let node = NamedNode::new(uri)
+            .map_err(|_| PolarsError::ComputeError(format!("Invalid URI: {s}").into()))?;
+        return Ok(node.into());
+    }
+
+    // Check for bare URI (http://, https://, urn:)
+    // Use byte comparison for speed - avoid string operations
+    let bytes = s.as_bytes();
+    let is_uri = bytes.len() > 4 && (bytes.starts_with(b"http") || bytes.starts_with(b"urn:"));
+
+    if is_uri {
+        let node = NamedNode::new(s)
+            .map_err(|_| PolarsError::ComputeError(format!("Invalid URI: {s}").into()))?;
+        return Ok(node.into());
+    }
+
+    // Default: literal
+    Ok(Literal::new_simple_literal(s).into())
+}
+
 pub struct RdfBatchWriter {
-    serializer: oxigraph::io::WriterQuadSerializer<BufWriter<File>>,
+    serializer: WriterQuadSerializer<BufWriter<File>>,
 }
 
 impl RdfBatchWriter {
-    /// Create a new RDF batch writer
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Output file path
-    /// * `format` - RDF output format
-    /// * `_metadata` - RDF metadata containing type information (unused, kept for API compatibility)
-    pub fn new<P: AsRef<Path>>(
-        path: P,
-        format: OutputFormat,
-        _metadata: &RdfMetadata,
-    ) -> std::io::Result<Self> {
+    pub fn new(path: PathBuf, format: RdfFormat) -> std::io::Result<Self> {
         let file = File::create(path)?;
-        let writer = BufWriter::new(file);
-        let serializer = RdfSerializer::from_format(format.to_rdf_format()).for_writer(writer);
-
+        let writer = BufWriter::with_capacity(256 * 1024, file);
+        let serializer = RdfSerializer::from_format(format).for_writer(writer);
         Ok(Self { serializer })
     }
 
-    /// Write a batch DataFrame as RDF triples
+    /// Stream a DataFrame batch directly to the RDF file
     ///
-    /// The DataFrame must have:
-    /// - `_subject`: Subject URI or blank node ID
-    /// - `_type` (optional): rdf:type URI
-    /// - Other columns: predicate URIs mapped to their values
-    ///
-    /// # Arguments
-    ///
-    /// * `batch` - DataFrame batch with RDF-structured columns
+    /// Optimizations:
+    /// - Pre-filter rows with null subjects (columnar operation)
+    /// - Subjects parsed once and reused across all predicate columns
+    /// - Predicates parsed once per column (they're constant)
+    /// - Zero-copy quad serialization using QuadRef
     pub fn write_batch(&mut self, batch: &DataFrame) -> PolarsResult<()> {
-        let subject_col = batch.column("_subject")?;
-        let type_col = batch.column("_type").ok();
+        // Pre-filter: drop rows where subject is null
+        // This is a columnar operation - removes the null check from the hot loop
+        let filtered = batch
+            .clone()
+            .lazy()
+            .filter(col("_subject").is_not_null())
+            .collect()?;
 
-        // Get all predicate columns (everything except _subject and _type)
-        let predicate_cols: Vec<_> = batch
-            .get_column_names()
-            .into_iter()
-            .filter(|name| *name != "_subject" && *name != "_type")
+        // Early exit if no valid rows
+        if filtered.height() == 0 {
+            return Ok(());
+        }
+
+        // Parse all subjects once - reused for every predicate column
+        // Subjects are guaranteed non-null after filtering
+        let subject_strs = filtered.column("_subject")?.str()?;
+        let parsed_subjects: Vec<ParsedSubject> = subject_strs
+            .iter()
+            .flatten()
+            .filter_map(|s| parse_subject_cleaned(clean_subject(s)).ok())
             .collect();
 
-        let height = batch.height();
+        // Stream rdf:type triples (if present)
+        if let Ok(type_col) = filtered.column("_type") {
+            let types = type_col.cast(&DataType::String)?;
+            let types = types.str()?;
+            let pred = parse_predicate(RDF_TYPE)?;
 
-        for row_idx in 0..height {
-            // 1. Parse subject (URI or blank node)
-            let subject_value = subject_col.get(row_idx)?;
-            let subject_str = subject_value.str_value();
-
-            // 2. Generate rdf:type triple if _type exists
-            if let Some(ref type_col) = type_col {
-                let type_value = type_col.get(row_idx)?;
-                if !type_value.is_null() {
-                    let type_uri = type_value.str_value();
-                    self.write_triple(&subject_str, RDF_TYPE, &type_uri, TermType::NamedNode)?;
+            // Subject guaranteed non-null, only check object
+            for (subj, obj) in parsed_subjects.iter().zip(types.iter()) {
+                if let Some(obj) = obj {
+                    let subj_ref = subj.as_ref();
+                    self.write_quad_parsed(&subj_ref, &pred, obj)?;
                 }
             }
+        }
 
-            // 3. Generate triples for each predicate column
-            for pred_name in &predicate_cols {
-                let col = batch.column(pred_name)?;
-                let value = col.get(row_idx)?;
+        // Get predicate columns (excluding meta columns)
+        let predicate_cols: Vec<String> = filtered
+            .get_column_names()
+            .into_iter()
+            .filter(|n| {
+                let s = n.as_str();
+                s != "_subject" && s != "_type"
+            })
+            .map(|n| n.to_string())
+            .collect();
 
-                if !value.is_null() {
-                    let object_str = value.str_value();
-                    self.write_triple(&subject_str, pred_name, &object_str, TermType::Literal)?;
+        // Stream each predicate column using pre-parsed subjects
+        for name in &predicate_cols {
+            let pred = parse_predicate(name)?;
+            let objects = filtered.column(name.as_str())?.cast(&DataType::String)?;
+            let objects = objects.str()?;
+
+            // Subject guaranteed non-null, only check object
+            for (subj, obj) in parsed_subjects.iter().zip(objects.iter()) {
+                if let Some(obj) = obj {
+                    let subj_ref = subj.as_ref();
+                    self.write_quad_parsed(&subj_ref, &pred, obj)?;
                 }
             }
         }
@@ -149,82 +167,243 @@ impl RdfBatchWriter {
         Ok(())
     }
 
-    /// Write a single RDF triple
-    fn write_triple(
+    /// Write a quad with pre-parsed subject (avoids re-parsing subject for each predicate)
+    ///
+    /// Uses QuadRef to avoid cloning subject/predicate strings - only references are passed.
+    #[inline]
+    fn write_quad_parsed(
         &mut self,
-        subject: &str,
-        predicate: &str,
-        object: &str,
-        object_type: TermType,
+        subj: &NamedOrBlankNode,
+        pred: &NamedNode,
+        obj: &str,
     ) -> PolarsResult<()> {
-        // Parse subject (blank node if starts with "_:")
-        let subject_ref: NamedOrBlankNodeRef = if subject.starts_with("_:") {
-            let blank_id = &subject[2..];
-            NamedOrBlankNodeRef::BlankNode(BlankNodeRef::new(blank_id).map_err(|e| {
-                PolarsError::ComputeError(format!("Invalid blank node ID '{}': {}", blank_id, e).into())
-            })?)
-        } else {
-            NamedOrBlankNodeRef::NamedNode(NamedNodeRef::new(subject).map_err(|e| {
-                PolarsError::ComputeError(format!("Invalid subject URI '{}': {}", subject, e).into())
-            })?)
-        };
-
-        // Parse predicate (always a named node)
-        let predicate_node = NamedNodeRef::new(predicate).map_err(|e| {
-            PolarsError::ComputeError(format!("Invalid predicate URI '{}': {}", predicate, e).into())
-        })?;
-
-        // Parse object based on type
-        let object_term: TermRef = match object_type {
-            TermType::NamedNode => {
-                TermRef::NamedNode(NamedNodeRef::new(object).map_err(|e| {
-                    PolarsError::ComputeError(format!("Invalid object URI '{}': {}", object, e).into())
-                })?)
-            }
-            TermType::Literal => TermRef::Literal(LiteralRef::new_simple_literal(object)),
-        };
-
-        // Create and serialize the quad (default graph)
-        let quad = QuadRef::new(subject_ref, predicate_node, object_term, GraphNameRef::DefaultGraph);
-        self.serializer.serialize_quad(quad).map_err(|e| {
-            PolarsError::ComputeError(format!("Failed to serialize triple: {}", e).into())
-        })?;
-
-        Ok(())
+        let obj = parse_object(obj)?;
+        // Use QuadRef::new with references - no string cloning
+        let quad = QuadRef::new(subj, pred, &obj, GraphNameRef::DefaultGraph);
+        self.serializer
+            .serialize_quad(quad)
+            .map_err(|_| PolarsError::ComputeError("Serialization failed".into()))
     }
 
-    /// Finish writing and close the file
     pub fn finish(self) -> PolarsResult<()> {
-        self.serializer.finish().map_err(|e| {
-            PolarsError::ComputeError(format!("Failed to finish RDF serialization: {}", e).into())
-        })?;
+        self.serializer
+            .finish()
+            .map_err(|_| PolarsError::ComputeError("Failed to finish RDF file".into()))?;
         Ok(())
     }
 }
 
-/// Type of RDF term for objects
-#[derive(Debug, Clone, Copy)]
-enum TermType {
-    NamedNode,
-    Literal,
+// ============================================================================
+// COLUMNAR N-TRIPLES SERIALIZER
+// ============================================================================
+//
+// Fully columnar RDF serialization using Polars string operations.
+// No per-row function calls - everything is vectorized.
+
+use super::metadata::RdfTermType;
+
+/// Predicate column info for serialization
+pub struct PredicateColumn {
+    /// Predicate URI
+    pub uri: String,
+    /// Column name in DataFrame
+    pub column: String,
+    /// Term type for proper RDF formatting
+    pub term_type: RdfTermType,
 }
 
-/// The rdf:type predicate URI
-const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+/// Columnar N-Triples writer
+///
+/// Uses Polars vectorized string operations for maximum throughput.
+/// All formatting happens in columnar operations, then writes in bulk.
+///
+/// Supports proper XSD datatypes for typed literals.
+pub struct ColumnarNTriplesWriter {
+    writer: BufWriter<File>,
+}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl ColumnarNTriplesWriter {
+    pub fn new(path: PathBuf) -> std::io::Result<Self> {
+        let file = File::create(path)?;
+        let writer = BufWriter::with_capacity(512 * 1024, file); // 512KB buffer
+        Ok(Self { writer })
+    }
 
-    #[test]
-    fn test_format_from_extension() {
-        assert_eq!(OutputFormat::from_path("test.nt"), OutputFormat::NTriples);
-        assert_eq!(OutputFormat::from_path("test.nq"), OutputFormat::NQuads);
-        assert_eq!(OutputFormat::from_path("test.ttl"), OutputFormat::Turtle);
-        assert_eq!(OutputFormat::from_path("test.trig"), OutputFormat::TriG);
-        assert_eq!(OutputFormat::from_path("test.rdf"), OutputFormat::RdfXml);
-        assert_eq!(OutputFormat::from_path("test.xml"), OutputFormat::RdfXml);
-        // Unknown defaults to NQuads
-        assert_eq!(OutputFormat::from_path("test.unknown"), OutputFormat::NQuads);
+    /// Write a batch with explicit predicate info (includes datatypes)
+    ///
+    /// This is the preferred method when you have schema information.
+    pub fn write_batch_typed(
+        &mut self,
+        batch: &DataFrame,
+        predicates: &[PredicateColumn],
+    ) -> PolarsResult<()> {
+        if batch.height() == 0 {
+            return Ok(());
+        }
+
+        let subjects = batch.column("_subject")?.str()?;
+
+        // Write rdf:type triples if present
+        if let Ok(type_col) = batch.column("_type") {
+            let types = type_col.cast(&DataType::String)?;
+            let types_str = types.str()?;
+            self.write_column_vectorized(subjects, RDF_TYPE, types_str, &RdfTermType::Uri)?;
+        }
+
+        // Write each predicate column with proper datatype
+        for pred in predicates {
+            if let Ok(col) = batch.column(pred.column.as_str()) {
+                let objects = col.cast(&DataType::String)?;
+                let objects_str = objects.str()?;
+                self.write_column_vectorized(subjects, &pred.uri, objects_str, &pred.term_type)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Write a batch inferring types from column data types
+    ///
+    /// Simpler API when predicate URIs are column names.
+    pub fn write_batch(&mut self, batch: &DataFrame) -> PolarsResult<()> {
+        if batch.height() == 0 {
+            return Ok(());
+        }
+
+        let subjects = batch.column("_subject")?.str()?;
+
+        // Write rdf:type triples if present
+        if let Ok(type_col) = batch.column("_type") {
+            let types = type_col.cast(&DataType::String)?;
+            let types_str = types.str()?;
+            self.write_column_vectorized(subjects, RDF_TYPE, types_str, &RdfTermType::Uri)?;
+        }
+
+        // Write each predicate column, inferring type from Polars dtype
+        for col_name in batch.get_column_names() {
+            let name = col_name.as_str();
+            if name == "_subject" || name == "_type" {
+                continue;
+            }
+
+            let column = batch.column(col_name)?;
+            let term_type = polars_dtype_to_rdf_type(column.dtype());
+
+            let objects = column.cast(&DataType::String)?;
+            let objects_str = objects.str()?;
+            self.write_column_vectorized(subjects, name, objects_str, &term_type)?;
+        }
+
+        Ok(())
+    }
+
+    /// Write all triples for a single predicate column using vectorized ops
+    fn write_column_vectorized(
+        &mut self,
+        subjects: &StringChunked,
+        predicate: &str,
+        objects: &StringChunked,
+        term_type: &RdfTermType,
+    ) -> PolarsResult<()> {
+        // Build DataFrame with subject and object
+        let df = DataFrame::new(vec![
+            subjects.clone().into_series().with_name("s".into()).into(),
+            objects.clone().into_series().with_name("o".into()).into(),
+        ])?;
+
+        // Filter nulls using columnar operation
+        let df = df
+            .lazy()
+            .filter(col("s").is_not_null().and(col("o").is_not_null()))
+            .collect()?;
+
+        if df.height() == 0 {
+            return Ok(());
+        }
+
+        // Build the object formatting expression based on term type
+        let object_expr = match term_type {
+            RdfTermType::Uri => {
+                // URI: <uri> or _:bnode
+                when(col("o").str().starts_with(lit("_:")))
+                    .then(col("o"))
+                    .otherwise(concat_str([lit("<"), col("o"), lit(">")], "", true))
+            }
+            _ => {
+                // Literal with optional datatype suffix
+                let escaped = col("o")
+                    .str()
+                    .replace_all(lit("\\"), lit("\\\\"), true)
+                    .str()
+                    .replace_all(lit("\""), lit("\\\""), true)
+                    .str()
+                    .replace_all(lit("\n"), lit("\\n"), true)
+                    .str()
+                    .replace_all(lit("\r"), lit("\\r"), true)
+                    .str()
+                    .replace_all(lit("\t"), lit("\\t"), true);
+
+                let suffix = term_type.xsd_suffix().unwrap_or("");
+                concat_str([lit("\""), escaped, lit("\""), lit(suffix)], "", true)
+            }
+        };
+
+        // Format complete N-Triple line (columnar)
+        let formatted = df
+            .lazy()
+            .select([concat_str(
+                [
+                    // Subject: <uri> or _:bnode
+                    when(col("s").str().starts_with(lit("_:")))
+                        .then(col("s"))
+                        .otherwise(concat_str([lit("<"), col("s"), lit(">")], "", true)),
+                    lit(" <"),
+                    lit(predicate),
+                    lit("> "),
+                    object_expr,
+                    lit(" .\n"),
+                ],
+                "",
+                true,
+            )
+            .alias("triple")])
+            .collect()?;
+
+        // Write all formatted triples at once
+        let triples = formatted.column("triple")?.str()?;
+        for triple in triples.iter().flatten() {
+            self.writer
+                .write_all(triple.as_bytes())
+                .map_err(|e| PolarsError::ComputeError(format!("Write failed: {}", e).into()))?;
+        }
+
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> PolarsResult<()> {
+        self.writer
+            .flush()
+            .map_err(|e| PolarsError::ComputeError(format!("Flush failed: {}", e).into()))?;
+        Ok(())
+    }
+}
+
+/// Map Polars data type to RDF term type
+fn polars_dtype_to_rdf_type(dtype: &DataType) -> RdfTermType {
+    match dtype {
+        DataType::Boolean => RdfTermType::Boolean,
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64 => RdfTermType::Integer,
+        DataType::Float32 | DataType::Float64 => RdfTermType::Double,
+        DataType::Date => RdfTermType::Date,
+        DataType::Datetime(_, _) => RdfTermType::DateTime,
+        DataType::String | DataType::Categorical(_, _) => RdfTermType::String,
+        _ => RdfTermType::String, // Default to string for unknown types
     }
 }

@@ -77,30 +77,36 @@ impl TypeProviderImpl for ShexProvider {
         ast: &mut Ast,
         interner: &mut Interner,
         _type_name: &str,
+        loc: Loc,
     ) -> Result<ProviderOutput, ProviderError> {
-        let (path, shape_name) = parse_shex_args(args, interner)?;
-        validate_extension(path.as_ref(), &["shex"]).map_err(provider_err)?;
-        validate_path(path.as_ref()).map_err(provider_err)?;
+        let (path, shape_name) = parse_shex_args(args, interner, loc)?;
+        validate_extension(path.as_ref(), &["shex"])
+            .map_err(|kind| provider_err(kind, loc))?;
+        validate_path(path.as_ref())
+            .map_err(|kind| provider_err(kind, loc))?;
 
         let path_str = path.to_str().to_string();
         let shex_content = fs::read_to_string(&path_str).map_err(|e| {
-            provider_err(ProviderErrorKind::ReadError {
-                path: path_str.clone(),
-                cause: e.to_string(),
-            })
+            provider_err(
+                ProviderErrorKind::ReadError {
+                    path: path_str.clone(),
+                    cause: e.to_string(),
+                },
+                loc,
+            )
         })?;
 
-        let schema = parse_shex_schema(&shex_content)?;
+        let schema = parse_shex_schema(&shex_content, loc)?;
 
         // Find the specified shape
-        let shape_fields = extract_shape_fields(&schema, &shape_name)?;
+        let shape_fields = extract_shape_fields(&schema, &shape_name, loc)?;
 
         // Convert ShEx fields to AST record fields
-        let fields = shex_fields_to_ast_fields(shape_fields, ast, interner);
+        let fields = shex_fields_to_ast_fields(shape_fields, ast, interner, loc);
 
-        // Create AST record type
+        // Create AST record type with the provider invocation location
         let record_ty = ast.types.alloc(AstType {
-            loc: Loc::generated(),
+            loc,
             kind: AstTypeKind::Record(fields),
         });
 
@@ -115,32 +121,43 @@ impl TypeProviderImpl for ShexProvider {
 fn parse_shex_args(
     args: &[ProviderArgument],
     interner: &Interner,
+    loc: Loc,
 ) -> Result<(PlPath, String), ProviderError> {
     let mut iter = args.iter().take(2);
 
     // First argument: path (positional)
     let Some(path_arg) = iter.next() else {
-        return Err(provider_err(ProviderErrorKind::MissingArgument {
-            name: "path",
-            provider: "shex",
-        }));
+        return Err(provider_err(
+            ProviderErrorKind::MissingArgument {
+                name: "path",
+                provider: "shex",
+            },
+            loc,
+        ));
     };
 
     let ProviderArgument::Positional(lit) = path_arg else {
-        return Err(provider_err(ProviderErrorKind::MissingArgument {
-            name: "path",
-            provider: "shex",
-        }));
+        return Err(provider_err(
+            ProviderErrorKind::MissingArgument {
+                name: "path",
+                provider: "shex",
+            },
+            loc,
+        ));
     };
 
-    let path = extract_string_path(lit, interner).map_err(provider_err)?;
+    let path = extract_string_path(lit, interner)
+        .map_err(|kind| provider_err(kind, loc))?;
 
     // Second argument: shape (named)
     let Some(shape_arg) = iter.next() else {
-        return Err(provider_err(ProviderErrorKind::MissingArgument {
-            name: "shape",
-            provider: "shex",
-        }));
+        return Err(provider_err(
+            ProviderErrorKind::MissingArgument {
+                name: "shape",
+                provider: "shex",
+            },
+            loc,
+        ));
     };
 
     let shape = match shape_arg {
@@ -148,17 +165,23 @@ fn parse_shex_args(
             if let Literal::String(s) = value {
                 interner.resolve(*s).to_string()
             } else {
-                return Err(provider_err(ProviderErrorKind::InvalidArgumentType {
-                    name: "shape",
-                    expected: "a string",
-                }));
+                return Err(provider_err(
+                    ProviderErrorKind::InvalidArgumentType {
+                        name: "shape",
+                        expected: "a string",
+                    },
+                    loc,
+                ));
             }
         }
         _ => {
-            return Err(provider_err(ProviderErrorKind::MissingArgument {
-                name: "shape",
-                provider: "shex",
-            }))
+            return Err(provider_err(
+                ProviderErrorKind::MissingArgument {
+                    name: "shape",
+                    provider: "shex",
+                },
+                loc,
+            ))
         }
     };
 
@@ -166,13 +189,16 @@ fn parse_shex_args(
 }
 
 /// Parse ShEx schema content
-fn parse_shex_schema(content: &str) -> Result<Schema, ProviderError> {
+fn parse_shex_schema(content: &str, loc: Loc) -> Result<Schema, ProviderError> {
     let source_iri = IriS::new_unchecked("file:///schema.shex");
     ShExParser::parse(content, None, &source_iri).map_err(|e| {
-        provider_err(ProviderErrorKind::ParseError {
-            format: "ShEx",
-            cause: e.to_string(),
-        })
+        provider_err(
+            ProviderErrorKind::ParseError {
+                format: "ShEx",
+                cause: e.to_string(),
+            },
+            loc,
+        )
     })
 }
 
@@ -182,10 +208,11 @@ fn parse_shex_schema(content: &str) -> Result<Schema, ProviderError> {
 fn extract_shape_fields(
     schema: &Schema,
     shape_name: &str,
+    loc: Loc,
 ) -> Result<Vec<ShapeField>, ProviderError> {
     let shapes = schema
         .shapes()
-        .ok_or_else(|| provider_err(ProviderErrorKind::NoShapesDefined))?;
+        .ok_or_else(|| provider_err(ProviderErrorKind::NoShapesDefined, loc))?;
 
     for shape_decl in shapes {
         if shape_label_matches(shape_decl.id(), shape_name) {
@@ -195,9 +222,12 @@ fn extract_shape_fields(
         }
     }
 
-    Err(provider_err(ProviderErrorKind::ShapeNotFound {
-        name: shape_name.to_string(),
-    }))
+    Err(provider_err(
+        ProviderErrorKind::ShapeNotFound {
+            name: shape_name.to_string(),
+        },
+        loc,
+    ))
 }
 
 /// Check if a shape label matches the given name
@@ -252,6 +282,7 @@ fn extract_fields_from_shape_expr(
 }
 
 /// Extract fields from triple expression
+#[allow(clippy::only_used_in_recursion)]
 fn extract_fields_from_triple_expr(
     triple_expr: &TripleExpr,
     fields: &mut Vec<ShapeField>,
@@ -331,10 +362,14 @@ fn shex_value_to_fossil_type(shape_expr: &ShapeExpr) -> PrimitiveType {
 // xsd_to_fossil_type is now imported from crate::shapes
 
 /// Convert ShEx fields to AST record fields
+///
+/// Uses the provider invocation location for all generated types so that
+/// errors can be traced back to the source.
 fn shex_fields_to_ast_fields(
     shape_fields: Vec<ShapeField>,
     ast: &mut Ast,
     interner: &mut Interner,
+    loc: Loc,
 ) -> Vec<RecordField> {
     shape_fields
         .into_iter()
@@ -343,7 +378,7 @@ fn shex_fields_to_ast_fields(
 
             // Create the base primitive type
             let base_ty = ast.types.alloc(AstType {
-                loc: Loc::generated(),
+                loc,
                 kind: AstTypeKind::Primitive(field.fossil_type),
             });
 
@@ -354,14 +389,14 @@ fn shex_fields_to_ast_fields(
             let ty = if field.is_list {
                 // List<T>
                 ast.types.alloc(AstType {
-                    loc: Loc::generated(),
+                    loc,
                     kind: AstTypeKind::List(base_ty),
                 })
             } else if field.optional {
                 // Option<T> using TypeKind::App
                 let option_sym = interner.intern("Option");
                 ast.types.alloc(AstType {
-                    loc: Loc::generated(),
+                    loc,
                     kind: AstTypeKind::App {
                         ctor: Path::Simple(option_sym),
                         args: vec![base_ty],
@@ -382,7 +417,7 @@ fn shex_fields_to_ast_fields(
                     key: uri_key,
                     value: Literal::String(interner.intern(&field.predicate_uri)),
                 }],
-                loc: Loc::generated(),
+                loc,
             }];
 
             RecordField {

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::ast::ast::{Ast, Literal, ProviderArgument, TypeId};
+use crate::ast::Loc;
 use crate::context::{Interner, Symbol};
 use crate::error::ProviderError;
 use crate::traits::function::FunctionImpl;
@@ -129,6 +130,7 @@ pub trait TypeProviderImpl: Send + Sync {
     /// * `ast` - Mutable access to the AST arena for type allocation
     /// * `interner` - Mutable access to the symbol interner
     /// * `type_name` - The name of the type being defined (e.g., "PersonData")
+    /// * `loc` - Source location of the provider invocation for error reporting
     ///
     /// # Returns
     /// A `ProviderOutput` containing:
@@ -140,5 +142,6 @@ pub trait TypeProviderImpl: Send + Sync {
         ast: &mut Ast,
         interner: &mut Interner,
         type_name: &str,
+        loc: Loc,
     ) -> Result<ProviderOutput, ProviderError>;
 }

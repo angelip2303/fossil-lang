@@ -9,7 +9,7 @@ use oxrdfio::RdfParser;
 use crate::TestSuiteError;
 
 fn test(test_case: &str) -> Result<bool, TestSuiteError> {
-    let mut gcx = GlobalContext::new();
+    let mut gcx = GlobalContext::default();
     gcx.register_provider("csv", fossil_providers::csv::CsvProvider);
     fossil_stdlib::init(&mut gcx);
 

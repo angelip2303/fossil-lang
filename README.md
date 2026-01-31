@@ -1,53 +1,39 @@
 - [ ] ¿Qué pasa si un atributo type aparece junto con una shape que define rdfs:type también? Creo que lo que deberíamos de hacer es emitir un warning, indicando que se ignorará el del atributo type.
 
+- [ ] Explorar cómo manejar el tema de los duplicados
+- [ ] ¿Qué pasa si dos sujetos son iguales? Hay que tener en cuenta también el concepto de RML de rr:constant, que puede aparecer en un subjectMap, predicateMap y objectMap:
+@prefix rr: <http://www.w3.org/ns/r2rml#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix ex: <http://example.com/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rml: <http://semweb.mmlab.be/ns/rml#> .
+@prefix ql: <http://semweb.mmlab.be/ns/ql#> .
+@base <http://example.com/base/> .
 
-- [ ] Qué pasa si cometemos un error a la hora de escribir los atributos: #[rdf(id = "_:students{ID}", with = ["ID"])] en lugar de #[rdf(id = "_:students${ID}", with = ["ID"])]. Qué pasa realmente con las templates de las columnas? Estamos recreando la sintaxis de string interpolation, pero realmente no es string interpolation
+<TriplesMap1> a rr:TriplesMap;
+    
+  rml:logicalSource [ 
+    rml:source "student.csv";
+    rml:referenceFormulation ql:CSV
+  ];
 
+  rr:subjectMap [ 
+    rr:constant ex:BadStudent;  
+    rr:graphMap [ rr:constant <http://example.com/graph/student> ];
+  ];
+
+  rr:predicateObjectMap [ 
+    rr:predicateMap [ rr:constant ex:description ]; 
+    rr:objectMap [ rr:constant "Bad Student"; ]
+  ].
+  Lo que me preocupa de esto es que si para evitar serializar sujetos repetidos lo que hacemos es usar un HashSet por ejemplo, entonces en memoria estaríamos almacenando todos los sujetos, lo que podría ser un problema si tenemos muchos sujetos. No sé si es mejor tener una operación que sea distinct y dejar que polars por debajo sea el que lo maneje
 
 - [ ] Permitir el uso de PrefixMap o similar
 
-- [ ] Esto no funciona, pero debería: `const ROOT = "lib/fossil-stdlib/examples/shex-provider"
+- [ ] Manejar el tipo opcional
 
-type PersonData = csv!("${ROOT}/people.csv")
-type Person = shex!("${ROOT}/person.shex", shape: "PersonShape")
-
-impl ToString for PersonData {
-    to_string = fn(self) -> "PersonData"
-}
-
-let csv_to_rdf = fn(row) -> {
-    Person(row.name, row.age, row.name)
-        |> Entity::with_id("http://example.com/person/${row}")
-}
-
-PersonData::load()
-|> List::map(csv_to_rdf)
-|> Rdf::serialize("${ROOT}/results.ttl")
-` Sin embargo, si hago esto: `
-const ROOT = "lib/fossil-stdlib/examples/shex-provider"
-
-type PersonData = csv!("${ROOT}/people.csv")
-type Person = shex!("${ROOT}/person.shex", shape: "PersonShape")
-
-impl ToString for PersonData {
-    to_string = fn(self) -> "PersonData"
-}
-
-let csv_to_rdf = fn(row: PersonData) -> {
-    Person(row.name, row.age, row.name)
-        |> Entity::with_id("http://example.com/person/${row}")
-}
-
-PersonData::load()
-|> List::map(csv_to_rdf)
-|> Rdf::serialize("${ROOT}/results.ttl")
-`, Fíjate que al anotar los tipos en la función sí que funciona correctamente. Debemos darle una vuelta a como manejamos eso: debería ser obligatorio? El mensaje de error debería sugerir que debería implementar ToString? Debería inferir el tipo? Quizás el string interpolation debería exigir que implemente ToString?
-
-
-- [ ] Pensar cómo manejar records y named records cuando son iguales...
 
 
 - [ ] Tenemos que pensar cómo manejamos casos en los que dos Records tengan el nombre de una columna igual y se haga join
-
 
 - [ ] Explorar si `Rdf::serialize` debe devolver un DCAT

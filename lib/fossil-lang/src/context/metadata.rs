@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::ast::Literal;
+use crate::ast::ast::{Literal, StmtKind, TypeKind};
 use crate::context::{DefId, Interner, Symbol};
 
 /// Type metadata extracted from AST during name resolution
@@ -112,7 +112,6 @@ impl Default for FieldMetadata {
 pub struct AttributeData {
     /// Name of the attribute (e.g., "rdf", "serde")
     pub name: Symbol,
-
     /// Named arguments to the attribute (key -> value)
     pub args: HashMap<Symbol, Literal>,
 }
@@ -154,17 +153,13 @@ impl AttributeData {
     }
 }
 
-/// Extract type metadata from AST and store in pending_type_metadata
+/// Extract type metadata from AST
 ///
-/// This function iterates through all Type statements in the AST,
-/// extracts field attributes from record types, and stores them
-/// keyed by the type name Symbol. During IR resolution, this metadata
-/// will be transferred to type_metadata keyed by DefId.
-pub fn extract_pending_type_metadata(
-    ast: &crate::ast::ast::Ast,
-    gcx: &mut crate::passes::GlobalContext,
-) {
-    use crate::ast::ast::{StmtKind, TypeKind};
+/// Returns a map from type name (Symbol) to its metadata.
+/// The metadata includes type-level and field-level attributes.
+/// The caller should use this during resolution to populate type_metadata.
+pub fn extract_type_metadata(ast: &crate::ast::ast::Ast) -> HashMap<Symbol, TypeMetadata> {
+    let mut result = HashMap::new();
 
     for &stmt_id in &ast.root {
         let stmt = ast.stmts.get(stmt_id);
@@ -172,10 +167,10 @@ pub fn extract_pending_type_metadata(
         if let StmtKind::Type { name, ty, attrs } = &stmt.kind {
             let ty_node = ast.types.get(*ty);
 
-            // Create metadata with type-level attributes
+            // Create metadata (DefId will be set during resolution)
             let mut metadata = TypeMetadata::new(DefId::new(0));
 
-            // Store type-level attributes (e.g., #[rdf(type = "...", id = "...")])
+            // Type-level attributes
             for attr in attrs {
                 let args = attr
                     .args
@@ -189,14 +184,13 @@ pub fn extract_pending_type_metadata(
                 });
             }
 
-            // Extract field-level attributes from record types
+            // Field-level attributes from record types
             if let TypeKind::Record(fields) = &ty_node.kind {
                 for field in fields {
                     if !field.attrs.is_empty() {
                         let mut field_meta = FieldMetadata::new();
 
                         for attr in &field.attrs {
-                            // Convert Vec<AttributeArg> to HashMap<Symbol, Literal>
                             let args = attr
                                 .args
                                 .iter()
@@ -214,12 +208,13 @@ pub fn extract_pending_type_metadata(
                 }
             }
 
-            // Store metadata if it has any content (type-level or field-level)
             if !metadata.is_empty() || !metadata.type_attributes.is_empty() {
-                gcx.pending_type_metadata.insert(*name, metadata);
+                result.insert(*name, metadata);
             }
         }
     }
+
+    result
 }
 
 /// A typed wrapper for attribute access with convenient string-based lookups

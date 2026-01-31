@@ -1,179 +1,53 @@
 //! Global compiler context
 //!
 //! Contains the GlobalContext struct which is the central state store for the compiler.
-//! It is organized into three cohesive domains:
-//! - Core: interner + definitions (infrastructure base)
-//! - Type System: constructors and metadata of types
-//! - Trait System: implementations of traits
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::context::{
-    DefId, DefKind, Definitions, Interner, Kind, Symbol, TypeConstructorInfo, TypeMetadata,
+    DefId, DefKind, Definitions, Interner, Kind, TypeConstructorInfo, TypeMetadata,
 };
+
+// NOTE: Type constructors (TypeKind::App) are kept for future generic types like Option<T>, Result<T,E>.
+// List uses TypeKind::List directly instead of going through the type constructor system.
 use crate::traits::function::FunctionImpl;
-
-/// Information about a trait implementation
-#[derive(Clone, Debug)]
-pub struct TraitImplInfo {
-    /// Method name -> DefId of the implementation function
-    pub methods: HashMap<Symbol, DefId>,
-}
-
-/// Cached DefIds for builtin traits
-#[derive(Clone, Debug, Default)]
-pub struct BuiltinTraits {
-    pub to_string: Option<DefId>,
-}
+use crate::traits::provider::TypeProviderImpl;
 
 /// Global context for the compiler
-///
-/// Organized in 3 domains:
-/// - Core: interner + definitions (infrastructure)
-/// - Types: constructors and metadata of types
-/// - Traits: implementations of traits
 #[derive(Clone)]
 pub struct GlobalContext {
-    // === Core (infrastructure) ===
     /// String interner for symbol management
     pub interner: Interner,
     /// Definition storage
     pub definitions: Definitions,
-
-    // === Type System ===
-    /// Registry of type constructors (generic types like List, Entity, Option)
+    /// Registry of type constructors (generic types like List)
     pub type_constructors: HashMap<DefId, TypeConstructorInfo>,
     /// Type metadata (attributes, field info) - keyed by DefId
     pub type_metadata: HashMap<DefId, Arc<TypeMetadata>>,
-    /// Pending type metadata keyed by type name Symbol (before DefId assignment)
-    /// This is populated from AST attributes and transferred to type_metadata during resolution
-    pub pending_type_metadata: HashMap<Symbol, TypeMetadata>,
-    /// Cached DefId for the List type constructor (builtin)
-    pub list_type_ctor: Option<DefId>,
-
-    // === Trait System ===
-    /// Registry of trait implementations: (trait_def_id, type_def_id) -> impl info
-    pub trait_impls: HashMap<(DefId, DefId), TraitImplInfo>,
-    /// Builtin trait DefIds
-    pub builtin_traits: BuiltinTraits,
+    /// Set of variadic function DefIds
+    pub variadic_functions: HashSet<DefId>,
 }
 
 impl GlobalContext {
-    pub fn new() -> Self {
-        let interner = Interner::default();
-
-        let mut gcx = Self {
-            interner,
-            definitions: Definitions::default(),
-            type_metadata: HashMap::new(),
-            pending_type_metadata: HashMap::new(),
-            type_constructors: HashMap::new(),
-            list_type_ctor: None,
-            trait_impls: HashMap::new(),
-            builtin_traits: BuiltinTraits::default(),
-        };
-
-        // Register builtin type constructors
-        gcx.register_builtin_type_constructors();
-
-        // Register builtin traits
-        gcx.register_builtin_traits();
-
-        gcx
-    }
-
-    /// Register builtin traits (e.g., ToString)
-    fn register_builtin_traits(&mut self) {
-        // Register ToString trait: trait ToString { to_string: (self) -> string }
-        let to_string_sym = self.interner.intern("to_string");
-        let to_string_trait_sym = self.interner.intern("ToString");
-        let to_string_def_id = self.definitions.insert(
-            None,
-            to_string_trait_sym,
-            DefKind::Trait {
-                methods: vec![to_string_sym],
-            },
-        );
-        self.builtin_traits.to_string = Some(to_string_def_id);
-
-        // Register builtin impl ToString for primitives (int, bool, string)
-        // These are inherently stringable at runtime via value_to_string
-        let int_sym = self.interner.intern("int");
-        let int_def_id = self.definitions.insert(None, int_sym, DefKind::Type);
-        let mut int_methods = HashMap::new();
-        int_methods.insert(to_string_sym, int_def_id);
-        self.trait_impls.insert(
-            (to_string_def_id, int_def_id),
-            TraitImplInfo {
-                methods: int_methods,
-            },
-        );
-
-        let bool_sym = self.interner.intern("bool");
-        let bool_def_id = self.definitions.insert(None, bool_sym, DefKind::Type);
-        let mut bool_methods = HashMap::new();
-        bool_methods.insert(to_string_sym, bool_def_id);
-        self.trait_impls.insert(
-            (to_string_def_id, bool_def_id),
-            TraitImplInfo {
-                methods: bool_methods,
-            },
-        );
-
-        let string_sym = self.interner.intern("string");
-        let string_def_id = self.definitions.insert(None, string_sym, DefKind::Type);
-        let mut string_methods = HashMap::new();
-        string_methods.insert(to_string_sym, string_def_id);
-        self.trait_impls.insert(
-            (to_string_def_id, string_def_id),
-            TraitImplInfo {
-                methods: string_methods,
-            },
-        );
-    }
-
-    /// Register builtin type constructors
-    ///
-    /// Currently only registers `List` as a builtin generic type.
-    fn register_builtin_type_constructors(&mut self) {
-        // Register List<T> as a builtin type constructor
-        let list_sym = self.interner.intern("List");
-        let list_def_id = self.definitions.insert(None, list_sym, DefKind::Type);
-        self.type_constructors.insert(
-            list_def_id,
-            TypeConstructorInfo {
-                def_id: list_def_id,
-                arity: 1,
-                name: list_sym,
-                param_kinds: vec![Kind::Type],
-            },
-        );
-        self.list_type_ctor = Some(list_def_id);
-    }
-
     /// Register a type provider
     ///
-    /// This allows external crates (like fossil-providers) to register
-    /// their providers without creating a circular dependency.
+    /// This allows external crates (e.g. fossil-providers) to register
+    /// their providers.
     ///
     /// Example:
     /// ```ignore
     /// use fossil_lang::passes::GlobalContext;
     /// use fossil_providers::CsvProvider;
-    /// use std::sync::Arc;
     ///
-    /// let mut gcx = GlobalContext::new();
-    /// gcx.register_provider("csv", Arc::new(CsvProvider));
+    /// let mut gcx = GlobalContext::default();
+    /// gcx.register_provider("csv", CsvProvider);
     /// ```
-    pub fn register_provider(
-        &mut self,
-        name: &str,
-        provider: impl crate::traits::provider::TypeProviderImpl + 'static,
-    ) {
+    pub fn register_provider(&mut self, name: &str, provider: impl TypeProviderImpl + 'static) {
         let symbol = self.interner.intern(name);
-        self.definitions
-            .insert(None, symbol, DefKind::Provider(Arc::new(provider)));
+        let provider = Arc::new(provider);
+        let def_kind = DefKind::Provider(provider);
+        self.definitions.insert(None, symbol, def_kind);
     }
 
     /// Register a type constructor
@@ -196,9 +70,9 @@ impl GlobalContext {
     /// ```ignore
     /// use fossil_lang::passes::GlobalContext;
     ///
-    /// let mut gcx = GlobalContext::new();
-    /// let entity_def_id = gcx.register_type_constructor("Entity", 1);
-    /// // Now Entity can be used as Entity<T> in the type system
+    /// let mut gcx = GlobalContext::default();
+    /// let option_def_id = gcx.register_type_constructor("Option", 1);
+    /// // Now Option can be used as Option<T> in the type system
     /// ```
     pub fn register_type_constructor(&mut self, name: &str, arity: usize) -> DefId {
         let sym = self.interner.intern(name);
@@ -225,7 +99,7 @@ impl GlobalContext {
         def_id
     }
 
-    /// Register a function
+    /// Register a function within a module
     ///
     /// This allows external crates (like fossil-stdlib) to register
     /// their functions without creating a circular dependency.
@@ -236,7 +110,7 @@ impl GlobalContext {
     /// use fossil_stdlib::EntityWrapFunction;
     /// use std::sync::Arc;
     ///
-    /// let mut gcx = GlobalContext::new();
+    /// let mut gcx = GlobalContext::default();
     /// gcx.register_function("Entity", "wrap", Arc::new(EntityWrapFunction));
     /// ```
     pub fn register_function(
@@ -245,7 +119,6 @@ impl GlobalContext {
         function_name: &str,
         function: impl FunctionImpl + 'static,
     ) {
-        // Get or create module
         let module_symbol = self.interner.intern(module_name);
         let module_id = self
             .definitions
@@ -270,10 +143,76 @@ impl GlobalContext {
             DefKind::Func(Some(Arc::new(function))),
         );
     }
+
+    /// Register a top-level function (not within a module)
+    ///
+    /// Use this for builtin functions that should be called directly
+    /// without module qualification (e.g., `to(...)` instead of `Mod::func(...)`).
+    ///
+    /// Example:
+    /// ```ignore
+    /// use fossil_lang::passes::GlobalContext;
+    /// use fossil_stdlib::ToFunction;
+    ///
+    /// let mut gcx = GlobalContext::default();
+    /// gcx.register_toplevel_function("to", ToFunction);
+    /// // Now callable as: to(source, Type, fn(x) -> ...)
+    /// ```
+    pub fn register_toplevel_function(
+        &mut self,
+        function_name: &str,
+        function: impl FunctionImpl + 'static,
+    ) {
+        let function_symbol = self.interner.intern(function_name);
+        self.definitions.insert(
+            None,
+            function_symbol,
+            DefKind::Func(Some(Arc::new(function))),
+        );
+    }
+
+    /// Register a variadic top-level function
+    ///
+    /// Variadic functions accept any number of additional arguments beyond
+    /// their declared signature. The type checker will only verify the
+    /// declared parameters; extra arguments are passed to the runtime.
+    ///
+    /// Example:
+    /// ```ignore
+    /// use fossil_lang::passes::GlobalContext;
+    /// use fossil_stdlib::MapFunction;
+    ///
+    /// let mut gcx = GlobalContext::default();
+    /// gcx.register_variadic_toplevel_function("map", MapFunction);
+    /// // Now callable as: map(source, fn1, fn2, fn3, ...)
+    /// ```
+    pub fn register_variadic_toplevel_function(
+        &mut self,
+        function_name: &str,
+        function: impl FunctionImpl + 'static,
+    ) {
+        let function_symbol = self.interner.intern(function_name);
+        let def_id = self.definitions.insert(
+            None,
+            function_symbol,
+            DefKind::Func(Some(Arc::new(function))),
+        );
+        self.variadic_functions.insert(def_id);
+    }
+
+    pub fn is_variadic(&self, def_id: DefId) -> bool {
+        self.variadic_functions.contains(&def_id)
+    }
 }
 
 impl Default for GlobalContext {
     fn default() -> Self {
-        Self::new()
+        Self {
+            interner: Interner::default(),
+            definitions: Definitions::default(),
+            type_metadata: HashMap::new(),
+            type_constructors: HashMap::new(),
+            variadic_functions: HashSet::new(),
+        }
     }
 }

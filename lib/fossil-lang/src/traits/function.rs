@@ -1,5 +1,5 @@
 use crate::context::DefId;
-use crate::error::RuntimeError;
+use crate::error::CompileError;
 use crate::ir::{Ir, Polytype, TypeVar};
 use crate::passes::GlobalContext;
 use crate::runtime::value::Value;
@@ -42,7 +42,7 @@ pub trait FunctionImpl: Send + Sync {
     /// # Arguments
     /// * `ir` - Mutable access to IR for allocating types
     /// * `next_type_var` - Function to generate fresh type variables
-    /// * `gcx` - Global context with type constructors (e.g., list_type_ctor)
+    /// * `gcx` - Global context with definitions and type metadata
     fn signature(
         &self,
         ir: &mut Ir,
@@ -62,7 +62,7 @@ pub trait FunctionImpl: Send + Sync {
     ///
     /// # Example
     /// ```ignore
-    /// fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError> {
+    /// fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, CompileError> {
     ///     // Access type metadata from compile-time
     ///     if let Some(type_id) = ctx.current_type {
     ///         let metadata = ctx.gcx.type_metadata.get(&type_id);
@@ -71,5 +71,5 @@ pub trait FunctionImpl: Send + Sync {
     ///     // Process arguments...
     /// }
     /// ```
-    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, RuntimeError>;
+    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, CompileError>;
 }
