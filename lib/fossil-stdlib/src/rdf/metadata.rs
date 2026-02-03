@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use fossil_lang::ast::Loc;
 use fossil_lang::context::{Interner, Symbol, TypeMetadata};
-use fossil_lang::error::{CompileWarning, CompileWarnings};
+use fossil_lang::error::{FossilWarning, FossilWarnings};
 use fossil_macros::FromAttrs;
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -71,18 +71,18 @@ pub struct RdfFieldAttrs {
 #[derive(Debug, Clone, Default)]
 pub struct RdfMetadataResult {
     pub metadata: RdfMetadata,
-    pub warnings: CompileWarnings,
+    pub warnings: FossilWarnings,
 }
 
 impl RdfMetadataResult {
     pub fn new(metadata: RdfMetadata) -> Self {
         Self {
             metadata,
-            warnings: CompileWarnings::new(),
+            warnings: FossilWarnings::new(),
         }
     }
 
-    pub fn with_warnings(mut self, warnings: CompileWarnings) -> Self {
+    pub fn with_warnings(mut self, warnings: FossilWarnings) -> Self {
         self.warnings = warnings;
         self
     }
@@ -127,7 +127,7 @@ impl RdfMetadata {
         type_name: Option<&str>,
     ) -> RdfMetadataResult {
         let type_attrs = RdfTypeAttrs::from_type_metadata(type_metadata, interner);
-        let mut warnings = CompileWarnings::new();
+        let mut warnings = FossilWarnings::new();
 
         let mut metadata = RdfMetadata {
             rdf_type: type_attrs.rdf_type.clone(),
@@ -144,7 +144,7 @@ impl RdfMetadata {
                         let field_name_str = interner.resolve(*field_name);
                         let type_name_str = type_name.unwrap_or("<anonymous>");
 
-                        warnings.push(CompileWarning::rdf_type_conflict(
+                        warnings.push(FossilWarning::rdf_type_conflict(
                             type_name_str,
                             attr_type,
                             field_name_str,

@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use crate::context::DefId;
-use crate::error::{CompileError, CompileErrors};
+use crate::error::{FossilError, FossilErrors};
 use crate::ir::{ExprId, Ir, Polytype, StmtId, StmtKind, Type, TypeId, TypeKind, TypeRef, TypeVar, Ident};
 use crate::passes::{GlobalContext, IrProgram};
 
@@ -133,9 +133,9 @@ impl TypeChecker {
         }
     }
 
-    pub fn check(mut self) -> Result<IrProgram, CompileErrors> {
+    pub fn check(mut self) -> Result<IrProgram, FossilErrors> {
         let root_ids = self.ir.root.clone();
-        let mut errors = CompileErrors::new();
+        let mut errors = FossilErrors::new();
 
         for stmt_id in root_ids {
             if let Err(e) = self.check_stmt(stmt_id) {
@@ -154,7 +154,7 @@ impl TypeChecker {
         })
     }
 
-    fn check_stmt(&mut self, stmt_id: StmtId) -> Result<(), CompileError> {
+    fn check_stmt(&mut self, stmt_id: StmtId) -> Result<(), FossilError> {
         let stmt = self.ir.stmts.get(stmt_id);
         let stmt_kind = stmt.kind.clone();
         let loc = stmt.loc;

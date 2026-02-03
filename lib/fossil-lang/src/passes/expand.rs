@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::ast::ast::*;
 use crate::context::{DefKind, Symbol};
-use crate::error::{CompileError, CompileErrors, CompileWarnings, ResolutionError};
+use crate::error::{FossilError, FossilErrors, FossilWarnings};
 use crate::passes::GlobalContext;
 use crate::traits::provider::ModuleSpec;
 
@@ -10,7 +10,7 @@ use crate::traits::provider::ModuleSpec;
 pub struct ExpandResult {
     pub ast: Ast,
     pub gcx: GlobalContext,
-    pub warnings: CompileWarnings,
+    pub warnings: FossilWarnings,
 }
 
 pub struct ProviderExpander {
@@ -19,7 +19,7 @@ pub struct ProviderExpander {
     /// Const bindings collected from the AST for interpolation in provider args
     const_values: HashMap<Symbol, String>,
     /// Warnings collected during expansion
-    warnings: CompileWarnings,
+    warnings: FossilWarnings,
 }
 
 impl ProviderExpander {
@@ -28,7 +28,7 @@ impl ProviderExpander {
             ast,
             gcx,
             const_values: HashMap::new(),
-            warnings: CompileWarnings::new(),
+            warnings: FossilWarnings::new(),
         }
     }
 
@@ -87,7 +87,7 @@ impl ProviderExpander {
     ///
     /// Type providers execute during compilation and generate AST types
     /// and optional modules (F# style).
-    pub fn expand(mut self) -> Result<ExpandResult, CompileErrors> {
+    pub fn expand(mut self) -> Result<ExpandResult, FossilErrors> {
         // Collect const bindings first so they can be used in provider args
         self.collect_const_bindings();
         // Collect all type alias statements with provider invocations
@@ -109,7 +109,7 @@ impl ProviderExpander {
             .collect();
 
         // Expand each provider (F# style: execute provider, get generated type + module)
-        let mut errors = CompileErrors::new();
+        let mut errors = FossilErrors::new();
         for stmt_id in type_stmts {
             if let Err(e) = self.expand_provider_stmt(stmt_id) {
                 errors.push(e);
@@ -132,7 +132,7 @@ impl ProviderExpander {
     ///
     /// Extracts the type name, executes the provider, generates the type,
     /// and creates a module if the provider specifies one.
-    fn expand_provider_stmt(&mut self, stmt_id: StmtId) -> Result<(), CompileError> {
+    fn expand_provider_stmt(&mut self, stmt_id: StmtId) -> Result<(), FossilError> {
         // Extract type name and type_id from statement
         let (type_name, type_id) = {
             let stmt = self.ast.stmts.get(stmt_id);
@@ -157,17 +157,16 @@ impl ProviderExpander {
             .definitions
             .resolve(&provider_path)
             .ok_or_else(|| {
-                CompileError::from(ResolutionError::undefined_type(provider_path.clone(), loc))
+                let path_str = format!("{:?}", provider_path);
+                FossilError::undefined_type(path_str, loc)
             })?;
 
         // Get the provider implementation
         let provider_impl = match &self.gcx.definitions.get(provider_def_id).kind {
             DefKind::Provider(provider) => provider.clone(),
             _ => {
-                return Err(CompileError::from(ResolutionError::NotAProvider {
-                    path: provider_path,
-                    loc,
-                }));
+                let path_str = format!("{:?}", provider_path);
+                return Err(FossilError::not_a_provider(path_str, loc));
             }
         };
 
@@ -243,7 +242,7 @@ impl ProviderExpander {
         &mut self,
         module_name: Symbol,
         spec: ModuleSpec,
-    ) -> Result<(), CompileError> {
+    ) -> Result<(), FossilError> {
         // Create module DefId
         let module_def_id = self.gcx.definitions.insert(
             None,

@@ -4,7 +4,7 @@ use polars::prelude::*;
 
 use crate::ast::Loc;
 use crate::context::{DefId, Symbol};
-use crate::error::{EvalError, RuntimeError};
+use crate::error::FossilError;
 use crate::ir::{Argument, ExprId, ExprKind, Ident, Ir, StmtId, StmtKind, TypeKind, TypeRef};
 use crate::passes::GlobalContext;
 use crate::runtime::value::Value;
@@ -104,7 +104,7 @@ impl<'a> IrEvaluator<'a> {
     }
 
     /// Evaluate an expression and return its value
-    pub fn eval(&mut self, expr_id: ExprId) -> Result<Value, EvalError> {
+    pub fn eval(&mut self, expr_id: ExprId) -> Result<Value, FossilError> {
         let expr = self.ir.exprs.get(expr_id);
 
         match &expr.kind {
@@ -212,7 +212,7 @@ impl<'a> IrEvaluator<'a> {
         &mut self,
         parts: &[Symbol],
         exprs: &[ExprId],
-    ) -> Result<Value, EvalError> {
+    ) -> Result<Value, FossilError> {
         let mut concat_parts: Vec<Expr> = Vec::new();
 
         for (i, part) in parts.iter().enumerate() {
@@ -250,7 +250,7 @@ impl<'a> IrEvaluator<'a> {
         type_ident: &Ident,
         fields: &[(Symbol, ExprId)],
         meta_fields: &[(Symbol, ExprId)],
-    ) -> Result<Value, EvalError> {
+    ) -> Result<Value, FossilError> {
         use crate::runtime::value::{MetaFields, Plan};
 
         // Get the DefId from the resolved type identifier
@@ -292,7 +292,7 @@ impl<'a> IrEvaluator<'a> {
                     _ => Ok(lit(NULL).alias(name_str)),
                 }
             })
-            .collect::<Result<Vec<_>, EvalError>>()?;
+            .collect::<Result<Vec<_>, FossilError>>()?;
 
         // Build schema from expressions
         let schema = build_schema_from_exprs(&select_exprs);
@@ -313,7 +313,7 @@ impl<'a> IrEvaluator<'a> {
     ///
     /// Lists of primitives evaluate to Polars list expressions.
     /// Lists of records/plans are not supported - use type providers.
-    fn eval_list(&mut self, items: &[ExprId]) -> Result<Value, EvalError> {
+    fn eval_list(&mut self, items: &[ExprId]) -> Result<Value, FossilError> {
         use polars::prelude::concat_list;
 
         if items.is_empty() {
@@ -347,7 +347,7 @@ impl<'a> IrEvaluator<'a> {
     }
 
     /// Check if we've exceeded the maximum recursion depth
-    fn check_recursion_depth(&self) -> Result<(), EvalError> {
+    fn check_recursion_depth(&self) -> Result<(), FossilError> {
         if self.call_stack.depth() >= MAX_CALL_DEPTH {
             Err(self.make_error_with_stack(format!(
                 "Stack overflow: maximum recursion depth ({}) exceeded",
@@ -363,7 +363,7 @@ impl<'a> IrEvaluator<'a> {
         &mut self,
         callee: ExprId,
         args: &[Argument],
-    ) -> Result<Value, EvalError> {
+    ) -> Result<Value, FossilError> {
         // Check recursion depth before proceeding
         self.check_recursion_depth()?;
 
@@ -452,14 +452,7 @@ impl<'a> IrEvaluator<'a> {
                     }
                 }
 
-                let result = func.call(arg_values, &ctx).map_err(|e| match e {
-                    crate::error::CompileError::Runtime(r) => EvalError::Runtime(r),
-                    crate::error::CompileError::Provider(p) => EvalError::Provider(p),
-                    other => EvalError::Runtime(RuntimeError::evaluation(
-                        other.to_string(),
-                        Loc::generated(),
-                    )),
-                });
+                let result = func.call(arg_values, &ctx);
 
                 // Pop stack frame
                 self.call_stack.pop();
@@ -520,7 +513,7 @@ impl<'a> IrEvaluator<'a> {
     ///
     /// Returns Value::Expr(col("field")) for lazy column access.
     /// The actual selection happens at sink time (e.g., Rdf::serialize).
-    fn eval_field_access(&mut self, expr: ExprId, field: Symbol) -> Result<Value, EvalError> {
+    fn eval_field_access(&mut self, expr: ExprId, field: Symbol) -> Result<Value, FossilError> {
         let value = self.eval(expr)?;
         let field_name = self.gcx.interner.resolve(field);
 
@@ -543,7 +536,7 @@ impl<'a> IrEvaluator<'a> {
     }
 
     /// Evaluate a block of statements
-    fn eval_block(&mut self, stmts: &[StmtId]) -> Result<Value, EvalError> {
+    fn eval_block(&mut self, stmts: &[StmtId]) -> Result<Value, FossilError> {
         let mut last_value = Value::Unit;
 
         for stmt_id in stmts {
@@ -567,7 +560,7 @@ impl<'a> IrEvaluator<'a> {
     }
 
     /// Get the field names for a record type by its name
-    fn get_record_field_names(&self, type_name: Symbol) -> Result<Vec<Symbol>, EvalError> {
+    fn get_record_field_names(&self, type_name: Symbol) -> Result<Vec<Symbol>, FossilError> {
         // Find the type definition in the IR root statements
         let type_def = self.ir.root.iter().find_map(|stmt_id| {
             let stmt = self.ir.stmts.get(*stmt_id);
@@ -596,13 +589,13 @@ impl<'a> IrEvaluator<'a> {
     }
 
     /// Helper to create runtime errors
-    fn make_error(&self, msg: impl Into<String>) -> EvalError {
+    fn make_error(&self, msg: impl Into<String>) -> FossilError {
         self.make_error_with_stack(msg)
     }
 
     /// Create a runtime error with the current call stack
-    fn make_error_with_stack(&self, msg: impl Into<String>) -> EvalError {
-        EvalError::Runtime(RuntimeError::evaluation(msg.into(), Loc::generated()))
+    fn make_error_with_stack(&self, msg: impl Into<String>) -> FossilError {
+        FossilError::evaluation(msg.into(), Loc::generated())
     }
 }
 

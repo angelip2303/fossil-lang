@@ -5,7 +5,7 @@ use fossil_lang::ast::ast::{
     Ast, Literal, ProviderArgument, Type as AstType, TypeKind as AstTypeKind,
 };
 use fossil_lang::context::Interner;
-use fossil_lang::error::{CompileError, ProviderError};
+use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
@@ -78,12 +78,11 @@ fn parse_csv_options(
     param_info: &[ProviderParamInfo],
     interner: &Interner,
     loc: Loc,
-) -> Result<(PlPath, CsvOptions), ProviderError> {
+) -> Result<(PlPath, CsvOptions), FossilError> {
     let resolved = resolve_args(args, param_info, interner, "csv", loc)?;
 
     let path_lit = resolved.get_positional(0).expect("path is required");
-    let path =
-        extract_string_path(path_lit, interner).map_err(|kind| ProviderError { kind, loc })?;
+    let path = extract_string_path(path_lit, interner, loc)?;
 
     let mut options = CsvOptions::default();
 
@@ -134,15 +133,15 @@ impl TypeProviderImpl for CsvProvider {
         interner: &mut Interner,
         type_name: &str,
         loc: Loc,
-    ) -> Result<ProviderOutput, ProviderError> {
+    ) -> Result<ProviderOutput, FossilError> {
         let (path, options) = parse_csv_options(args, &self.param_info(), interner, loc)?;
-        validate_extension(path.as_ref(), &["csv"]).map_err(|kind| ProviderError { kind, loc })?;
-        validate_path(path.as_ref()).map_err(|kind| ProviderError { kind, loc })?;
+        validate_extension(path.as_ref(), &["csv"], loc)?;
+        validate_path(path.as_ref(), loc)?;
 
         let csv_source = CsvSource::new(path.clone(), options.clone());
         let schema = csv_source
             .infer_schema()
-            .map_err(|e| ProviderError::from_polars(e, loc))?;
+            .map_err(|e| FossilError::data_error(e.to_string(), loc))?;
         let fields = schema_to_ast_fields(&schema, ast, interner);
 
         let record_ty = ast.types.alloc(AstType {
@@ -200,13 +199,13 @@ impl FunctionImpl for CsvLoadFunction {
         Polytype::mono(ir.fn_type(vec![], result_ty))
     }
 
-    fn call(&self, _args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, CompileError> {
+    fn call(&self, _args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
         use fossil_lang::runtime::value::Plan;
 
         let schema = self
             .source
             .infer_schema()
-            .map_err(|e| CompileError::from_polars(e, self.loc))?;
+            .map_err(|e| FossilError::data_error(e.to_string(), self.loc))?;
 
         let type_def_id = ctx
             .gcx

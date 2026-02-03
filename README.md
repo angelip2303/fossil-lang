@@ -31,4 +31,4 @@
 
 - [ ] Tenemos que pensar cómo manejamos casos en los que dos Records tengan el nombre de una columna igual y se haga join
 
-- [ ] Explorar si `Rdf::serialize` debe devolver un DCAT
+- [ ] Explorar si `Rdf::serialize` debe devolver un DCAT (Quizás serialize debería devolver un record (objeto) que de alguna forma se pueda pasar a DCAT)

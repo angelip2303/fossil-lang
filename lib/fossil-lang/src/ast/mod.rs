@@ -90,18 +90,3 @@ impl chumsky::span::Span for Loc {
     }
 }
 
-impl ariadne::Span for Loc {
-    type SourceId = SourceId;
-
-    fn source(&self) -> &Self::SourceId {
-        &self.source
-    }
-
-    fn start(&self) -> usize {
-        self.span.start
-    }
-
-    fn end(&self) -> usize {
-        self.span.end
-    }
-}

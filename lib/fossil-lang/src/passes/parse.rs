@@ -8,7 +8,7 @@ use chumsky::prelude::*;
 use logos::Logos;
 
 use crate::ast::{Loc, ast::Ast};
-use crate::error::{CompileErrors, ParseError};
+use crate::error::{FossilError, FossilErrors};
 use crate::parser::{
     grammar::{AstCtx, parse_stmt},
     lexer::Token,
@@ -18,7 +18,7 @@ use crate::passes::{GlobalContext, ParsedProgram};
 pub struct Parser;
 
 impl Parser {
-    pub fn parse(src: &str, source_id: usize) -> Result<ParsedProgram, CompileErrors> {
+    pub fn parse(src: &str, source_id: usize) -> Result<ParsedProgram, FossilErrors> {
         Self::parse_with_context(src, source_id, Default::default())
     }
 
@@ -26,7 +26,7 @@ impl Parser {
         src: &str,
         source_id: usize,
         mut gcx: GlobalContext,
-    ) -> Result<ParsedProgram, CompileErrors> {
+    ) -> Result<ParsedProgram, FossilErrors> {
         // Tokenize with Logos - collect tokens WITH their original byte spans
         // Lexer errors are converted to Token::Error and reported separately
         let lexer = Token::lexer(src);
@@ -49,11 +49,10 @@ impl Parser {
 
         // Report lexer errors before parsing
         if !lexer_errors.is_empty() {
-            let mut compile_errors = CompileErrors::new();
+            let mut compile_errors = FossilErrors::new();
             for span in lexer_errors {
                 let loc = Loc::new(source_id, span.into_range());
-                let error_msg = gcx.interner.intern("Invalid token");
-                compile_errors.push(ParseError::syntax(error_msg, loc));
+                compile_errors.push(FossilError::syntax("Invalid token", loc));
             }
             return Err(compile_errors);
         }
@@ -102,21 +101,18 @@ impl Parser {
             }
             Err(chumsky_errors) => {
                 // Collect all parse errors
-                let mut compile_errors = CompileErrors::new();
-                let mut interner_ref = interner.borrow_mut();
+                let mut compile_errors = FossilErrors::new();
 
                 for err in chumsky_errors {
-                    // Use the interner from the Rc<RefCell<>> since gcx.interner was moved
                     // Extract custom messages cleanly, fall back to debug format for others
                     let error_message = match err.reason() {
                         RichReason::Custom(msg) => msg.to_string(),
                         reason => format!("Parse error: {:?}", reason),
                     };
-                    let error_msg = interner_ref.intern(&error_message);
                     // Convert SimpleSpan to Loc
                     let simple_span = err.span();
                     let loc = Loc::new(source_id, simple_span.into_range());
-                    compile_errors.push(ParseError::syntax(error_msg, loc));
+                    compile_errors.push(FossilError::syntax(error_message, loc));
                 }
 
                 Err(compile_errors)

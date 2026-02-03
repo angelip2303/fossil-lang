@@ -39,7 +39,7 @@ use fossil_lang::ast::ast::{
     Type as AstType, TypeKind as AstTypeKind,
 };
 use fossil_lang::context::Interner;
-use fossil_lang::error::{CompileWarning, CompileWarnings, ProviderError, ProviderErrorKind};
+use fossil_lang::error::{FossilError, FossilWarning, FossilWarnings};
 use fossil_lang::traits::provider::{
     ProviderOutput, ProviderParamInfo, TypeProviderImpl, resolve_args,
 };
@@ -79,19 +79,14 @@ impl TypeProviderImpl for ShexProvider {
         interner: &mut Interner,
         _type_name: &str,
         loc: Loc,
-    ) -> Result<ProviderOutput, ProviderError> {
+    ) -> Result<ProviderOutput, FossilError> {
         let (path, shape_name) = parse_shex_args(args, &self.param_info(), interner, loc)?;
-        validate_extension(path.as_ref(), &["shex"]).map_err(|kind| ProviderError { kind, loc })?;
-        validate_path(path.as_ref()).map_err(|kind| ProviderError { kind, loc })?;
+        validate_extension(path.as_ref(), &["shex"], loc)?;
+        validate_path(path.as_ref(), loc)?;
 
         let path_str = path.to_str().to_string();
-        let shex_content = fs::read_to_string(&path_str).map_err(|e| ProviderError {
-            kind: ProviderErrorKind::ReadError {
-                path: path_str.clone(),
-                cause: e.to_string(),
-            },
-            loc,
-        })?;
+        let shex_content = fs::read_to_string(&path_str)
+            .map_err(|e| FossilError::read_error(path_str.clone(), e.to_string(), loc))?;
 
         let schema = parse_shex_schema(&shex_content, loc)?;
 
@@ -114,13 +109,12 @@ fn parse_shex_args(
     param_info: &[ProviderParamInfo],
     interner: &Interner,
     loc: Loc,
-) -> Result<(PlPath, String), ProviderError> {
+) -> Result<(PlPath, String), FossilError> {
     let resolved = resolve_args(args, param_info, interner, "shex", loc)?;
 
     // Path is first positional argument (index 0)
     let path_lit = resolved.get_positional(0).expect("path is required");
-    let path =
-        extract_string_path(path_lit, interner).map_err(|kind| ProviderError { kind, loc })?;
+    let path = extract_string_path(path_lit, interner, loc)?;
 
     // Shape is second argument - can be positional (index 1) or named
     let shape = if let Some(shape_sym) = interner.lookup("shape") {
@@ -137,20 +131,15 @@ fn parse_shex_args(
 }
 
 /// Parse ShEx schema content
-fn parse_shex_schema(content: &str, loc: Loc) -> Result<Schema, ProviderError> {
+fn parse_shex_schema(content: &str, loc: Loc) -> Result<Schema, FossilError> {
     let source_iri = IriS::new_unchecked("file:///schema.shex");
-    ShExParser::parse(content, None, &source_iri).map_err(|e| ProviderError {
-        kind: ProviderErrorKind::ParseError {
-            format: "ShEx",
-            cause: e.to_string(),
-        },
-        loc,
-    })
+    ShExParser::parse(content, None, &source_iri)
+        .map_err(|e| FossilError::parse_error("ShEx", e.to_string(), loc))
 }
 
 struct ShapeExtractionResult {
     fields: Vec<ShapeField>,
-    warnings: CompileWarnings,
+    warnings: FossilWarnings,
 }
 
 fn extract_shape_fields(
@@ -159,16 +148,15 @@ fn extract_shape_fields(
     ast: &mut Ast,
     interner: &mut Interner,
     loc: Loc,
-) -> Result<ShapeExtractionResult, ProviderError> {
-    let shapes = schema.shapes().ok_or_else(|| ProviderError {
-        kind: ProviderErrorKind::NoShapesDefined,
-        loc,
-    })?;
+) -> Result<ShapeExtractionResult, FossilError> {
+    let shapes = schema
+        .shapes()
+        .ok_or_else(|| FossilError::no_shapes_defined(loc))?;
 
     for shape_decl in shapes {
         if shape_label_matches(shape_decl.id(), shape_name) {
             let mut fields = Vec::new();
-            let mut warnings = CompileWarnings::new();
+            let mut warnings = FossilWarnings::new();
             extract_fields_from_shape_expr(
                 &shape_decl.shape_expr,
                 &mut fields,
@@ -183,12 +171,7 @@ fn extract_shape_fields(
         }
     }
 
-    Err(ProviderError {
-        kind: ProviderErrorKind::ShapeNotFound {
-            name: shape_name.to_string(),
-        },
-        loc,
-    })
+    Err(FossilError::shape_not_found(shape_name, loc))
 }
 
 /// Check if a shape label matches the given name
@@ -207,7 +190,7 @@ fn shape_label_matches(label: &ShapeExprLabel, name: &str) -> bool {
 fn extract_fields_from_shape_expr(
     shape_expr: &ShapeExpr,
     fields: &mut Vec<ShapeField>,
-    warnings: &mut CompileWarnings,
+    warnings: &mut FossilWarnings,
     schema: &Schema,
     shape_name: &str,
     ast: &mut Ast,
@@ -279,7 +262,7 @@ fn extract_fields_from_shape_expr(
 fn extract_fields_from_triple_expr(
     triple_expr: &TripleExpr,
     fields: &mut Vec<ShapeField>,
-    warnings: &mut CompileWarnings,
+    warnings: &mut FossilWarnings,
     schema: &Schema,
     shape_name: &str,
     ast: &mut Ast,
@@ -298,7 +281,7 @@ fn extract_fields_from_triple_expr(
 
             // Skip rdf:type constraints
             if predicate_uri == RDF_TYPE {
-                warnings.push(CompileWarning::shex_rdf_type_ignored(shape_name, loc));
+                warnings.push(FossilWarning::shex_rdf_type_ignored(shape_name, loc));
                 return;
             }
 

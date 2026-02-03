@@ -1,5 +1,5 @@
 use crate::context::DefId;
-use crate::error::CompileError;
+use crate::error::FossilError;
 use crate::ir::{Ir, Polytype, TypeVar};
 use crate::passes::GlobalContext;
 use crate::runtime::value::Value;
@@ -60,5 +60,5 @@ pub trait FunctionImpl: Send + Sync {
     ///     // Process arguments...
     /// }
     /// ```
-    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, CompileError>;
+    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError>;
 }

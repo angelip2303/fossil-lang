@@ -4,7 +4,7 @@
 
 use crate::ast::Loc;
 use crate::context::DefId;
-use crate::error::TypeError;
+use crate::error::FossilError;
 use crate::ir::{Ident, RecordFields, TypeId, TypeKind, TypeVar};
 
 use super::{subst::Subst, TypeChecker};
@@ -31,7 +31,7 @@ impl TypeChecker {
     }
 
     /// Unify two types
-    pub fn unify(&mut self, ty1_id: TypeId, ty2_id: TypeId, loc: Loc) -> Result<Subst, TypeError> {
+    pub fn unify(&mut self, ty1_id: TypeId, ty2_id: TypeId, loc: Loc) -> Result<Subst, FossilError> {
         if ty1_id == ty2_id {
             return Ok(Subst::default());
         }
@@ -48,14 +48,12 @@ impl TypeChecker {
                     // Can't resolve named type, fall through to error
                     let expected_str = self.format_type(ty1_id);
                     let actual_str = self.format_type(ty2_id);
-                    Err(TypeError::mismatch_with_context(
-                        ty1_id,
-                        ty2_id,
-                        loc,
+                    Err(FossilError::type_mismatch(
                         format!(
                             "Cannot resolve named type `{}` to unify with `{}`",
                             expected_str, actual_str
                         ),
+                        loc,
                     ))
                 }
             }
@@ -65,14 +63,12 @@ impl TypeChecker {
                 } else {
                     let expected_str = self.format_type(ty1_id);
                     let actual_str = self.format_type(ty2_id);
-                    Err(TypeError::mismatch_with_context(
-                        ty1_id,
-                        ty2_id,
-                        loc,
+                    Err(FossilError::type_mismatch(
                         format!(
                             "Cannot resolve named type `{}` to unify with `{}`",
                             actual_str, expected_str
                         ),
+                        loc,
                     ))
                 }
             }
@@ -116,20 +112,18 @@ impl TypeChecker {
                     let expected_str = self.format_type(ty1_id);
                     let actual_str = self.format_type(ty2_id);
 
-                    return Err(TypeError::mismatch_with_context(
-                        ty1_id,
-                        ty2_id,
-                        loc,
+                    return Err(FossilError::type_mismatch(
                         format!(
                             "Cannot unify `{}` with `{}` - different type constructors",
                             expected_str, actual_str
                         ),
+                        loc,
                     ));
                 }
 
                 // Arity must match
                 if args1.len() != args2.len() {
-                    return Err(TypeError::arity_mismatch(args1.len(), args2.len(), loc));
+                    return Err(FossilError::arity_mismatch(args1.len(), args2.len(), loc));
                 }
 
                 // Unify type arguments positionally
@@ -153,7 +147,7 @@ impl TypeChecker {
             // Functions
             (TypeKind::Function(params1, ret1), TypeKind::Function(params2, ret2)) => {
                 if params1.len() != params2.len() {
-                    return Err(TypeError::arity_mismatch(params1.len(), params2.len(), loc));
+                    return Err(FossilError::arity_mismatch(params1.len(), params2.len(), loc));
                 }
 
                 // Clone to avoid borrowing issues
@@ -184,11 +178,9 @@ impl TypeChecker {
                 let expected_str = self.format_type(ty1_id);
                 let actual_str = self.format_type(ty2_id);
 
-                Err(TypeError::mismatch_with_context(
-                    ty1_id,
-                    ty2_id,
-                    loc,
+                Err(FossilError::type_mismatch(
                     format!("Expected type `{}`, but found `{}`", expected_str, actual_str),
+                    loc,
                 ))
             }
         }
@@ -200,7 +192,7 @@ impl TypeChecker {
         var: TypeVar,
         ty_id: TypeId,
         loc: Loc,
-    ) -> Result<Subst, TypeError> {
+    ) -> Result<Subst, FossilError> {
         let ty = self.ir.types.get(ty_id);
 
         // If binding to itself, no substitution needed
@@ -212,7 +204,7 @@ impl TypeChecker {
         if self.occurs_in(var, ty_id) {
             // Convert TypeVar to error::TypeVar
             let error_var = crate::error::TypeVar(var.0);
-            return Err(TypeError::infinite_type(error_var, loc));
+            return Err(FossilError::infinite_type(error_var, loc));
         }
 
         let mut subst = Subst::default();
@@ -244,10 +236,10 @@ impl TypeChecker {
         fields1: RecordFields,
         fields2: RecordFields,
         loc: Loc,
-    ) -> Result<Subst, TypeError> {
+    ) -> Result<Subst, FossilError> {
         // Records must have the same number of fields
         if fields1.len() != fields2.len() {
-            return Err(TypeError::record_size_mismatch(
+            return Err(FossilError::record_size_mismatch(
                 fields2.len(),
                 fields1.len(),
                 loc,
@@ -264,7 +256,8 @@ impl TypeChecker {
                 let s = self.unify(ty1_applied, ty2_applied, loc)?;
                 subst = subst.compose(&s, &mut self.ir);
             } else {
-                return Err(TypeError::record_field_mismatch(*name1, loc));
+                let field_str = self.gcx.interner.resolve(*name1).to_string();
+                return Err(FossilError::field_not_found(field_str, loc));
             }
         }
 

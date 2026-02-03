@@ -1,46 +1,12 @@
-use std::collections::HashMap;
 use std::fs::read_to_string;
 use std::path::PathBuf;
 
-use ariadne::{Cache, Source};
 use clap::{Parser, Subcommand};
+use miette::{IntoDiagnostic, NamedSource, Report};
 
-use fossil_lang::ast::Loc;
 use fossil_lang::compiler::{CompileResult, Compiler, CompilerInput};
-use fossil_lang::error::{CompileError, CompileErrors};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::executor::IrExecutor;
-
-struct SourceCache {
-    sources: HashMap<usize, Source<String>>,
-}
-
-impl SourceCache {
-    fn new(source_id: usize, content: String) -> Self {
-        let mut sources = HashMap::new();
-        sources.insert(source_id, Source::from(content));
-        Self { sources }
-    }
-}
-
-impl Cache<usize> for SourceCache {
-    type Storage = String;
-
-    #[allow(refining_impl_trait)]
-    fn fetch(
-        &mut self,
-        id: &usize,
-    ) -> Result<&Source<Self::Storage>, Box<dyn std::fmt::Debug + '_>> {
-        self.sources
-            .get(id)
-            .ok_or_else(|| Box::new(format!("Source {} not found", id)) as Box<dyn std::fmt::Debug>)
-    }
-
-    #[allow(refining_impl_trait)]
-    fn display<'a>(&self, id: &'a usize) -> Option<Box<dyn std::fmt::Display + 'a>> {
-        Some(Box::new(*id))
-    }
-}
 
 #[derive(Parser)]
 #[command(name = "fossil")]
@@ -65,7 +31,7 @@ enum Commands {
     },
 }
 
-fn main() -> Result<(), CompileErrors> {
+fn main() -> miette::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -80,31 +46,45 @@ fn main() -> Result<(), CompileErrors> {
     Ok(())
 }
 
-fn compile(path: PathBuf) -> Result<CompileResult, CompileErrors> {
+fn compile(path: PathBuf) -> miette::Result<CompileResult> {
     let mut gcx = GlobalContext::default();
     gcx.register_provider("csv", fossil_providers::csv::CsvProvider);
     gcx.register_provider("shex", fossil_providers::shapes::shex::ShexProvider);
     fossil_stdlib::init(&mut gcx);
 
-    let source_content =
-        read_to_string(&path).map_err(|e| CompileError::from_io(e, Loc::generated()))?;
-
-    let mut cache = SourceCache::new(0, source_content);
+    let source_content = read_to_string(&path).into_diagnostic()?;
 
     let compiler = Compiler::with_context(gcx);
-    let result = compiler.compile(CompilerInput::File(path))?;
+    let result = compiler.compile(CompilerInput::File(path.clone())).map_err(|errors| {
+        // Convert FossilErrors to miette report with source
+        let source = NamedSource::new(path.display().to_string(), source_content.clone());
+
+        // For now, just report the first error
+        if let Some(first_error) = errors.0.into_iter().next() {
+            Report::new(first_error).with_source_code(source)
+        } else {
+            Report::msg("Compilation failed with unknown errors")
+        }
+    })?;
 
     if !result.warnings.is_empty() {
-        for report in result.warnings.reports() {
-            report.eprint(&mut cache).expect("failed to print warning");
+        for warning in result.warnings.0.iter() {
+            eprintln!("warning: {:?}", warning);
         }
     }
 
     Ok(result)
 }
 
-fn run(path: PathBuf) -> Result<(), CompileErrors> {
-    let result = compile(path)?;
-    IrExecutor::execute(result.program)?;
+fn run(path: PathBuf) -> miette::Result<()> {
+    let result = compile(path.clone())?;
+
+    let source_content = read_to_string(&path).into_diagnostic()?;
+    let source = NamedSource::new(path.display().to_string(), source_content);
+
+    IrExecutor::execute(result.program).map_err(|e| {
+        Report::new(e).with_source_code(source)
+    })?;
+
     Ok(())
 }

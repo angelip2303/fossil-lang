@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::ast::Loc;
 use crate::context::{DefId, DefKind, Symbol, TypeMetadata};
-use crate::error::{CompileError, CompileErrors, ResolutionError};
+use crate::error::{FossilError, FossilErrors};
 use crate::ir::{ExprId, ExprKind, Ident, Ir, Path, StmtId, StmtKind, TypeId, TypeKind};
 use crate::passes::GlobalContext;
 
@@ -88,8 +88,8 @@ impl IrResolver {
         self
     }
 
-    pub fn resolve(mut self) -> Result<(Ir, GlobalContext), CompileErrors> {
-        let mut errors = CompileErrors::new();
+    pub fn resolve(mut self) -> Result<(Ir, GlobalContext), FossilErrors> {
+        let mut errors = FossilErrors::new();
 
         // Phase 1: Collect declarations
         self.collect_declarations(&mut errors);
@@ -112,7 +112,7 @@ impl IrResolver {
         Ok((self.ir, self.gcx))
     }
 
-    fn collect_declarations(&mut self, errors: &mut CompileErrors) {
+    fn collect_declarations(&mut self, errors: &mut FossilErrors) {
         let root = self.ir.root.clone();
         for stmt_id in root {
             let stmt = self.ir.stmts.get(stmt_id);
@@ -124,11 +124,8 @@ impl IrResolver {
                     let expr = self.ir.exprs.get(*value);
                     if matches!(expr.kind, ExprKind::Function { .. }) {
                         if self.scopes.current_mut().values.contains_key(name) {
-                            errors.push(ResolutionError::AlreadyDefined {
-                                name: *name,
-                                first_def: loc,
-                                second_def: loc,
-                            });
+                            let name_str = self.gcx.interner.resolve(*name).to_string();
+                            errors.push(FossilError::already_defined(name_str, loc, loc));
                         } else {
                             let def_id = self.gcx.definitions.insert(None, *name, DefKind::Let);
                             self.scopes.current_mut().values.insert(*name, def_id);
@@ -138,11 +135,8 @@ impl IrResolver {
 
                 StmtKind::Const { name, .. } => {
                     if self.scopes.current_mut().values.contains_key(name) {
-                        errors.push(ResolutionError::AlreadyDefined {
-                            name: *name,
-                            first_def: loc,
-                            second_def: loc,
-                        });
+                        let name_str = self.gcx.interner.resolve(*name).to_string();
+                        errors.push(FossilError::already_defined(name_str, loc, loc));
                     } else {
                         let def_id = self.gcx.definitions.insert(None, *name, DefKind::Const);
                         self.scopes.current_mut().values.insert(*name, def_id);
@@ -151,11 +145,8 @@ impl IrResolver {
 
                 StmtKind::Type { name, .. } => {
                     if self.scopes.current_mut().types.contains_key(name) {
-                        errors.push(ResolutionError::AlreadyDefined {
-                            name: *name,
-                            first_def: loc,
-                            second_def: loc,
-                        });
+                        let name_str = self.gcx.interner.resolve(*name).to_string();
+                        errors.push(FossilError::already_defined(name_str, loc, loc));
                     } else {
                         let def_id = self.gcx.definitions.insert(None, *name, DefKind::Type);
                         self.scopes.current_mut().types.insert(*name, def_id);
@@ -173,7 +164,7 @@ impl IrResolver {
         }
     }
 
-    fn resolve_stmt(&mut self, stmt_id: StmtId, errors: &mut CompileErrors) {
+    fn resolve_stmt(&mut self, stmt_id: StmtId, errors: &mut FossilErrors) {
         let stmt = self.ir.stmts.get(stmt_id).clone();
 
         match &stmt.kind {
@@ -231,7 +222,7 @@ impl IrResolver {
         }
     }
 
-    fn resolve_expr(&mut self, expr_id: ExprId, errors: &mut CompileErrors) {
+    fn resolve_expr(&mut self, expr_id: ExprId, errors: &mut FossilErrors) {
         let expr = self.ir.exprs.get(expr_id).clone();
 
         match &expr.kind {
@@ -337,7 +328,7 @@ impl IrResolver {
         }
     }
 
-    fn resolve_type(&mut self, type_id: TypeId, errors: &mut CompileErrors) {
+    fn resolve_type(&mut self, type_id: TypeId, errors: &mut FossilErrors) {
         let ty = self.ir.types.get(type_id).clone();
 
         match &ty.kind {
@@ -396,7 +387,7 @@ impl IrResolver {
     fn resolve_record_fields(
         &mut self,
         fields: &crate::ir::RecordFields,
-        errors: &mut CompileErrors,
+        errors: &mut FossilErrors,
     ) {
         for (_, ty) in &fields.fields {
             self.resolve_type(*ty, errors);
@@ -407,7 +398,7 @@ impl IrResolver {
         &self,
         path: &Path,
         loc: Loc,
-        errors: &mut CompileErrors,
+        errors: &mut FossilErrors,
     ) -> Option<DefId> {
         match path {
             Path::Simple(name) => {
@@ -423,20 +414,22 @@ impl IrResolver {
                     return Some(def_id);
                 }
 
-                errors.push(ResolutionError::undefined_variable(*name, loc));
+                let name_str = self.gcx.interner.resolve(*name).to_string();
+                errors.push(FossilError::undefined_variable(name_str, loc));
                 None
             }
 
             Path::Qualified(parts) => {
                 let ast_path = crate::ast::ast::Path::Qualified(parts.clone());
                 self.gcx.definitions.resolve(&ast_path).or_else(|| {
-                    errors.push(ResolutionError::undefined_path(ast_path, loc));
+                    let path_str = format!("{:?}", ast_path);
+                    errors.push(FossilError::undefined_path(path_str, loc));
                     None
                 })
             }
 
             Path::Relative { .. } => {
-                errors.push(CompileError::internal(
+                errors.push(FossilError::internal(
                     "resolve",
                     "Relative paths not supported in IR resolver",
                     loc,
@@ -450,7 +443,7 @@ impl IrResolver {
         &self,
         path: &Path,
         loc: Loc,
-        errors: &mut CompileErrors,
+        errors: &mut FossilErrors,
     ) -> Option<DefId> {
         match path {
             Path::Simple(name) => {
@@ -466,23 +459,22 @@ impl IrResolver {
                     return Some(def_id);
                 }
 
-                errors.push(ResolutionError::undefined_type(
-                    crate::ast::ast::Path::Simple(*name),
-                    loc,
-                ));
+                let name_str = self.gcx.interner.resolve(*name).to_string();
+                errors.push(FossilError::undefined_type(name_str, loc));
                 None
             }
 
             Path::Qualified(parts) => {
                 let ast_path = crate::ast::ast::Path::Qualified(parts.clone());
                 self.gcx.definitions.resolve(&ast_path).or_else(|| {
-                    errors.push(ResolutionError::undefined_type(ast_path, loc));
+                    let path_str = format!("{:?}", ast_path);
+                    errors.push(FossilError::undefined_type(path_str, loc));
                     None
                 })
             }
 
             Path::Relative { .. } => {
-                errors.push(CompileError::internal(
+                errors.push(FossilError::internal(
                     "resolve",
                     "Relative paths not supported in IR resolver",
                     loc,

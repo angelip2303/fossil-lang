@@ -6,11 +6,10 @@
 //! The key difference from the previous HIR/THIR-based implementation is that
 //! we now work directly on the unified IR, inferring types in-place.
 
-use crate::error::{ResolutionError, TypeError};
+use crate::error::FossilError;
 use crate::ir::{
     ExprId, ExprKind, Ident, Literal, Polytype, PrimitiveType, StmtKind, Type, TypeId, TypeKind,
 };
-use crate::error::CompileError;
 
 use super::{TypeChecker, subst::Subst};
 
@@ -22,7 +21,7 @@ impl TypeChecker {
     /// This works directly on IR expressions. The IR expression's `ty` field
     /// may be `TypeRef::Unknown` when we start; after inference we update it
     /// to `TypeRef::Known(inferred_type_id)`.
-    pub fn infer(&mut self, expr_id: ExprId) -> Result<(Subst, TypeId), CompileError> {
+    pub fn infer(&mut self, expr_id: ExprId) -> Result<(Subst, TypeId), FossilError> {
         // Check cache first
         if let Some(&cached_ty) = self.infer_cache.get(&expr_id) {
             let resolved_ty = self.global_subst.apply(cached_ty, &mut self.ir);
@@ -64,10 +63,8 @@ impl TypeChecker {
                             .lookup(*def_id)
                             .ok_or_else(|| {
                                 let def = self.gcx.definitions.get(*def_id);
-                                CompileError::from(ResolutionError::undefined_variable(
-                                    def.name,
-                                    loc,
-                                ))
+                                let name_str = self.gcx.interner.resolve(def.name).to_string();
+                                FossilError::undefined_variable(name_str, loc)
                             })?
                             .clone();
 
@@ -85,7 +82,7 @@ impl TypeChecker {
                     }
                     Ident::Unresolved(path) => {
                         // Should not happen after resolution - this is an internal error
-                        Err(CompileError::internal(
+                        Err(FossilError::internal(
                             "typecheck",
                             format!("Unresolved identifier reached type checker: {:?}", path),
                             loc,
@@ -256,10 +253,8 @@ impl TypeChecker {
                             Ok((subst, field_ty))
                         } else {
                             // Field not found - error (no row polymorphism)
-                            Err(CompileError::from(TypeError::record_field_mismatch(
-                                *field,
-                                loc,
-                            )))
+                            let field_str = self.gcx.interner.resolve(*field).to_string();
+                            Err(FossilError::field_not_found(field_str, loc))
                         }
                     }
 
@@ -274,10 +269,8 @@ impl TypeChecker {
                         }
 
                         // Field not found - error
-                        Err(CompileError::from(TypeError::record_field_mismatch(
-                            *field,
-                            loc,
-                        )))
+                        let field_str = self.gcx.interner.resolve(*field).to_string();
+                        Err(FossilError::field_not_found(field_str, loc))
                     }
 
                     TypeKind::Var(_) => {
@@ -287,10 +280,10 @@ impl TypeChecker {
                         Ok((subst, field_ty))
                     }
 
-                    _ => Err(CompileError::from(TypeError::record_field_mismatch(
-                        *field,
-                        loc,
-                    ))),
+                    _ => {
+                        let field_str = self.gcx.interner.resolve(*field).to_string();
+                        Err(FossilError::field_not_found(field_str, loc))
+                    }
                 }
             }
 

@@ -8,7 +8,7 @@ use std::str::FromStr;
 pub use metadata::{RdfFieldInfo, RdfMetadata, RdfMetadataResult, RdfTermType};
 pub use serializer::RdfBatchWriter;
 
-use fossil_lang::error::{CompileError, RuntimeError};
+use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::chunked_executor::{ChunkedExecutor, estimate_batch_size_from_plan};
@@ -66,12 +66,9 @@ pub enum RdfError {
     Finalize(String),
 }
 
-impl From<RdfError> for CompileError {
+impl From<RdfError> for FossilError {
     fn from(err: RdfError) -> Self {
-        CompileError::from(RuntimeError::evaluation(
-            err.to_string(),
-            fossil_lang::ast::Loc::generated(),
-        ))
+        FossilError::evaluation(err.to_string(), fossil_lang::ast::Loc::generated())
     }
 }
 
@@ -114,7 +111,7 @@ impl FunctionImpl for MapFunction {
         )
     }
 
-    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, CompileError> {
+    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
         if args.is_empty() {
             return Err(RdfError::MapMissingSource.into());
         }
@@ -175,7 +172,7 @@ fn trace_transform(
     transform_fn: &Value,
     row_context: Value,
     ctx: &RuntimeContext,
-) -> Result<Value, CompileError> {
+) -> Result<Value, FossilError> {
     use fossil_lang::runtime::evaluator::IrEvaluator;
 
     match transform_fn {
@@ -217,7 +214,7 @@ impl FunctionImpl for RdfSerializeFunction {
         Polytype::poly(vec![t_var], ir.fn_type(vec![t_ty, filename_ty], output_ty))
     }
 
-    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, CompileError> {
+    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
         let mut args_iter = args.into_iter();
 
         let input_value = args_iter.next().ok_or(RdfError::SerializeMissingArgs)?;
@@ -239,7 +236,7 @@ fn serialize_rdf(
     plan: &Plan,
     destination: &str,
     ctx: &RuntimeContext,
-) -> Result<Value, CompileError> {
+) -> Result<Value, FossilError> {
     let interner = ctx.gcx.interner.clone();
 
     let path = PathBuf::from(destination);
@@ -331,7 +328,7 @@ fn serialize_oxigraph(
     plan: &Plan,
     output_configs: &[(Vec<Expr>, RdfMetadata)],
     batch_size: usize,
-) -> Result<Value, CompileError> {
+) -> Result<Value, FossilError> {
     let writer =
         RdfBatchWriter::new(path, format).map_err(|e| RdfError::CreateWriter(e.to_string()))?;
 

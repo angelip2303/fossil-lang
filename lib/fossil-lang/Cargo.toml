@@ -18,4 +18,4 @@ thiserror.workspace = true
 polars.workspace = true
 logos = "0.15.1"
 chumsky = { version= "0.11.1", features = ["pratt"]}
-ariadne = "0.6.0"
+miette = { version = "7", features = ["fancy"] }

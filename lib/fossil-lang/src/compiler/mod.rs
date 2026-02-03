@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::ast::Loc;
 use crate::context::extract_type_metadata;
-use crate::error::{CompileError, CompileErrors, CompileWarnings};
+use crate::error::{FossilError, FossilErrors, FossilWarnings};
 use crate::passes;
 use crate::passes::resolve::IrResolver;
 use crate::passes::{
@@ -18,7 +18,7 @@ pub enum CompilerInput {
 /// Result of compilation including the program and any warnings
 pub struct CompileResult {
     pub program: IrProgram,
-    pub warnings: CompileWarnings,
+    pub warnings: FossilWarnings,
 }
 
 pub struct Compiler {
@@ -49,16 +49,16 @@ impl Compiler {
         }
     }
 
-    pub fn compile(&self, input: CompilerInput) -> Result<CompileResult, CompileErrors> {
+    pub fn compile(&self, input: CompilerInput) -> Result<CompileResult, FossilErrors> {
         match input {
             CompilerInput::File(path) => self.compile_file(path),
         }
     }
 
-    fn compile_file(&self, path: PathBuf) -> Result<CompileResult, CompileErrors> {
+    fn compile_file(&self, path: PathBuf) -> Result<CompileResult, FossilErrors> {
         let msg = format!("Failed to read file '{}'", path.display());
         let loc = Loc::generated();
-        let src = read_to_string(&path).map_err(|_| CompileError::internal("io", msg, loc))?;
+        let src = read_to_string(&path).map_err(|_| FossilError::internal("io", msg, loc))?;
 
         let gcx = self.gcx.clone().unwrap_or_default();
 

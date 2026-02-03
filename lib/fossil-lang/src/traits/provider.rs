@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::ast::Loc;
 use crate::ast::ast::{Ast, Literal, ProviderArgument, TypeId};
 use crate::context::{Interner, Symbol};
-use crate::error::{CompileWarnings, ProviderError, ProviderErrorKind};
+use crate::error::{FossilError, FossilWarnings};
 use crate::traits::function::FunctionImpl;
 
 /// Output from a type provider (F# style)
@@ -17,7 +17,7 @@ use crate::traits::function::FunctionImpl;
 pub struct ProviderOutput {
     pub generated_type: TypeId,
     pub module_spec: Option<ModuleSpec>,
-    pub warnings: CompileWarnings,
+    pub warnings: FossilWarnings,
 }
 
 impl ProviderOutput {
@@ -25,7 +25,7 @@ impl ProviderOutput {
         Self {
             generated_type,
             module_spec: None,
-            warnings: CompileWarnings::new(),
+            warnings: FossilWarnings::new(),
         }
     }
 
@@ -34,7 +34,7 @@ impl ProviderOutput {
         self
     }
 
-    pub fn with_warnings(mut self, warnings: CompileWarnings) -> Self {
+    pub fn with_warnings(mut self, warnings: FossilWarnings) -> Self {
         self.warnings = warnings;
         self
     }
@@ -132,7 +132,7 @@ pub fn resolve_args(
     interner: &Interner,
     provider_name: &'static str,
     loc: Loc,
-) -> Result<ResolvedProviderArgs, ProviderError> {
+) -> Result<ResolvedProviderArgs, FossilError> {
     let mut resolved = ResolvedProviderArgs::default();
 
     // Build a map of param name -> index for quick lookup
@@ -173,13 +173,7 @@ pub fn resolve_args(
     for (idx, param) in param_info.iter().enumerate() {
         if !filled[idx] {
             if param.required {
-                return Err(ProviderError {
-                    kind: ProviderErrorKind::MissingArgument {
-                        name: param.name,
-                        provider: provider_name,
-                    },
-                    loc,
-                });
+                return Err(FossilError::missing_argument(param.name, provider_name, loc));
             }
             // Default values are applied by the caller if needed
         }
@@ -236,5 +230,5 @@ pub trait TypeProviderImpl: Send + Sync {
         interner: &mut Interner,
         type_name: &str,
         loc: Loc,
-    ) -> Result<ProviderOutput, ProviderError>;
+    ) -> Result<ProviderOutput, FossilError>;
 }

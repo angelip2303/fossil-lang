@@ -3,7 +3,7 @@
 //! Provides helpers for type variable generation and formatting.
 
 use crate::ast::Loc;
-use crate::error::{CompileError, TypeError};
+use crate::error::FossilError;
 use crate::ir::{Ident, RecordFields, Type, TypeId, TypeKind};
 
 use super::TypeChecker;
@@ -86,7 +86,7 @@ impl TypeChecker {
         &mut self,
         list_ty: TypeId,
         loc: Loc,
-    ) -> Result<TypeId, CompileError> {
+    ) -> Result<TypeId, FossilError> {
         let ty = self.ir.types.get(list_ty);
 
         match &ty.kind {
@@ -103,15 +103,10 @@ impl TypeChecker {
             TypeKind::Record(_) | TypeKind::Named(_) => Ok(self.fresh_type_var(loc)),
 
             _ => {
-                let elem_var = self.fresh_type_var(loc);
-                let expected = self.ir.list_type(elem_var);
-                Err(TypeError::mismatch_with_context(
-                    expected,
-                    list_ty,
-                    loc,
+                Err(FossilError::type_mismatch(
                     format!("expected [T] or Records, got {}", self.format_type(list_ty)),
-                )
-                .into())
+                    loc,
+                ))
             }
         }
     }

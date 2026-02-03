@@ -6,13 +6,10 @@ pub enum TestSuiteError {
     NotEquals,
 
     #[error("Failed to compile program")]
-    MultipleCompilationFailures(#[from] fossil_lang::error::CompileErrors),
+    MultipleCompilationFailures(#[from] fossil_lang::error::FossilErrors),
 
     #[error("Failed to compile program")]
-    SingleCompilationFailure(#[from] fossil_lang::error::CompileError),
-
-    #[error("Runtime evaluation failed")]
-    Evaluation(#[from] fossil_lang::error::EvalError),
+    SingleCompilationFailure(#[from] fossil_lang::error::FossilError),
 
     #[error("Failed to read file")]
     IO(#[from] std::io::Error),
