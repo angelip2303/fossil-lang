@@ -1,30 +1,15 @@
 use fossil_lang::ast::Loc;
 use fossil_lang::ast::ast::{Ast, Literal, PrimitiveType, RecordField, Type, TypeKind};
 use fossil_lang::context::{DefId, Interner};
-use fossil_lang::error::{ProviderError, ProviderErrorKind};
+use fossil_lang::error::ProviderErrorKind;
 use fossil_lang::passes::GlobalContext;
+
 use polars::prelude::{PlPath, PlPathRef, Schema};
 
-// =============================================================================
-// Error Construction
-// =============================================================================
-
-/// Create a ProviderError from a ProviderErrorKind with explicit location
-///
-/// This is the main way to create provider errors with typed variants.
-/// Always provide the actual source location when available.
-pub fn provider_err(kind: ProviderErrorKind, loc: Loc) -> ProviderError {
-    ProviderError::new(kind, loc)
-}
-
-// =============================================================================
-// Literal Extraction
-// =============================================================================
-
-/// Extract a string path from a Literal
-///
-/// Returns the path or an appropriate ProviderErrorKind.
-pub fn extract_string_path(lit: &Literal, interner: &Interner) -> Result<PlPath, ProviderErrorKind> {
+pub fn extract_string_path(
+    lit: &Literal,
+    interner: &Interner,
+) -> Result<PlPath, ProviderErrorKind> {
     match lit {
         Literal::String(sym) => Ok(PlPath::from_str(interner.resolve(*sym))),
         _ => Err(ProviderErrorKind::InvalidArgumentType {
@@ -34,22 +19,12 @@ pub fn extract_string_path(lit: &Literal, interner: &Interner) -> Result<PlPath,
     }
 }
 
-// =============================================================================
-// Type Lookup
-// =============================================================================
-
-/// Look up a type's DefId by name from the GlobalContext
 pub fn lookup_type_id(name: &str, gcx: &GlobalContext) -> Option<DefId> {
     gcx.interner
         .lookup(name)
         .and_then(|sym| gcx.definitions.get_by_symbol(sym).map(|d| d.id()))
 }
 
-// =============================================================================
-// File Validation
-// =============================================================================
-
-/// Validate file extension matches allowed list
 pub fn validate_extension(path: PlPathRef, allowed: &[&str]) -> Result<(), ProviderErrorKind> {
     match path.extension() {
         Some(ext) if allowed.contains(&ext) => Ok(()),
@@ -64,7 +39,6 @@ pub fn validate_extension(path: PlPathRef, allowed: &[&str]) -> Result<(), Provi
     }
 }
 
-/// Validate that path exists and is a file
 pub fn validate_path(path: PlPathRef) -> Result<(), ProviderErrorKind> {
     match path {
         PlPathRef::Local(p) => {
@@ -84,11 +58,6 @@ pub fn validate_path(path: PlPathRef) -> Result<(), ProviderErrorKind> {
     }
 }
 
-// =============================================================================
-// Schema Conversion
-// =============================================================================
-
-/// Convert a Polars Schema to AST RecordFields
 pub fn schema_to_ast_fields(
     schema: &Schema,
     ast: &mut Ast,

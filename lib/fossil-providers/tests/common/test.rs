@@ -15,8 +15,8 @@ fn test(test_case: &str) -> Result<bool, TestSuiteError> {
 
     let compiler = Compiler::with_context(gcx);
     let mapping = PathBuf::from(format!("tests/{}/mapping.fossil", test_case));
-    let program = compiler.compile(CompilerInput::File(mapping))?;
-    let _ = IrExecutor::execute(program)?;
+    let result = compiler.compile(CompilerInput::File(mapping))?;
+    let _ = IrExecutor::execute(result.program)?;
 
     let actual = RdfParser::from_format(oxrdfio::RdfFormat::NQuads)
         .for_reader(File::open(format!("tests/{}/actual.nq", test_case))?)

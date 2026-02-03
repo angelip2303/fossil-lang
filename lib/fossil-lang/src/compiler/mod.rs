@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::ast::Loc;
 use crate::context::extract_type_metadata;
-use crate::error::{CompileError, CompileErrors};
+use crate::error::{CompileError, CompileErrors, CompileWarnings};
 use crate::passes;
 use crate::passes::resolve::IrResolver;
 use crate::passes::{
@@ -13,6 +13,12 @@ use crate::passes::{
 #[derive(Debug, Clone)]
 pub enum CompilerInput {
     File(PathBuf),
+}
+
+/// Result of compilation including the program and any warnings
+pub struct CompileResult {
+    pub program: IrProgram,
+    pub warnings: CompileWarnings,
 }
 
 pub struct Compiler {
@@ -43,13 +49,13 @@ impl Compiler {
         }
     }
 
-    pub fn compile(&self, input: CompilerInput) -> Result<IrProgram, CompileErrors> {
+    pub fn compile(&self, input: CompilerInput) -> Result<CompileResult, CompileErrors> {
         match input {
             CompilerInput::File(path) => self.compile_file(path),
         }
     }
 
-    fn compile_file(&self, path: PathBuf) -> Result<IrProgram, CompileErrors> {
+    fn compile_file(&self, path: PathBuf) -> Result<CompileResult, CompileErrors> {
         let msg = format!("Failed to read file '{}'", path.display());
         let loc = Loc::generated();
         let src = read_to_string(&path).map_err(|_| CompileError::internal("io", msg, loc))?;
@@ -57,12 +63,17 @@ impl Compiler {
         let gcx = self.gcx.clone().unwrap_or_default();
 
         let parsed = Parser::parse_with_context(&src, self.source_id, gcx)?;
-        let (expanded_ast, gcx) = ProviderExpander::new((parsed.ast, parsed.gcx)).expand()?;
-        let ty = extract_type_metadata(&expanded_ast);
-        let ir = passes::convert::ast_to_ir(expanded_ast);
-        let (ir, gcx) = IrResolver::new(ir, gcx).with_type_metadata(ty).resolve()?;
+        let expand_result = ProviderExpander::new((parsed.ast, parsed.gcx)).expand()?;
+        let ty = extract_type_metadata(&expand_result.ast);
+        let ir = passes::convert::ast_to_ir(expand_result.ast);
+        let (ir, gcx) = IrResolver::new(ir, expand_result.gcx)
+            .with_type_metadata(ty)
+            .resolve()?;
         let program = TypeChecker::new(ir, gcx).check()?;
 
-        Ok(program)
+        Ok(CompileResult {
+            program,
+            warnings: expand_result.warnings,
+        })
     }
 }

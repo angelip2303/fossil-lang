@@ -20,16 +20,10 @@ use crate::{
     ir::TypeId,
 };
 
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-/// Format a Symbol using the interner to get the actual name.
 fn format_symbol(sym: Symbol, interner: &Interner) -> String {
     interner.try_resolve(sym).unwrap_or("<unknown>").to_string()
 }
 
-/// Format a Path using the interner to get readable names
 fn format_path(path: &Path, interner: &Interner) -> String {
     match path {
         Path::Simple(sym) => interner
@@ -57,40 +51,16 @@ fn format_path(path: &Path, interner: &Interner) -> String {
     }
 }
 
-// =============================================================================
-// Ariadne Configuration
-// =============================================================================
-
-/// Global configuration for ariadne reports
 pub fn report_config() -> Config {
-    Config::default()
-        .with_compact(false)
-        .with_cross_gap(true)
+    Config::default().with_compact(false).with_cross_gap(true)
 }
 
-// =============================================================================
-// Reportable Trait
-// =============================================================================
-
-/// Trait for errors that can generate ariadne reports
-///
-/// The Interner is used to resolve Symbol to human-readable strings.
 pub trait Reportable {
-    /// Generate an ariadne report with symbols resolved
     fn report(&self, interner: &Interner) -> Report<'static, Loc>;
-
-    /// Primary location of the error
     fn loc(&self) -> &Loc;
-
-    /// Color associated with this error type
     fn color(&self) -> Color;
 }
 
-// =============================================================================
-// Type Variable (for error messages)
-// =============================================================================
-
-/// A type variable used in error messages
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeVar(pub usize);
 
@@ -100,11 +70,6 @@ impl std::fmt::Display for TypeVar {
     }
 }
 
-// =============================================================================
-// Stack Frame (for runtime errors)
-// =============================================================================
-
-/// Stack frame for runtime error reporting
 #[derive(Debug, Clone)]
 pub struct StackFrame {
     pub function_name: String,
@@ -120,11 +85,6 @@ impl StackFrame {
     }
 }
 
-// =============================================================================
-// Parse Errors
-// =============================================================================
-
-/// Errors from the parsing phase
 #[derive(Clone, Debug, Error)]
 pub enum ParseError {
     #[error("Parse error")]
@@ -145,11 +105,7 @@ impl Reportable for ParseError {
                 Report::build(ReportKind::Error, *loc)
                     .with_config(report_config())
                     .with_message(format!("Parse error: {}", msg))
-                    .with_label(
-                        Label::new(*loc)
-                            .with_message(&msg)
-                            .with_color(self.color()),
-                    )
+                    .with_label(Label::new(*loc).with_message(&msg).with_color(self.color()))
                     .finish()
             }
         }
@@ -166,11 +122,6 @@ impl Reportable for ParseError {
     }
 }
 
-// =============================================================================
-// Resolution Errors
-// =============================================================================
-
-/// Errors from the name resolution phase
 #[derive(Clone, Debug, Error)]
 pub enum ResolutionError {
     #[error("Undefined variable")]
@@ -403,11 +354,6 @@ impl Reportable for ResolutionError {
     }
 }
 
-// =============================================================================
-// Type Errors
-// =============================================================================
-
-/// Errors from the type checking phase
 #[derive(Clone, Debug, Error)]
 pub enum TypeError {
     #[error("Type mismatch")]
@@ -446,10 +392,7 @@ pub enum TypeError {
     },
 
     #[error("Record field mismatch")]
-    RecordFieldMismatch {
-        field: Symbol,
-        loc: Loc,
-    },
+    RecordFieldMismatch { field: Symbol, loc: Loc },
 
     #[error("Invalid list element")]
     InvalidListElement { expected: TypeId, loc: Loc },
@@ -510,9 +453,7 @@ impl TypeError {
 impl Reportable for TypeError {
     fn report(&self, interner: &Interner) -> Report<'static, Loc> {
         match self {
-            TypeError::Mismatch {
-                loc, context, ..
-            } => {
+            TypeError::Mismatch { loc, context, .. } => {
                 let msg = context
                     .clone()
                     .unwrap_or_else(|| "Type mismatch".to_string());
@@ -520,11 +461,7 @@ impl Reportable for TypeError {
                 Report::build(ReportKind::Error, *loc)
                     .with_config(report_config())
                     .with_message(&msg)
-                    .with_label(
-                        Label::new(*loc)
-                            .with_message(&msg)
-                            .with_color(self.color()),
-                    )
+                    .with_label(Label::new(*loc).with_message(&msg).with_color(self.color()))
                     .with_help("Type mismatches can be fixed with explicit type annotations.")
                     .finish()
             }
@@ -613,17 +550,15 @@ impl Reportable for TypeError {
                     .finish()
             }
 
-            TypeError::InvalidListElement { loc, .. } => {
-                Report::build(ReportKind::Error, *loc)
-                    .with_config(report_config())
-                    .with_message("Invalid list element type")
-                    .with_label(
-                        Label::new(*loc)
-                            .with_message("element type does not match")
-                            .with_color(self.color()),
-                    )
-                    .finish()
-            }
+            TypeError::InvalidListElement { loc, .. } => Report::build(ReportKind::Error, *loc)
+                .with_config(report_config())
+                .with_message("Invalid list element type")
+                .with_label(
+                    Label::new(*loc)
+                        .with_message("element type does not match")
+                        .with_color(self.color()),
+                )
+                .finish(),
 
             TypeError::InvalidBinding { loc } => Report::build(ReportKind::Error, *loc)
                 .with_config(report_config())
@@ -656,11 +591,6 @@ impl Reportable for TypeError {
     }
 }
 
-// =============================================================================
-// Runtime Errors
-// =============================================================================
-
-/// Errors from runtime evaluation
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error("{message}")]
@@ -739,20 +669,20 @@ impl Reportable for RuntimeError {
                 report.finish()
             }
 
-            RuntimeError::StackOverflow {
-                depth, loc, ..
-            } => Report::build(ReportKind::Error, *loc)
-                .with_config(report_config())
-                .with_message(format!(
-                    "Stack overflow: maximum recursion depth ({}) exceeded",
-                    depth
-                ))
-                .with_label(
-                    Label::new(*loc)
-                        .with_message("recursive call exceeded limit")
-                        .with_color(self.color()),
-                )
-                .finish(),
+            RuntimeError::StackOverflow { depth, loc, .. } => {
+                Report::build(ReportKind::Error, *loc)
+                    .with_config(report_config())
+                    .with_message(format!(
+                        "Stack overflow: maximum recursion depth ({}) exceeded",
+                        depth
+                    ))
+                    .with_label(
+                        Label::new(*loc)
+                            .with_message("recursive call exceeded limit")
+                            .with_color(self.color()),
+                    )
+                    .finish()
+            }
         }
     }
 
@@ -768,22 +698,8 @@ impl Reportable for RuntimeError {
     }
 }
 
-// =============================================================================
-// Provider Errors
-// =============================================================================
-
-/// Specific error types for type providers (csv!, shex!, etc.)
-///
-/// Using an enum instead of strings provides:
-/// - Type safety: no typos in error messages
-/// - Consistency: same error always has same message
-/// - Extensibility: easy to add new error types
-/// - Documentation: the enum documents what errors are possible
 #[derive(Clone, Debug, Error)]
 pub enum ProviderErrorKind {
-    // -------------------------------------------------------------------------
-    // Argument Errors
-    // -------------------------------------------------------------------------
     #[error("{provider} provider requires {name} argument")]
     MissingArgument {
         name: &'static str,
@@ -796,9 +712,6 @@ pub enum ProviderErrorKind {
         expected: &'static str,
     },
 
-    // -------------------------------------------------------------------------
-    // File Errors
-    // -------------------------------------------------------------------------
     #[error("File not found: {path}")]
     FileNotFound { path: String },
 
@@ -811,33 +724,18 @@ pub enum ProviderErrorKind {
     #[error("Failed to read {path}: {cause}")]
     ReadError { path: String, cause: String },
 
-    // -------------------------------------------------------------------------
-    // Parse Errors
-    // -------------------------------------------------------------------------
     #[error("Failed to parse {format}: {cause}")]
-    ParseError {
-        format: &'static str,
-        cause: String,
-    },
+    ParseError { format: &'static str, cause: String },
 
-    // -------------------------------------------------------------------------
-    // Schema Errors (ShEx specific)
-    // -------------------------------------------------------------------------
     #[error("Schema has no shapes defined")]
     NoShapesDefined,
 
     #[error("Shape '{name}' not found in schema")]
     ShapeNotFound { name: String },
 
-    // -------------------------------------------------------------------------
-    // Polars/Data Errors
-    // -------------------------------------------------------------------------
     #[error("Data error: {0}")]
     DataError(String),
 
-    // -------------------------------------------------------------------------
-    // Fallback for edge cases
-    // -------------------------------------------------------------------------
     #[error("{0}")]
     Custom(String),
 }
@@ -878,15 +776,194 @@ impl Reportable for ProviderError {
     }
 }
 
-// =============================================================================
-// Unified CompileError
-// =============================================================================
+#[derive(Clone, Debug)]
+pub enum CompileWarning {
+    RdfTypeConflict {
+        type_name: String,
+        attribute_type: String,
+        field_name: String,
+        loc: Loc,
+    },
 
-/// Unified error type for the compilation pipeline
+    ShexRdfTypeIgnored {
+        shape_name: String,
+        loc: Loc,
+    },
+
+    Generic {
+        message: String,
+        loc: Loc,
+    },
+}
+
+impl CompileWarning {
+    pub fn rdf_type_conflict(
+        type_name: impl Into<String>,
+        attribute_type: impl Into<String>,
+        field_name: impl Into<String>,
+        loc: Loc,
+    ) -> Self {
+        Self::RdfTypeConflict {
+            type_name: type_name.into(),
+            attribute_type: attribute_type.into(),
+            field_name: field_name.into(),
+            loc,
+        }
+    }
+
+    pub fn shex_rdf_type_ignored(shape_name: impl Into<String>, loc: Loc) -> Self {
+        Self::ShexRdfTypeIgnored {
+            shape_name: shape_name.into(),
+            loc,
+        }
+    }
+
+    pub fn generic(message: impl Into<String>, loc: Loc) -> Self {
+        Self::Generic {
+            message: message.into(),
+            loc,
+        }
+    }
+
+    pub fn loc(&self) -> &Loc {
+        match self {
+            Self::RdfTypeConflict { loc, .. } => loc,
+            Self::ShexRdfTypeIgnored { loc, .. } => loc,
+            Self::Generic { loc, .. } => loc,
+        }
+    }
+
+    pub fn report(&self) -> Report<'static, Loc> {
+        match self {
+            Self::RdfTypeConflict {
+                type_name,
+                attribute_type,
+                field_name,
+                loc,
+            } => Report::build(ReportKind::Warning, *loc)
+                .with_config(report_config())
+                .with_message(format!(
+                    "Conflicting rdf:type definitions for type '{}'",
+                    type_name
+                ))
+                .with_label(
+                    Label::new(*loc)
+                        .with_message(format!(
+                            "field '{}' has rdf:type predicate, but #[rdf(type = \"{}\")] is also defined",
+                            field_name, attribute_type
+                        ))
+                        .with_color(Color::Yellow),
+                )
+                .with_help(format!(
+                    "The #[rdf(type = \"{}\")] attribute will be used. Remove the rdf:type field or the attribute to avoid this warning.",
+                    attribute_type
+                ))
+                .finish(),
+
+            Self::ShexRdfTypeIgnored { shape_name, loc } => {
+                Report::build(ReportKind::Warning, *loc)
+                    .with_config(report_config())
+                    .with_message(format!(
+                        "ShEx shape '{}' contains rdf:type constraint",
+                        shape_name
+                    ))
+                    .with_label(
+                        Label::new(*loc)
+                            .with_message("rdf:type constraint will be ignored")
+                            .with_color(Color::Yellow),
+                    )
+                    .with_help(
+                        "Use #[rdf(type = \"...\")] attribute on the Fossil type instead.",
+                    )
+                    .finish()
+            }
+
+            Self::Generic { message, loc } => Report::build(ReportKind::Warning, *loc)
+                .with_config(report_config())
+                .with_message(message)
+                .with_label(
+                    Label::new(*loc)
+                        .with_message(message)
+                        .with_color(Color::Yellow),
+                )
+                .finish(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct CompileWarnings(pub Vec<CompileWarning>);
+
+impl CompileWarnings {
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    pub fn push(&mut self, warning: CompileWarning) {
+        self.0.push(warning);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn extend(&mut self, other: CompileWarnings) {
+        self.0.extend(other.0);
+    }
+
+    pub fn reports(&self) -> Vec<Report<'_, Loc>> {
+        self.0.iter().map(|w| w.report()).collect()
+    }
+}
+
+impl IntoIterator for CompileWarnings {
+    type Item = CompileWarning;
+    type IntoIter = std::vec::IntoIter<CompileWarning>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+/// Evaluation errors that occur during runtime execution.
 ///
-/// This wraps all phase-specific errors into a single type that can be
-/// used throughout the pipeline. Each variant can be converted from its
-/// specific error type using `From` implementations.
+/// This is separate from CompileError to properly distinguish between
+/// compile-time and runtime errors.
+#[derive(Debug, Error)]
+pub enum EvalError {
+    #[error(transparent)]
+    Runtime(#[from] RuntimeError),
+
+    #[error(transparent)]
+    Provider(#[from] ProviderError),
+
+    #[error("Polars error: {0}")]
+    Polars(#[from] polars::error::PolarsError),
+}
+
+impl EvalError {
+    pub fn runtime(message: impl Into<String>, loc: Loc) -> Self {
+        Self::Runtime(RuntimeError::evaluation(message, loc))
+    }
+}
+
+impl From<EvalError> for CompileError {
+    fn from(err: EvalError) -> Self {
+        match err {
+            EvalError::Runtime(e) => CompileError::Runtime(e),
+            EvalError::Provider(e) => CompileError::Provider(e),
+            EvalError::Polars(e) => CompileError::Provider(ProviderError::new(
+                ProviderErrorKind::DataError(e.to_string()),
+                Loc::generated(),
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum CompileError {
     #[error(transparent)]
@@ -913,7 +990,6 @@ pub enum CompileError {
 }
 
 impl CompileError {
-    /// Create an internal compiler error
     pub fn internal(phase: &'static str, message: impl Into<String>, loc: Loc) -> Self {
         Self::Internal {
             phase,
@@ -922,7 +998,6 @@ impl CompileError {
         }
     }
 
-    /// Get the location of this error
     pub fn loc(&self) -> &Loc {
         match self {
             CompileError::Parse(e) => e.loc(),
@@ -934,7 +1009,6 @@ impl CompileError {
         }
     }
 
-    /// Generate an ariadne report for this error
     pub fn report(&self, interner: &Interner) -> Report<'static, Loc> {
         match self {
             CompileError::Parse(e) => e.report(interner),
@@ -942,30 +1016,27 @@ impl CompileError {
             CompileError::Type(e) => e.report(interner),
             CompileError::Provider(e) => e.report(interner),
             CompileError::Runtime(e) => e.report(interner),
-            CompileError::Internal { phase, message, loc } => {
-                Report::build(ReportKind::Error, *loc)
-                    .with_config(report_config())
-                    .with_message(format!("Internal compiler error in {}: {}", phase, message))
-                    .with_label(
-                        Label::new(*loc)
-                            .with_message(message)
-                            .with_color(Color::Red),
-                    )
-                    .with_help(format!(
-                        "This is a bug in the {} phase of the compiler. Please file a bug report.",
-                        phase
-                    ))
-                    .finish()
-            }
+            CompileError::Internal {
+                phase,
+                message,
+                loc,
+            } => Report::build(ReportKind::Error, *loc)
+                .with_config(report_config())
+                .with_message(format!("Internal compiler error in {}: {}", phase, message))
+                .with_label(
+                    Label::new(*loc)
+                        .with_message(message)
+                        .with_color(Color::Red),
+                )
+                .with_help(format!(
+                    "This is a bug in the {} phase of the compiler. Please file a bug report.",
+                    phase
+                ))
+                .finish(),
         }
     }
 }
 
-// =============================================================================
-// CompileErrors Collection
-// =============================================================================
-
-/// Collection of compilation errors
 #[derive(Debug, Default, Error)]
 #[error("{} compilation error(s)", .0.len())]
 pub struct CompileErrors(pub Vec<CompileError>);
@@ -988,11 +1059,7 @@ impl CompileErrors {
     }
 
     pub fn into_result<T>(self, ok: T) -> Result<T, Self> {
-        if self.is_empty() {
-            Ok(ok)
-        } else {
-            Err(self)
-        }
+        if self.is_empty() { Ok(ok) } else { Err(self) }
     }
 
     pub fn reports(&self, interner: &Interner) -> Vec<Report<'_, Loc>> {
@@ -1015,77 +1082,11 @@ impl IntoIterator for CompileErrors {
     }
 }
 
-// =============================================================================
-// Error Suggestions (kept for compatibility)
-// =============================================================================
-
-/// Suggestion for fixing a compilation error
-#[derive(Debug, Clone)]
-pub enum ErrorSuggestion {
-    DidYouMean {
-        wrong: String,
-        suggestion: String,
-        confidence: f32,
-    },
-    AddTypeAnnotation {
-        name: String,
-        suggested_type: String,
-    },
-    FixTypo {
-        wrong: String,
-        correct: String,
-        explanation: String,
-    },
-    Help(String),
-}
-
-impl ErrorSuggestion {
-    pub fn format(&self) -> String {
-        match self {
-            Self::DidYouMean {
-                wrong,
-                suggestion,
-                confidence,
-            } => {
-                if *confidence > 0.8 {
-                    format!("Did you mean '{}'?", suggestion)
-                } else {
-                    format!("Did you mean '{}' (similar to '{}')?", suggestion, wrong)
-                }
-            }
-            Self::AddTypeAnnotation {
-                name,
-                suggested_type,
-            } => {
-                format!("Add type annotation: let {}: {} = ...", name, suggested_type)
-            }
-            Self::FixTypo {
-                wrong,
-                correct,
-                explanation,
-            } => {
-                format!("Replace '{}' with '{}': {}", wrong, correct, explanation)
-            }
-            Self::Help(msg) => msg.clone(),
-        }
-    }
-}
-
-// =============================================================================
-// External Error Conversions
-// =============================================================================
-
-// =============================================================================
-// Explicit Error Conversions (require location)
-// =============================================================================
-
 impl ProviderError {
-    /// Convert a Polars error to a ProviderError with explicit location
     pub fn from_polars(err: polars::error::PolarsError, loc: Loc) -> Self {
         ProviderError::new(ProviderErrorKind::DataError(err.to_string()), loc)
     }
 
-    /// Convert an IO error to a ProviderError with explicit location
     pub fn from_io(err: std::io::Error, loc: Loc) -> Self {
         ProviderError::new(
             ProviderErrorKind::ReadError {
@@ -1096,7 +1097,6 @@ impl ProviderError {
         )
     }
 
-    /// Convert an IO error to a ProviderError with path and location
     pub fn from_io_with_path(err: std::io::Error, path: impl Into<String>, loc: Loc) -> Self {
         ProviderError::new(
             ProviderErrorKind::ReadError {
@@ -1109,12 +1109,10 @@ impl ProviderError {
 }
 
 impl CompileError {
-    /// Convert a Polars error to a CompileError with explicit location
     pub fn from_polars(err: polars::error::PolarsError, loc: Loc) -> Self {
         CompileError::Provider(ProviderError::from_polars(err, loc))
     }
 
-    /// Convert an IO error to a CompileError with explicit location
     pub fn from_io(err: std::io::Error, loc: Loc) -> Self {
         CompileError::Provider(ProviderError::from_io(err, loc))
     }

@@ -11,6 +11,9 @@ pub enum TestSuiteError {
     #[error("Failed to compile program")]
     SingleCompilationFailure(#[from] fossil_lang::error::CompileError),
 
+    #[error("Runtime evaluation failed")]
+    Evaluation(#[from] fossil_lang::error::EvalError),
+
     #[error("Failed to read file")]
     IO(#[from] std::io::Error),
 

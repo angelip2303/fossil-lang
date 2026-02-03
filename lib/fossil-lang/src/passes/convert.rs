@@ -157,11 +157,38 @@ impl AstToIrConverter {
             }
 
             ast::ExprKind::Pipe { lhs, rhs } => {
+                // Desugar pipe immediately: lhs |> rhs  →  rhs(lhs)
                 let ir_lhs = self.convert_expr(ast, *lhs);
                 let ir_rhs = self.convert_expr(ast, *rhs);
-                ExprKind::Pipe {
-                    lhs: ir_lhs,
-                    rhs: ir_rhs,
+
+                // Check if rhs is already an application
+                let rhs_expr = ast.exprs.get(*rhs);
+                match &rhs_expr.kind {
+                    ast::ExprKind::Application { callee, args } => {
+                        // rhs is already f(args...), so result is f(lhs, args...)
+                        let ir_callee = self.convert_expr(ast, *callee);
+                        let mut new_args = vec![Argument::Positional(ir_lhs)];
+                        new_args.extend(args.iter().map(|arg| match arg {
+                            ast::Argument::Positional(e) => {
+                                Argument::Positional(self.convert_expr(ast, *e))
+                            }
+                            ast::Argument::Named { name, value } => Argument::Named {
+                                name: *name,
+                                value: self.convert_expr(ast, *value),
+                            },
+                        }));
+                        ExprKind::Application {
+                            callee: ir_callee,
+                            args: new_args,
+                        }
+                    }
+                    _ => {
+                        // rhs is just f, so result is f(lhs)
+                        ExprKind::Application {
+                            callee: ir_rhs,
+                            args: vec![Argument::Positional(ir_lhs)],
+                        }
+                    }
                 }
             }
 

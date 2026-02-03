@@ -336,26 +336,6 @@ impl TypeChecker {
                 let ty = self.ir.string_type();
                 Ok((subst, ty))
             }
-
-            ExprKind::Pipe { lhs, rhs } => {
-                // Pipe should have been desugared during resolution
-                // But if it reaches here, we can handle it:
-                // lhs |> rhs  desugars to  rhs(lhs)
-                let (s1, left_ty) = self.infer(*lhs)?;
-                let (s2, right_ty) = self.infer(*rhs)?;
-                let subst = s1.compose(&s2, &mut self.ir);
-
-                // Create fresh return type
-                let ret_ty = self.fresh_type_var(loc);
-
-                // Expected: right should be a function taking left's type
-                let expected_fn = self.ir.fn_type(vec![left_ty], ret_ty);
-                let s3 = self.unify(right_ty, expected_fn, loc)?;
-                let subst = subst.compose(&s3, &mut self.ir);
-
-                let final_ret = subst.apply(ret_ty, &mut self.ir);
-                Ok((subst, final_ret))
-            }
         };
 
         // Cache the result

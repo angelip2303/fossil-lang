@@ -339,17 +339,32 @@ where
             });
 
         // Function with optional leading attributes: #[rdf(...)] fn(r) -> ...
+        // Validates that there is no space between 'fn' and '('
         let function = parse_attribute(ctx)
             .repeated()
             .collect::<Vec<_>>()
-            .then(just(Token::Func))
+            .then(just(Token::Func).map_with(|_, e| e.span()))
+            .then(just(Token::LParen).map_with(|_, e| e.span()))
+            .validate(
+                |((attrs, fn_span), paren_span): ((Vec<Attribute>, SimpleSpan), SimpleSpan),
+                 _,
+                 emitter| {
+                    if fn_span.end != paren_span.start {
+                        emitter.emit(Rich::custom(
+                            paren_span,
+                            "space between 'fn' and '(' is not allowed",
+                        ));
+                    }
+                    (attrs, ())
+                },
+            )
             .then(
                 parse_param(ctx, expr.clone())
                     .separated_by(just(Token::Comma))
                     .allow_trailing()
-                    .collect()
-                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+                    .collect(),
             )
+            .then_ignore(just(Token::RParen))
             .then_ignore(just(Token::Arrow))
             .then(expr.clone()) // Body is just any expression (including blocks!)
             .map_with(|(((attrs, _), params), body), e| {

@@ -1,21 +1,15 @@
-//! IR Runtime Evaluator
-//!
-//! This module provides runtime evaluation of IR (Intermediate Representation) expressions.
-//! It enables stdlib functions to execute user-provided lambdas and evaluate field access.
-
 use std::rc::Rc;
 
 use polars::prelude::*;
 
 use crate::ast::Loc;
 use crate::context::{DefId, Symbol};
-use crate::error::{CompileError, RuntimeError};
+use crate::error::{EvalError, RuntimeError};
 use crate::ir::{Argument, ExprId, ExprKind, Ident, Ir, StmtId, StmtKind, TypeKind, TypeRef};
 use crate::passes::GlobalContext;
 use crate::runtime::value::Value;
 use crate::traits::function::RuntimeContext;
 
-// Re-export Environment for convenience
 pub use crate::runtime::value::Environment as IrEnvironment;
 
 /// Maximum call stack depth to prevent stack overflow
@@ -36,11 +30,6 @@ pub struct CallStack {
 }
 
 impl CallStack {
-    /// Create a new empty call stack
-    pub fn new() -> Self {
-        Self { frames: Vec::new() }
-    }
-
     /// Push a new stack frame
     pub fn push(&mut self, frame: StackFrame) {
         self.frames.push(frame);
@@ -89,32 +78,20 @@ impl CallStack {
     }
 }
 
-/// IR Expression Evaluator
-///
-/// Evaluates typed IR expressions at runtime. This is used by stdlib functions
-/// to execute user-provided lambdas and evaluate field access on runtime values.
 pub struct IrEvaluator<'a> {
-    /// Reference to the IR being evaluated
     ir: &'a Ir,
-
-    /// Reference to global context for function lookup
     gcx: &'a GlobalContext,
-
-    /// Current environment for variable bindings
     env: IrEnvironment,
-
-    /// Call stack for error reporting and recursion tracking
     call_stack: CallStack,
 }
 
 impl<'a> IrEvaluator<'a> {
-    /// Create a new evaluator with the given context and environment
     pub fn new(ir: &'a Ir, gcx: &'a GlobalContext, env: IrEnvironment) -> Self {
         Self {
             ir,
             gcx,
             env,
-            call_stack: CallStack::new(),
+            call_stack: Default::default(),
         }
     }
 
@@ -127,13 +104,12 @@ impl<'a> IrEvaluator<'a> {
     }
 
     /// Evaluate an expression and return its value
-    pub fn eval(&mut self, expr_id: ExprId) -> Result<Value, CompileError> {
+    pub fn eval(&mut self, expr_id: ExprId) -> Result<Value, EvalError> {
         let expr = self.ir.exprs.get(expr_id);
 
         match &expr.kind {
             ExprKind::Literal(literal) => {
                 use crate::ir::Literal;
-                // All literals become Polars expressions
                 Ok(Value::Expr(match literal {
                     Literal::Integer(i) => lit(*i),
                     Literal::String(s) => {
@@ -164,22 +140,34 @@ impl<'a> IrEvaluator<'a> {
                     return Ok(val.clone());
                 }
 
-                // Otherwise, it's a function or module binding
                 use crate::context::DefKind;
                 match &def.kind {
-                    DefKind::Func(Some(func)) => Ok(Value::BuiltinFunction(def_id, func.clone())),
-                    DefKind::Func(None) => {
-                        // Record constructor - return a special value that represents the constructor
-                        Ok(Value::RecordConstructor(def_id))
-                    }
-                    DefKind::Let => {
-                        // Local variable not in environment - error
+                    DefKind::Func(func) => Ok(Value::BuiltinFunction(def_id, func.clone())),
+                    DefKind::RecordConstructor => Ok(Value::RecordConstructor(def_id)),
+                    DefKind::Let | DefKind::Const => {
                         Err(self.make_error(format!(
-                            "Variable {} not found in environment",
+                            "Variable '{}' not found in environment",
                             self.gcx.interner.resolve(def.name)
                         )))
                     }
-                    _ => Err(self.make_error("Invalid identifier reference")),
+                    DefKind::Type => {
+                        Err(self.make_error(format!(
+                            "Type '{}' cannot be used as a value",
+                            self.gcx.interner.resolve(def.name)
+                        )))
+                    }
+                    DefKind::Mod { .. } => {
+                        Err(self.make_error(format!(
+                            "Module '{}' cannot be used as a value",
+                            self.gcx.interner.resolve(def.name)
+                        )))
+                    }
+                    DefKind::Provider(_) => {
+                        Err(self.make_error(format!(
+                            "Provider '{}' cannot be used as a value",
+                            self.gcx.interner.resolve(def.name)
+                        )))
+                    }
                 }
             }
 
@@ -213,11 +201,6 @@ impl<'a> IrEvaluator<'a> {
             ExprKind::StringInterpolation { parts, exprs } => {
                 self.eval_string_interpolation(parts, exprs)
             }
-
-            ExprKind::Pipe { .. } => {
-                // Pipe should have been desugared during resolution
-                Err(self.make_error("Pipe expression should be desugared before evaluation"))
-            }
         }
     }
 
@@ -229,7 +212,7 @@ impl<'a> IrEvaluator<'a> {
         &mut self,
         parts: &[Symbol],
         exprs: &[ExprId],
-    ) -> Result<Value, CompileError> {
+    ) -> Result<Value, EvalError> {
         let mut concat_parts: Vec<Expr> = Vec::new();
 
         for (i, part) in parts.iter().enumerate() {
@@ -267,8 +250,8 @@ impl<'a> IrEvaluator<'a> {
         type_ident: &Ident,
         fields: &[(Symbol, ExprId)],
         meta_fields: &[(Symbol, ExprId)],
-    ) -> Result<Value, CompileError> {
-        use crate::runtime::value::{MetaFields, RecordsPlan, SourceDescriptor};
+    ) -> Result<Value, EvalError> {
+        use crate::runtime::value::{MetaFields, Plan};
 
         // Get the DefId from the resolved type identifier
         let type_def_id = match type_ident {
@@ -292,10 +275,10 @@ impl<'a> IrEvaluator<'a> {
             .collect();
 
         if fields.is_empty() {
-            let mut plan = RecordsPlan::empty();
+            let mut plan = Plan::empty(Schema::default());
             plan.type_def_id = type_def_id;
             plan.meta_fields = evaluated_meta_fields;
-            return Ok(Value::Records(plan));
+            return Ok(Value::Plan(plan));
         }
 
         // Build select expressions from all fields
@@ -309,80 +292,62 @@ impl<'a> IrEvaluator<'a> {
                     _ => Ok(lit(NULL).alias(name_str)),
                 }
             })
-            .collect::<Result<Vec<_>, CompileError>>()?;
+            .collect::<Result<Vec<_>, EvalError>>()?;
 
         // Build schema from expressions
         let schema = build_schema_from_exprs(&select_exprs);
 
         // Store as pending transformation with type info and meta-fields
-        Ok(Value::Records(RecordsPlan {
-            source: SourceDescriptor::Pending { select_exprs },
+        Ok(Value::Plan(Plan {
+            source: None,
             transforms: Vec::new(),
             type_def_id,
             schema: std::sync::Arc::new(schema),
             meta_fields: evaluated_meta_fields,
+            outputs: Vec::new(),
+            pending_exprs: Some(select_exprs),
         }))
     }
 
     /// Evaluate a list expression
     ///
-    /// Lists of records get concatenated lazily.
-    /// Lists of primitives (Expr) are not typical in this DSL.
-    fn eval_list(&mut self, items: &[ExprId]) -> Result<Value, CompileError> {
-        use crate::runtime::value::{RecordsPlan, SourceDescriptor};
+    /// Lists of primitives evaluate to Polars list expressions.
+    /// Lists of records/plans are not supported - use type providers.
+    fn eval_list(&mut self, items: &[ExprId]) -> Result<Value, EvalError> {
+        use polars::prelude::concat_list;
 
         if items.is_empty() {
-            return Ok(Value::Records(RecordsPlan::empty()));
+            // Empty list → empty Polars list literal
+            return Ok(Value::Expr(lit(polars::prelude::Series::new_empty(
+                PlSmallStr::EMPTY,
+                &DataType::Null,
+            ))));
         }
 
-        let values: Vec<Value> = items
-            .iter()
-            .map(|item| self.eval(*item))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut exprs = Vec::with_capacity(items.len());
 
-        match &values[0] {
-            Value::Records(_) => {
-                // Lazily concatenate all record plans
-                let plans: Vec<_> = values
-                    .into_iter()
-                    .map(|v| match v {
-                        Value::Records(plan) => Box::new(plan),
-                        _ => unreachable!("Type checker ensures homogeneous lists"),
-                    })
-                    .collect();
-
-                // Get schema from first plan (all should have same schema)
-                let schema = plans
-                    .first()
-                    .map(|p| p.schema.as_ref().clone())
-                    .unwrap_or_default();
-
-                // Preserve metadata from first plan
-                let type_def_id = plans.first().and_then(|p| p.type_def_id);
-                let meta_fields = plans.first().map(|p| p.meta_fields.clone()).unwrap_or_default();
-
-                // Create lazy concat source - NO materialization!
-                let result_plan = RecordsPlan {
-                    source: SourceDescriptor::Concat(plans),
-                    transforms: Vec::new(),
-                    type_def_id,
-                    schema: std::sync::Arc::new(schema),
-                    meta_fields,
-                };
-
-                Ok(Value::Records(result_plan))
-            }
-
-            // Lists of primitives are not typical in this DataFrame-based DSL
-            // The type system should guide users toward Records
-            _ => {
-                Err(self.make_error("Lists must contain records. Use type providers to load data."))
+        for item in items {
+            match self.eval(*item)? {
+                Value::Expr(e) => exprs.push(e),
+                Value::Plan(_) => {
+                    return Err(self.make_error(
+                        "Lists of records are not supported. Use type providers to load data.",
+                    ));
+                }
+                _ => {
+                    return Err(self.make_error("Invalid list element"));
+                }
             }
         }
+
+        // Create a Polars list expression from the elements
+        Ok(Value::Expr(concat_list(exprs).map_err(|e| {
+            self.make_error(&format!("Failed to create list expression: {}", e))
+        })?))
     }
 
     /// Check if we've exceeded the maximum recursion depth
-    fn check_recursion_depth(&self) -> Result<(), CompileError> {
+    fn check_recursion_depth(&self) -> Result<(), EvalError> {
         if self.call_stack.depth() >= MAX_CALL_DEPTH {
             Err(self.make_error_with_stack(format!(
                 "Stack overflow: maximum recursion depth ({}) exceeded",
@@ -398,7 +363,7 @@ impl<'a> IrEvaluator<'a> {
         &mut self,
         callee: ExprId,
         args: &[Argument],
-    ) -> Result<Value, CompileError> {
+    ) -> Result<Value, EvalError> {
         // Check recursion depth before proceeding
         self.check_recursion_depth()?;
 
@@ -487,7 +452,14 @@ impl<'a> IrEvaluator<'a> {
                     }
                 }
 
-                let result = func.call(arg_values, &ctx);
+                let result = func.call(arg_values, &ctx).map_err(|e| match e {
+                    crate::error::CompileError::Runtime(r) => EvalError::Runtime(r),
+                    crate::error::CompileError::Provider(p) => EvalError::Provider(p),
+                    other => EvalError::Runtime(RuntimeError::evaluation(
+                        other.to_string(),
+                        Loc::generated(),
+                    )),
+                });
 
                 // Pop stack frame
                 self.call_stack.pop();
@@ -496,7 +468,7 @@ impl<'a> IrEvaluator<'a> {
             }
 
             Value::RecordConstructor(ctor_def_id) => {
-                use crate::runtime::value::RecordsPlan;
+                use crate::runtime::value::Plan;
 
                 // Get the constructor's definition to find the parent (type) DefId
                 let ctor_def = self.gcx.definitions.get(ctor_def_id);
@@ -533,7 +505,7 @@ impl<'a> IrEvaluator<'a> {
                 let schema = build_schema_from_exprs(&select_exprs);
 
                 // Store expressions in the plan - they'll be applied to source by List::map
-                Ok(Value::Records(RecordsPlan::from_exprs(
+                Ok(Value::Plan(Plan::pending(
                     select_exprs,
                     type_def_id,
                     schema,
@@ -548,12 +520,12 @@ impl<'a> IrEvaluator<'a> {
     ///
     /// Returns Value::Expr(col("field")) for lazy column access.
     /// The actual selection happens at sink time (e.g., Rdf::serialize).
-    fn eval_field_access(&mut self, expr: ExprId, field: Symbol) -> Result<Value, CompileError> {
+    fn eval_field_access(&mut self, expr: ExprId, field: Symbol) -> Result<Value, EvalError> {
         let value = self.eval(expr)?;
         let field_name = self.gcx.interner.resolve(field);
 
         match value {
-            Value::Records(plan) => {
+            Value::Plan(plan) => {
                 // Validate field exists in schema
                 if !plan.schema.contains(field_name) {
                     return Err(self.make_error(format!(
@@ -571,19 +543,14 @@ impl<'a> IrEvaluator<'a> {
     }
 
     /// Evaluate a block of statements
-    fn eval_block(&mut self, stmts: &[StmtId]) -> Result<Value, CompileError> {
+    fn eval_block(&mut self, stmts: &[StmtId]) -> Result<Value, EvalError> {
         let mut last_value = Value::Unit;
 
         for stmt_id in stmts {
             let stmt = self.ir.stmts.get(*stmt_id);
 
             match &stmt.kind {
-                StmtKind::Let { name, value, .. } => {
-                    let val = self.eval(*value)?;
-                    self.env.bind(*name, val);
-                }
-
-                StmtKind::Const { name, value, .. } => {
+                StmtKind::Let { name, value, .. } | StmtKind::Const { name, value, .. } => {
                     let val = self.eval(*value)?;
                     self.env.bind(*name, val);
                 }
@@ -592,9 +559,7 @@ impl<'a> IrEvaluator<'a> {
                     last_value = self.eval(*expr_id)?;
                 }
 
-                StmtKind::Type { .. } => {
-                    // Type declarations are compile time only, skip at runtime
-                }
+                StmtKind::Type { .. } => {}
             }
         }
 
@@ -602,7 +567,7 @@ impl<'a> IrEvaluator<'a> {
     }
 
     /// Get the field names for a record type by its name
-    fn get_record_field_names(&self, type_name: Symbol) -> Result<Vec<Symbol>, CompileError> {
+    fn get_record_field_names(&self, type_name: Symbol) -> Result<Vec<Symbol>, EvalError> {
         // Find the type definition in the IR root statements
         let type_def = self.ir.root.iter().find_map(|stmt_id| {
             let stmt = self.ir.stmts.get(*stmt_id);
@@ -631,13 +596,13 @@ impl<'a> IrEvaluator<'a> {
     }
 
     /// Helper to create runtime errors
-    fn make_error(&self, msg: impl Into<String>) -> CompileError {
+    fn make_error(&self, msg: impl Into<String>) -> EvalError {
         self.make_error_with_stack(msg)
     }
 
     /// Create a runtime error with the current call stack
-    fn make_error_with_stack(&self, msg: impl Into<String>) -> CompileError {
-        CompileError::from(RuntimeError::evaluation(msg.into(), Loc::generated()))
+    fn make_error_with_stack(&self, msg: impl Into<String>) -> EvalError {
+        EvalError::Runtime(RuntimeError::evaluation(msg.into(), Loc::generated()))
     }
 }
 

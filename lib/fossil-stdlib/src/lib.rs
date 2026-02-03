@@ -25,6 +25,9 @@ use fossil_lang::passes::GlobalContext;
 /// fossil_stdlib::init(&mut gcx);
 /// ```
 pub fn init(gcx: &mut GlobalContext) {
+    // Register Option<T> type constructor (arity = 1)
+    gcx.register_type_constructor("Option", 1);
+
     // Register RDF serialization functions
     gcx.register_function("Rdf", "serialize", RdfSerializeFunction);
 

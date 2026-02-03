@@ -4,20 +4,9 @@ use crate::ir::{Ir, Polytype, TypeVar};
 use crate::passes::GlobalContext;
 use crate::runtime::value::Value;
 
-/// Runtime context available to functions during execution
-///
-/// Provides access to compile-time information (types, metadata) during
-/// runtime function execution. This allows builtin functions to capture
-/// and use type attributes, metadata, and other compile-time information.
 pub struct RuntimeContext<'a> {
-    /// Global context with interner, definitions, and type metadata
     pub gcx: &'a GlobalContext,
-
-    /// IR with complete type information
     pub ir: &'a Ir,
-
-    /// DefId of the type currently being constructed (if applicable)
-    /// Used by constructor functions to access type metadata
     pub current_type: Option<DefId>,
 }
 

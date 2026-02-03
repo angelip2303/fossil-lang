@@ -4,7 +4,7 @@ use fossil_lang::compiler::{Compiler, CompilerInput};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::executor::IrExecutor;
 
-const PROGRAM: &str = "./lib/fossil-stdlib/examples/shex-provider/shex-provider.fossil";
+const PROGRAM: &str = "./lib/fossil-stdlib/examples/end-to-end/mapping.fossil";
 
 pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut gcx = GlobalContext::default();
@@ -13,7 +13,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     fossil_stdlib::init(&mut gcx);
 
     let compiler = Compiler::with_context(gcx);
-    let program = compiler.compile(CompilerInput::File(PathBuf::from(PROGRAM)))?;
-    let _ = IrExecutor::execute(program)?;
+    let result = compiler.compile(CompilerInput::File(PathBuf::from(PROGRAM)))?;
+    let _ = IrExecutor::execute(result.program)?;
     Ok(())
 }

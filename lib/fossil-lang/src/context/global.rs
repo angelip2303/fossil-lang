@@ -9,8 +9,6 @@ use crate::context::{
     DefId, DefKind, Definitions, Interner, Kind, TypeConstructorInfo, TypeMetadata,
 };
 
-// NOTE: Type constructors (TypeKind::App) are kept for future generic types like Option<T>, Result<T,E>.
-// List uses TypeKind::List directly instead of going through the type constructor system.
 use crate::traits::function::FunctionImpl;
 use crate::traits::provider::TypeProviderImpl;
 
@@ -140,7 +138,7 @@ impl GlobalContext {
         self.definitions.insert(
             Some(module_id),
             function_symbol,
-            DefKind::Func(Some(Arc::new(function))),
+            DefKind::Func(Arc::new(function)),
         );
     }
 
@@ -167,7 +165,7 @@ impl GlobalContext {
         self.definitions.insert(
             None,
             function_symbol,
-            DefKind::Func(Some(Arc::new(function))),
+            DefKind::Func(Arc::new(function)),
         );
     }
 
@@ -195,7 +193,7 @@ impl GlobalContext {
         let def_id = self.definitions.insert(
             None,
             function_symbol,
-            DefKind::Func(Some(Arc::new(function))),
+            DefKind::Func(Arc::new(function)),
         );
         self.variadic_functions.insert(def_id);
     }

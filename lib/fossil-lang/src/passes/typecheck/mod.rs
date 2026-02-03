@@ -66,7 +66,7 @@ impl TypeChecker {
             let def_id = DefId::new(def_id as u32);
             let def = self.gcx.definitions.get(def_id);
 
-            if let DefKind::Func(Some(func_impl)) = &def.kind {
+            if let DefKind::Func(func_impl) = &def.kind {
                 let mut next_var = || self.tvg.fresh();
                 let polytype = func_impl.signature(&mut self.ir, &mut next_var, &self.gcx);
                 self.env.insert(def_id, polytype);
@@ -102,7 +102,7 @@ impl TypeChecker {
                     .gcx
                     .definitions
                     .iter()
-                    .find(|def| def.name == type_name && matches!(def.kind, DefKind::Func(None)))
+                    .find(|def| def.name == type_name && matches!(def.kind, DefKind::RecordConstructor))
                     .map(|def| def.id());
 
                 if let Some(ctor_def_id) = ctor_def_id {

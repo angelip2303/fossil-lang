@@ -2,15 +2,24 @@ use std::collections::HashMap;
 
 use crate::ast::ast::*;
 use crate::context::{DefKind, Symbol};
-use crate::error::{CompileError, CompileErrors, ResolutionError};
+use crate::error::{CompileError, CompileErrors, CompileWarnings, ResolutionError};
 use crate::passes::GlobalContext;
 use crate::traits::provider::ModuleSpec;
+
+/// Result of provider expansion including warnings
+pub struct ExpandResult {
+    pub ast: Ast,
+    pub gcx: GlobalContext,
+    pub warnings: CompileWarnings,
+}
 
 pub struct ProviderExpander {
     ast: Ast,
     gcx: GlobalContext,
     /// Const bindings collected from the AST for interpolation in provider args
     const_values: HashMap<Symbol, String>,
+    /// Warnings collected during expansion
+    warnings: CompileWarnings,
 }
 
 impl ProviderExpander {
@@ -19,6 +28,7 @@ impl ProviderExpander {
             ast,
             gcx,
             const_values: HashMap::new(),
+            warnings: CompileWarnings::new(),
         }
     }
 
@@ -77,7 +87,7 @@ impl ProviderExpander {
     ///
     /// Type providers execute during compilation and generate AST types
     /// and optional modules (F# style).
-    pub fn expand(mut self) -> Result<(Ast, GlobalContext), CompileErrors> {
+    pub fn expand(mut self) -> Result<ExpandResult, CompileErrors> {
         // Collect const bindings first so they can be used in provider args
         self.collect_const_bindings();
         // Collect all type alias statements with provider invocations
@@ -111,7 +121,11 @@ impl ProviderExpander {
             return Err(errors);
         }
 
-        Ok((self.ast, self.gcx))
+        Ok(ExpandResult {
+            ast: self.ast,
+            gcx: self.gcx,
+            warnings: self.warnings,
+        })
     }
 
     /// Expand a type alias statement with a provider
@@ -202,6 +216,9 @@ impl ProviderExpander {
             loc,
         )?;
 
+        // Collect warnings from provider
+        self.warnings.extend(provider_output.warnings);
+
         // Replace the Provider type node with the generated AST type
         // This is like syntax sugar: csv<"file.csv"> → { name: string, age: int, ... }
         let generated_type = self.ast.types.get(provider_output.generated_type);
@@ -243,33 +260,8 @@ impl ProviderExpander {
             self.gcx.definitions.insert(
                 Some(module_def_id), // parent module
                 func_sym,
-                DefKind::Func(Some(func_def.implementation)),
+                DefKind::Func(func_def.implementation),
             );
-        }
-
-        // Register submodules recursively (for future extensibility)
-        for (submod_name, submod_spec) in spec.submodules {
-            let submod_sym = self.gcx.interner.intern(&submod_name);
-
-            // Create submodule with parent=module_def_id
-            let submod_def_id = self.gcx.definitions.insert(
-                Some(module_def_id),
-                submod_sym,
-                DefKind::Mod {
-                    file_path: None,
-                    is_inline: true,
-                },
-            );
-
-            // Register its functions with parent=submod_def_id
-            for func_def in submod_spec.functions {
-                let func_sym = self.gcx.interner.intern(&func_def.name);
-                self.gcx.definitions.insert(
-                    Some(submod_def_id),
-                    func_sym,
-                    DefKind::Func(Some(func_def.implementation)),
-                );
-            }
         }
 
         Ok(())

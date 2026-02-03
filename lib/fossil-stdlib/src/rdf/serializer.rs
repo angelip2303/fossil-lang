@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::BufWriter;
 use std::path::PathBuf;
 
 use oxrdf::{BlankNode, GraphNameRef, Literal, NamedNode, NamedOrBlankNode, QuadRef, Term};
@@ -9,7 +9,6 @@ use polars::prelude::*;
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const BNODE_PREFIX: &str = "_:";
 
-/// Parsed subject with pre-computed type for efficient iteration
 enum ParsedSubject {
     BlankNode(BlankNode),
     NamedNode(NamedNode),
@@ -31,7 +30,7 @@ fn clean_subject(s: &str) -> &str {
         .unwrap_or(s)
 }
 
-fn parse_subject_cleaned(s: &str) -> Result<ParsedSubject, PolarsError> {
+fn parse_subject(s: &str) -> Result<ParsedSubject, PolarsError> {
     if let Some(id) = s.strip_prefix(BNODE_PREFIX) {
         let bnode = BlankNode::new(id)
             .map_err(|_| PolarsError::ComputeError(format!("Invalid blank node: {s}").into()))?;
@@ -120,7 +119,7 @@ impl RdfBatchWriter {
         let parsed_subjects: Vec<ParsedSubject> = subject_strs
             .iter()
             .flatten()
-            .filter_map(|s| parse_subject_cleaned(clean_subject(s)).ok())
+            .filter_map(|s| parse_subject(clean_subject(s)).ok())
             .collect();
 
         // Stream rdf:type triples (if present)
@@ -190,220 +189,5 @@ impl RdfBatchWriter {
             .finish()
             .map_err(|_| PolarsError::ComputeError("Failed to finish RDF file".into()))?;
         Ok(())
-    }
-}
-
-// ============================================================================
-// COLUMNAR N-TRIPLES SERIALIZER
-// ============================================================================
-//
-// Fully columnar RDF serialization using Polars string operations.
-// No per-row function calls - everything is vectorized.
-
-use super::metadata::RdfTermType;
-
-/// Predicate column info for serialization
-pub struct PredicateColumn {
-    /// Predicate URI
-    pub uri: String,
-    /// Column name in DataFrame
-    pub column: String,
-    /// Term type for proper RDF formatting
-    pub term_type: RdfTermType,
-}
-
-/// Columnar N-Triples writer
-///
-/// Uses Polars vectorized string operations for maximum throughput.
-/// All formatting happens in columnar operations, then writes in bulk.
-///
-/// Supports proper XSD datatypes for typed literals.
-pub struct ColumnarNTriplesWriter {
-    writer: BufWriter<File>,
-}
-
-impl ColumnarNTriplesWriter {
-    pub fn new(path: PathBuf) -> std::io::Result<Self> {
-        let file = File::create(path)?;
-        let writer = BufWriter::with_capacity(512 * 1024, file); // 512KB buffer
-        Ok(Self { writer })
-    }
-
-    /// Write a batch with explicit predicate info (includes datatypes)
-    ///
-    /// This is the preferred method when you have schema information.
-    pub fn write_batch_typed(
-        &mut self,
-        batch: &DataFrame,
-        predicates: &[PredicateColumn],
-    ) -> PolarsResult<()> {
-        if batch.height() == 0 {
-            return Ok(());
-        }
-
-        let subjects = batch.column("_subject")?.str()?;
-
-        // Write rdf:type triples if present
-        if let Ok(type_col) = batch.column("_type") {
-            let types = type_col.cast(&DataType::String)?;
-            let types_str = types.str()?;
-            self.write_column_vectorized(subjects, RDF_TYPE, types_str, &RdfTermType::Uri)?;
-        }
-
-        // Write each predicate column with proper datatype
-        for pred in predicates {
-            if let Ok(col) = batch.column(pred.column.as_str()) {
-                let objects = col.cast(&DataType::String)?;
-                let objects_str = objects.str()?;
-                self.write_column_vectorized(subjects, &pred.uri, objects_str, &pred.term_type)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Write a batch inferring types from column data types
-    ///
-    /// Simpler API when predicate URIs are column names.
-    pub fn write_batch(&mut self, batch: &DataFrame) -> PolarsResult<()> {
-        if batch.height() == 0 {
-            return Ok(());
-        }
-
-        let subjects = batch.column("_subject")?.str()?;
-
-        // Write rdf:type triples if present
-        if let Ok(type_col) = batch.column("_type") {
-            let types = type_col.cast(&DataType::String)?;
-            let types_str = types.str()?;
-            self.write_column_vectorized(subjects, RDF_TYPE, types_str, &RdfTermType::Uri)?;
-        }
-
-        // Write each predicate column, inferring type from Polars dtype
-        for col_name in batch.get_column_names() {
-            let name = col_name.as_str();
-            if name == "_subject" || name == "_type" {
-                continue;
-            }
-
-            let column = batch.column(col_name)?;
-            let term_type = polars_dtype_to_rdf_type(column.dtype());
-
-            let objects = column.cast(&DataType::String)?;
-            let objects_str = objects.str()?;
-            self.write_column_vectorized(subjects, name, objects_str, &term_type)?;
-        }
-
-        Ok(())
-    }
-
-    /// Write all triples for a single predicate column using vectorized ops
-    fn write_column_vectorized(
-        &mut self,
-        subjects: &StringChunked,
-        predicate: &str,
-        objects: &StringChunked,
-        term_type: &RdfTermType,
-    ) -> PolarsResult<()> {
-        // Build DataFrame with subject and object
-        let df = DataFrame::new(vec![
-            subjects.clone().into_series().with_name("s".into()).into(),
-            objects.clone().into_series().with_name("o".into()).into(),
-        ])?;
-
-        // Filter nulls using columnar operation
-        let df = df
-            .lazy()
-            .filter(col("s").is_not_null().and(col("o").is_not_null()))
-            .collect()?;
-
-        if df.height() == 0 {
-            return Ok(());
-        }
-
-        // Build the object formatting expression based on term type
-        let object_expr = match term_type {
-            RdfTermType::Uri => {
-                // URI: <uri> or _:bnode
-                when(col("o").str().starts_with(lit("_:")))
-                    .then(col("o"))
-                    .otherwise(concat_str([lit("<"), col("o"), lit(">")], "", true))
-            }
-            _ => {
-                // Literal with optional datatype suffix
-                let escaped = col("o")
-                    .str()
-                    .replace_all(lit("\\"), lit("\\\\"), true)
-                    .str()
-                    .replace_all(lit("\""), lit("\\\""), true)
-                    .str()
-                    .replace_all(lit("\n"), lit("\\n"), true)
-                    .str()
-                    .replace_all(lit("\r"), lit("\\r"), true)
-                    .str()
-                    .replace_all(lit("\t"), lit("\\t"), true);
-
-                let suffix = term_type.xsd_suffix().unwrap_or("");
-                concat_str([lit("\""), escaped, lit("\""), lit(suffix)], "", true)
-            }
-        };
-
-        // Format complete N-Triple line (columnar)
-        let formatted = df
-            .lazy()
-            .select([concat_str(
-                [
-                    // Subject: <uri> or _:bnode
-                    when(col("s").str().starts_with(lit("_:")))
-                        .then(col("s"))
-                        .otherwise(concat_str([lit("<"), col("s"), lit(">")], "", true)),
-                    lit(" <"),
-                    lit(predicate),
-                    lit("> "),
-                    object_expr,
-                    lit(" .\n"),
-                ],
-                "",
-                true,
-            )
-            .alias("triple")])
-            .collect()?;
-
-        // Write all formatted triples at once
-        let triples = formatted.column("triple")?.str()?;
-        for triple in triples.iter().flatten() {
-            self.writer
-                .write_all(triple.as_bytes())
-                .map_err(|e| PolarsError::ComputeError(format!("Write failed: {}", e).into()))?;
-        }
-
-        Ok(())
-    }
-
-    pub fn finish(mut self) -> PolarsResult<()> {
-        self.writer
-            .flush()
-            .map_err(|e| PolarsError::ComputeError(format!("Flush failed: {}", e).into()))?;
-        Ok(())
-    }
-}
-
-/// Map Polars data type to RDF term type
-fn polars_dtype_to_rdf_type(dtype: &DataType) -> RdfTermType {
-    match dtype {
-        DataType::Boolean => RdfTermType::Boolean,
-        DataType::Int8
-        | DataType::Int16
-        | DataType::Int32
-        | DataType::Int64
-        | DataType::UInt8
-        | DataType::UInt16
-        | DataType::UInt32
-        | DataType::UInt64 => RdfTermType::Integer,
-        DataType::Float32 | DataType::Float64 => RdfTermType::Double,
-        DataType::Date => RdfTermType::Date,
-        DataType::Datetime(_, _) => RdfTermType::DateTime,
-        DataType::String | DataType::Categorical(_, _) => RdfTermType::String,
-        _ => RdfTermType::String, // Default to string for unknown types
     }
 }

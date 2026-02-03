@@ -19,7 +19,6 @@ pub struct Stmt {
     pub kind: StmtKind,
 }
 
-/// A declaration in the language
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StmtKind {
     /// A value binding `let name = expr` or `let name: Type = expr`
@@ -57,7 +56,6 @@ pub struct Expr {
 /// - `@graph`: Named graph (interpreted by RDF as graph URI)
 pub type RecordMetadata = Vec<(Symbol, ExprId)>;
 
-/// An expression in the language
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExprKind {
     /// A local or qualified identifier (unresolved)
@@ -71,11 +69,8 @@ pub enum ExprKind {
     /// A named record construction `TypeName { @id = ..., field = value, ... }`
     /// Supports @id and @graph metadata fields
     NamedRecordConstruction {
-        /// Path to the type (e.g., Person, mod::Person)
         type_path: Path,
-        /// Named fields (field_name, value_expr)
         fields: Vec<(Symbol, ExprId)>,
-        /// Metadata fields (@id, @graph)
         metadata: RecordMetadata,
     },
     /// A function definition `fn (param1, param2, ...) -> expr`
@@ -83,7 +78,6 @@ pub enum ExprKind {
     Function {
         params: Vec<Param>,
         body: ExprId,
-        /// Optional attributes on the function (e.g., for projections)
         attrs: Vec<Attribute>,
     },
     /// A function application `callee(arg1, arg2, ...)` with positional and named arguments

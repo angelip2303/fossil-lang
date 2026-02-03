@@ -16,6 +16,7 @@ rust-version.workspace = true
 # external dependencies
 thiserror.workspace = true
 clap = { version = "4", features = ["derive"] }
+ariadne = "0.6.0"
 
 # internal dependencies
 fossil-lang = { workspace = true }

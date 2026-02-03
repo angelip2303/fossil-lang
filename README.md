@@ -1,6 +1,5 @@
-- [ ] ¿Qué pasa si un atributo type aparece junto con una shape que define rdfs:type también? Creo que lo que deberíamos de hacer es emitir un warning, indicando que se ignorará el del atributo type.
-
 - [ ] Explorar cómo manejar el tema de los duplicados
+
 - [ ] ¿Qué pasa si dos sujetos son iguales? Hay que tener en cuenta también el concepto de RML de rr:constant, que puede aparecer en un subjectMap, predicateMap y objectMap:
 @prefix rr: <http://www.w3.org/ns/r2rml#> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
@@ -29,10 +28,6 @@
   Lo que me preocupa de esto es que si para evitar serializar sujetos repetidos lo que hacemos es usar un HashSet por ejemplo, entonces en memoria estaríamos almacenando todos los sujetos, lo que podría ser un problema si tenemos muchos sujetos. No sé si es mejor tener una operación que sea distinct y dejar que polars por debajo sea el que lo maneje
 
 - [ ] Permitir el uso de PrefixMap o similar
-
-- [ ] Manejar el tipo opcional
-
-
 
 - [ ] Tenemos que pensar cómo manejamos casos en los que dos Records tengan el nombre de una columna igual y se haga join
 

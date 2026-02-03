@@ -15,37 +15,27 @@
 
 use std::collections::HashMap;
 
+use fossil_lang::ast::Loc;
 use fossil_lang::context::{Interner, Symbol, TypeMetadata};
+use fossil_lang::error::{CompileWarning, CompileWarnings};
 use fossil_macros::FromAttrs;
 
-// ============================================================================
-// RDF TERM TYPES
-// ============================================================================
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
-/// RDF term type for proper XSD datatype serialization
 #[derive(Debug, Clone, Default)]
 pub enum RdfTermType {
-    /// URI reference: `<http://example.org/thing>`
     Uri,
-    /// Plain literal (xsd:string): `"hello"`
     #[default]
     String,
-    /// Integer: `"42"^^<xsd:integer>`
     Integer,
-    /// Boolean: `"true"^^<xsd:boolean>`
     Boolean,
-    /// Decimal: `"3.14"^^<xsd:decimal>`
     Decimal,
-    /// Double: `"3.14E0"^^<xsd:double>`
     Double,
-    /// Date: `"2024-01-15"^^<xsd:date>`
     Date,
-    /// DateTime: `"2024-01-15T10:30:00"^^<xsd:dateTime>`
     DateTime,
 }
 
 impl RdfTermType {
-    /// XSD datatype suffix for N-Triples (None for plain strings)
     pub fn xsd_suffix(&self) -> Option<&'static str> {
         match self {
             RdfTermType::Uri => None,
@@ -58,62 +48,49 @@ impl RdfTermType {
             RdfTermType::DateTime => Some("^^<http://www.w3.org/2001/XMLSchema#dateTime>"),
         }
     }
-
-    /// Map Fossil primitive type name to RDF term type
-    pub fn from_fossil_type(type_name: &str) -> Self {
-        match type_name {
-            "int" | "i64" | "i32" => RdfTermType::Integer,
-            "bool" => RdfTermType::Boolean,
-            "float" | "f64" | "f32" => RdfTermType::Double,
-            "string" => RdfTermType::String,
-            _ => RdfTermType::String,
-        }
-    }
 }
 
-// ============================================================================
-// FIELD INFO
-// ============================================================================
-
-/// Complete RDF info for a field: predicate URI + XSD type
 #[derive(Debug, Clone)]
 pub struct RdfFieldInfo {
-    /// Predicate URI (from #[rdf(uri = "...")])
     pub uri: String,
-    /// XSD datatype for serialization
     pub term_type: RdfTermType,
 }
 
-// ============================================================================
-// ATTRIBUTE EXTRACTION (declarative via FromAttrs)
-// ============================================================================
-
-/// Type-level RDF attributes
 #[derive(Debug, Clone, FromAttrs)]
 pub struct RdfTypeAttrs {
     #[attr("rdf.type")]
     pub rdf_type: Option<String>,
 }
 
-/// Field-level RDF attributes
 #[derive(Debug, Clone, FromAttrs)]
 pub struct RdfFieldAttrs {
     #[attr("rdf.uri", field)]
     pub uri: Option<String>,
 }
 
-// ============================================================================
-// RDF METADATA
-// ============================================================================
+#[derive(Debug, Clone, Default)]
+pub struct RdfMetadataResult {
+    pub metadata: RdfMetadata,
+    pub warnings: CompileWarnings,
+}
 
-/// RDF metadata for a type
-///
-/// Contains rdf:type and per-field info (predicate URI + XSD type).
+impl RdfMetadataResult {
+    pub fn new(metadata: RdfMetadata) -> Self {
+        Self {
+            metadata,
+            warnings: CompileWarnings::new(),
+        }
+    }
+
+    pub fn with_warnings(mut self, warnings: CompileWarnings) -> Self {
+        self.warnings = warnings;
+        self
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RdfMetadata {
-    /// rdf:type URI (from #[rdf(type = "...")])
     pub rdf_type: Option<String>,
-    /// Per-field: predicate URI + term type
     pub fields: HashMap<Symbol, RdfFieldInfo>,
 }
 
@@ -127,10 +104,33 @@ impl RdfMetadata {
     /// Note: Field types default to String. Use `set_field_type` to override
     /// based on schema info, or let the serializer infer from Polars dtypes.
     pub fn from_type_metadata(type_metadata: &TypeMetadata, interner: &Interner) -> Option<Self> {
+        let result = Self::from_type_metadata_with_warnings(type_metadata, interner, None);
+        if result.metadata.has_metadata() {
+            Some(result.metadata)
+        } else {
+            None
+        }
+    }
+
+    /// Extract from TypeMetadata with conflict detection
+    ///
+    /// This version also checks for conflicts between #[rdf(type = "...")] attribute
+    /// and fields that have rdf:type as their predicate URI.
+    ///
+    /// # Arguments
+    /// * `type_metadata` - The type metadata to extract from
+    /// * `interner` - Symbol interner for string resolution
+    /// * `type_name` - Optional type name for warning messages
+    pub fn from_type_metadata_with_warnings(
+        type_metadata: &TypeMetadata,
+        interner: &Interner,
+        type_name: Option<&str>,
+    ) -> RdfMetadataResult {
         let type_attrs = RdfTypeAttrs::from_type_metadata(type_metadata, interner);
+        let mut warnings = CompileWarnings::new();
 
         let mut metadata = RdfMetadata {
-            rdf_type: type_attrs.rdf_type,
+            rdf_type: type_attrs.rdf_type.clone(),
             fields: HashMap::new(),
         };
 
@@ -138,6 +138,21 @@ impl RdfMetadata {
             let field_attrs = RdfFieldAttrs::from_field_metadata(field_metadata, interner);
 
             if let Some(uri) = field_attrs.uri {
+                // Check for rdf:type conflict
+                if uri == RDF_TYPE {
+                    if let Some(ref attr_type) = type_attrs.rdf_type {
+                        let field_name_str = interner.resolve(*field_name);
+                        let type_name_str = type_name.unwrap_or("<anonymous>");
+
+                        warnings.push(CompileWarning::rdf_type_conflict(
+                            type_name_str,
+                            attr_type,
+                            field_name_str,
+                            Loc::generated(),
+                        ));
+                    }
+                }
+
                 // Default to String, can be overridden or inferred later
                 metadata.fields.insert(
                     *field_name,
@@ -149,26 +164,19 @@ impl RdfMetadata {
             }
         }
 
-        if metadata.has_metadata() {
-            Some(metadata)
-        } else {
-            None
-        }
+        RdfMetadataResult { metadata, warnings }
     }
 
-    /// Set field type (for when schema info becomes available)
     pub fn set_field_type(&mut self, field: Symbol, term_type: RdfTermType) {
         if let Some(info) = self.fields.get_mut(&field) {
             info.term_type = term_type;
         }
     }
 
-    /// Get field info by name
     pub fn get_field(&self, field: Symbol) -> Option<&RdfFieldInfo> {
         self.fields.get(&field)
     }
 
-    /// Check if has any metadata
     pub fn has_metadata(&self) -> bool {
         self.rdf_type.is_some() || !self.fields.is_empty()
     }

@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use crate::ast::ast::{Ast, Literal, ProviderArgument, TypeId};
 use crate::ast::Loc;
+use crate::ast::ast::{Ast, Literal, ProviderArgument, TypeId};
 use crate::context::{Interner, Symbol};
-use crate::error::ProviderError;
+use crate::error::{CompileWarnings, ProviderError, ProviderErrorKind};
 use crate::traits::function::FunctionImpl;
 
 /// Output from a type provider (F# style)
@@ -15,56 +15,72 @@ use crate::traits::function::FunctionImpl;
 /// - Type: `{ id: int, name: string, age: int }`
 /// - Module: `People` with `People::load()` function
 pub struct ProviderOutput {
-    /// The generated AST type
     pub generated_type: TypeId,
-
-    /// Optional module specification
-    /// When Some, a module with this name will be created containing functions
     pub module_spec: Option<ModuleSpec>,
+    pub warnings: CompileWarnings,
 }
 
-/// Specification for a generated module
-///
-/// Describes the functions and submodules that should be created
-/// for a provider-generated module.
+impl ProviderOutput {
+    pub fn new(generated_type: TypeId) -> Self {
+        Self {
+            generated_type,
+            module_spec: None,
+            warnings: CompileWarnings::new(),
+        }
+    }
+
+    pub fn with_module(mut self, module_spec: ModuleSpec) -> Self {
+        self.module_spec = Some(module_spec);
+        self
+    }
+
+    pub fn with_warnings(mut self, warnings: CompileWarnings) -> Self {
+        self.warnings = warnings;
+        self
+    }
+}
+
 pub struct ModuleSpec {
-    /// Functions to register in the generated module
     pub functions: Vec<FunctionDef>,
-
-    /// Nested submodules (for future extensibility)
-    pub submodules: Vec<(String, ModuleSpec)>,
 }
 
-/// Definition of a function to be registered in a generated module
 pub struct FunctionDef {
-    /// Function name (e.g., "load", "save")
     pub name: String,
-
-    /// Rust implementation of the function
     pub implementation: Arc<dyn FunctionImpl>,
 }
 
-/// Information about a provider parameter
 #[derive(Debug, Clone)]
 pub struct ProviderParamInfo {
-    /// Parameter name
     pub name: &'static str,
-    /// Whether this parameter is required
     pub required: bool,
-    /// Default value if not provided (only for optional params)
     pub default: Option<Literal>,
 }
 
-/// Resolved provider arguments (name → value mapping)
 #[derive(Debug, Default)]
 pub struct ResolvedProviderArgs {
-    args: std::collections::HashMap<Symbol, Literal>,
+    /// Positional args stored as (param_index, literal)
+    positional: Vec<(usize, Literal)>,
+    /// Named args stored by symbol
+    named: std::collections::HashMap<Symbol, Literal>,
 }
 
 impl ResolvedProviderArgs {
-    /// Get a required string argument
-    pub fn get_string(&self, name: Symbol, interner: &Interner) -> Option<String> {
-        self.args.get(&name).and_then(|lit| {
+    /// Get the literal for a positional argument by index
+    pub fn get_positional(&self, index: usize) -> Option<&Literal> {
+        self.positional
+            .iter()
+            .find(|(i, _)| *i == index)
+            .map(|(_, lit)| lit)
+    }
+
+    /// Get the literal for a named argument by symbol
+    pub fn get_named(&self, name: Symbol) -> Option<&Literal> {
+        self.named.get(&name)
+    }
+
+    /// Get string from a named argument
+    pub fn get_named_string(&self, name: Symbol, interner: &Interner) -> Option<String> {
+        self.named.get(&name).and_then(|lit| {
             if let Literal::String(sym) = lit {
                 Some(interner.resolve(*sym).to_string())
             } else {
@@ -73,9 +89,9 @@ impl ResolvedProviderArgs {
         })
     }
 
-    /// Get an optional boolean argument
-    pub fn get_bool(&self, name: Symbol) -> Option<bool> {
-        self.args.get(&name).and_then(|lit| {
+    /// Get bool from a named argument
+    pub fn get_named_bool(&self, name: Symbol) -> Option<bool> {
+        self.named.get(&name).and_then(|lit| {
             if let Literal::Boolean(b) = lit {
                 Some(*b)
             } else {
@@ -84,15 +100,92 @@ impl ResolvedProviderArgs {
         })
     }
 
-    /// Check if an argument was provided
-    pub fn has(&self, name: Symbol) -> bool {
-        self.args.contains_key(&name)
+    /// Get string from a positional argument
+    pub fn get_positional_string(&self, index: usize, interner: &Interner) -> Option<String> {
+        self.get_positional(index).and_then(|lit| {
+            if let Literal::String(sym) = lit {
+                Some(interner.resolve(*sym).to_string())
+            } else {
+                None
+            }
+        })
+    }
+}
+
+/// Resolve provider arguments against parameter definitions
+///
+/// This function handles:
+/// - Positional arguments mapped to parameters in order
+/// - Named arguments matched by name
+/// - Default values for optional parameters
+/// - Validation of required parameters
+///
+/// # Arguments
+/// * `args` - The provider arguments from the AST
+/// * `param_info` - Parameter definitions from the provider
+/// * `interner` - Symbol interner for name resolution
+/// * `provider_name` - Provider name for error messages
+/// * `loc` - Source location for error reporting
+pub fn resolve_args(
+    args: &[ProviderArgument],
+    param_info: &[ProviderParamInfo],
+    interner: &Interner,
+    provider_name: &'static str,
+    loc: Loc,
+) -> Result<ResolvedProviderArgs, ProviderError> {
+    let mut resolved = ResolvedProviderArgs::default();
+
+    // Build a map of param name -> index for quick lookup
+    let param_name_to_index: std::collections::HashMap<&str, usize> = param_info
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.name, i))
+        .collect();
+
+    // Track which params have been filled (by index)
+    let mut filled: Vec<bool> = vec![false; param_info.len()];
+    let mut positional_idx = 0;
+
+    // First pass: process all arguments
+    for arg in args {
+        match arg {
+            ProviderArgument::Positional(lit) => {
+                // Map positional arg to parameter by index
+                if positional_idx < param_info.len() {
+                    filled[positional_idx] = true;
+                    // Store by index (we'll resolve names later)
+                    resolved.positional.push((positional_idx, lit.clone()));
+                    positional_idx += 1;
+                }
+            }
+            ProviderArgument::Named { name, value } => {
+                // Named arg - store the symbol directly
+                let name_str = interner.resolve(*name);
+                if let Some(&idx) = param_name_to_index.get(name_str) {
+                    filled[idx] = true;
+                }
+                resolved.named.insert(*name, value.clone());
+            }
+        }
     }
 
-    /// Insert an argument
-    pub fn insert(&mut self, name: Symbol, value: Literal) {
-        self.args.insert(name, value);
+    // Second pass: check required params and apply defaults
+    for (idx, param) in param_info.iter().enumerate() {
+        if !filled[idx] {
+            if param.required {
+                return Err(ProviderError {
+                    kind: ProviderErrorKind::MissingArgument {
+                        name: param.name,
+                        provider: provider_name,
+                    },
+                    loc,
+                });
+            }
+            // Default values are applied by the caller if needed
+        }
     }
+
+    Ok(resolved)
 }
 
 /// The TypeProvider trait generates an AST type and optional module at compile-time

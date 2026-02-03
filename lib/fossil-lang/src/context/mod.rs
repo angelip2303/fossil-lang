@@ -219,7 +219,8 @@ pub enum DefKind {
     Let,
     Const,
     Type,
-    Func(Option<Arc<dyn FunctionImpl>>),
+    Func(Arc<dyn FunctionImpl>),
+    RecordConstructor,
     Provider(Arc<dyn TypeProviderImpl>),
 }
 

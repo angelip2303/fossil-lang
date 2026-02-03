@@ -238,8 +238,6 @@ pub enum ExprKind {
     },
     /// A function application `callee(arg1, arg2, ...)` with positional and named arguments
     Application { callee: ExprId, args: Vec<Argument> },
-    /// A pipe expression `lhs |> rhs` (only present before resolution, desugared after)
-    Pipe { lhs: ExprId, rhs: ExprId },
     /// Field access `expr.field`
     FieldAccess { expr: ExprId, field: Symbol },
     /// A block expression `{ stmt* }`

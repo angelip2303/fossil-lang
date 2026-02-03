@@ -5,14 +5,14 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-pub use metadata::{RdfFieldInfo, RdfMetadata, RdfTermType};
-pub use serializer::{ColumnarNTriplesWriter, PredicateColumn, RdfBatchWriter};
+pub use metadata::{RdfFieldInfo, RdfMetadata, RdfMetadataResult, RdfTermType};
+pub use serializer::RdfBatchWriter;
 
 use fossil_lang::error::{CompileError, RuntimeError};
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::chunked_executor::{ChunkedExecutor, estimate_batch_size_from_plan};
-use fossil_lang::runtime::value::{OutputPlan, OutputSpec, RecordsPlan, Value};
+use fossil_lang::runtime::value::{OutputSpec, Plan, Value};
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 
 use oxrdf::{NamedNode, Term, TermParseError};
@@ -68,7 +68,10 @@ pub enum RdfError {
 
 impl From<RdfError> for CompileError {
     fn from(err: RdfError) -> Self {
-        CompileError::from(RuntimeError::evaluation(err.to_string(), fossil_lang::ast::Loc::generated()))
+        CompileError::from(RuntimeError::evaluation(
+            err.to_string(),
+            fossil_lang::ast::Loc::generated(),
+        ))
     }
 }
 
@@ -94,11 +97,6 @@ impl FunctionImpl for MapFunction {
         _gcx: &GlobalContext,
     ) -> Polytype {
         // forall S O R. (List<S>, fn(S) -> O) -> R
-        // Where:
-        // - S is the source row type
-        // - O is the output type (inferred from transform return)
-        // - R is the result type (opaque OutputPlan)
-        // Note: Additional closures are accepted at runtime (variadic)
         let s_var = next_type_var();
         let o_var = next_type_var();
         let r_var = next_type_var();
@@ -117,14 +115,12 @@ impl FunctionImpl for MapFunction {
     }
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, CompileError> {
-        use fossil_lang::runtime::value::SourceDescriptor;
-
         if args.is_empty() {
             return Err(RdfError::MapMissingSource.into());
         }
 
         let source_plan = match &args[0] {
-            Value::Records(plan) => plan.clone(),
+            Value::Plan(plan) => plan.clone(),
             _ => return Err(RdfError::MapInvalidSource.into()),
         };
 
@@ -136,20 +132,22 @@ impl FunctionImpl for MapFunction {
         let mut outputs = Vec::with_capacity(closures.len());
 
         for transform_fn in closures {
-            let row_context = Value::Records(RecordsPlan::new(
-                SourceDescriptor::Empty,
-                source_plan.schema.as_ref().clone(),
-            ));
+            let row_context = Value::Plan(Plan::empty(source_plan.schema.as_ref().clone()));
 
             let traced_result = trace_transform(transform_fn, row_context, ctx)?;
 
             let (select_exprs, output_schema, type_def_id, meta_fields) = match traced_result {
-                Value::Records(traced_plan) => {
-                    if let Some(exprs) = traced_plan.source.take_select_exprs() {
+                Value::Plan(mut traced_plan) => {
+                    if let Some(exprs) = traced_plan.take_pending_exprs() {
                         let type_def_id = traced_plan
                             .type_def_id
                             .ok_or(RdfError::MapTransformNotTyped)?;
-                        (exprs, traced_plan.schema, type_def_id, traced_plan.meta_fields.clone())
+                        (
+                            exprs,
+                            traced_plan.schema,
+                            type_def_id,
+                            traced_plan.meta_fields.clone(),
+                        )
                     } else {
                         return Err(RdfError::MapTransformNotRecord.into());
                     }
@@ -165,10 +163,10 @@ impl FunctionImpl for MapFunction {
             });
         }
 
-        Ok(Value::OutputPlan(OutputPlan {
-            source: source_plan,
-            outputs,
-        }))
+        // Return Plan with outputs (unified abstraction)
+        let mut result = source_plan.clone();
+        result.outputs = outputs;
+        Ok(Value::Plan(result))
     }
 }
 
@@ -193,7 +191,7 @@ fn trace_transform(
             }
 
             let mut evaluator = IrEvaluator::new(ctx.ir, ctx.gcx, closure_env);
-            evaluator.eval(*body)
+            Ok(evaluator.eval(*body)?)
         }
 
         Value::BuiltinFunction(_, func) => func.call(vec![row_context], ctx),
@@ -230,22 +228,15 @@ impl FunctionImpl for RdfSerializeFunction {
             .ok_or(RdfError::SerializeInvalidFilename)?;
 
         match input_value {
-            Value::OutputPlan(output_plan) => serialize_rdf(&output_plan, &filename, ctx),
+            Value::Plan(plan) if plan.has_outputs() => serialize_rdf(&plan, &filename, ctx),
             _ => Err(RdfError::SerializeInvalidInput.into()),
         }
     }
 }
 
-/// Multi-output RDF serialization
-///
-/// Iterates the source data ONCE and applies all output transforms,
-/// writing to a single RDF file. This is the streaming implementation
-/// for OutputPlan created by chaining `to()` calls.
-///
-/// Uses columnar serialization for N-Triples/N-Quads (faster),
 /// falls back to oxigraph for other formats (Turtle, RDF/XML, etc).
 fn serialize_rdf(
-    output_plan: &OutputPlan,
+    plan: &Plan,
     destination: &str,
     ctx: &RuntimeContext,
 ) -> Result<Value, CompileError> {
@@ -256,29 +247,43 @@ fn serialize_rdf(
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_string())
-        .unwrap_or_else(|| "ttl".to_string());
+        .unwrap_or_else(|| "ttl".to_string()); // TODO: here we should raise error?
 
-    let format = RdfFormat::from_extension(&ext)
-        .ok_or_else(|| RdfError::UnsupportedFormat(ext.clone()))?;
+    let format =
+        RdfFormat::from_extension(&ext).ok_or_else(|| RdfError::UnsupportedFormat(ext.clone()))?;
 
-    // Use columnar serializer for N-Triples/N-Quads (much faster)
-    let use_columnar = matches!(format, RdfFormat::NTriples | RdfFormat::NQuads);
-
-    // Estimate batch size from source plan schema
-    let batch_size = estimate_batch_size_from_plan(&output_plan.source);
+    // Estimate batch size from plan schema
+    let batch_size = estimate_batch_size_from_plan(plan);
 
     // Prepare combined selections for each output
     // Each selection combines: @id meta-field + rdf:type + predicate columns
-    let output_configs: Vec<_> = output_plan
+    let output_configs: Vec<_> = plan
         .outputs
         .iter()
         .map(|output_spec| {
-            // Get RDF metadata for this output type
-            let rdf_metadata = ctx
+            // Get type name for better warning messages
+            let type_name = ctx.gcx.definitions.get(output_spec.type_def_id).name;
+            let type_name_str = interner.resolve(type_name);
+
+            // Get RDF metadata for this output type (with conflict detection)
+            let rdf_result = ctx
                 .gcx
                 .type_metadata
                 .get(&output_spec.type_def_id)
-                .and_then(|tm| RdfMetadata::from_type_metadata(tm, &interner))
+                .map(|tm| {
+                    RdfMetadata::from_type_metadata_with_warnings(tm, &interner, Some(type_name_str))
+                });
+
+            // Log any warnings (at runtime, we can't use ariadne)
+            if let Some(ref result) = rdf_result {
+                for warning in &result.warnings.0 {
+                    eprintln!("warning: {:?}", warning);
+                }
+            }
+
+            let rdf_metadata = rdf_result
+                .map(|r| r.metadata)
+                .filter(|m| m.has_metadata())
                 .unwrap_or_default();
 
             // Build a combined selection that operates on source columns directly
@@ -314,58 +319,7 @@ fn serialize_rdf(
         })
         .collect();
 
-    if use_columnar {
-        serialize_columnar(path, output_plan, &output_configs, batch_size)
-    } else {
-        serialize_oxigraph(path, format, output_plan, &output_configs, batch_size)
-    }
-}
-
-/// Columnar N-Triples serialization (fast path)
-///
-/// Uses Polars vectorized string operations - no per-row function calls.
-fn serialize_columnar(
-    path: PathBuf,
-    output_plan: &OutputPlan,
-    output_configs: &[(Vec<Expr>, RdfMetadata)],
-    batch_size: usize,
-) -> Result<Value, CompileError> {
-    let writer = ColumnarNTriplesWriter::new(path)
-        .map_err(|e| RdfError::CreateWriter(e.to_string()))?;
-
-    let writer = RefCell::new(Some(writer));
-
-    let executor = ChunkedExecutor::new(batch_size);
-    executor
-        .execute_plan_batched(&output_plan.source, |batch| {
-            let lazy_batch = batch.clone().lazy();
-
-            for (combined_selection, _rdf_metadata) in output_configs {
-                if combined_selection.is_empty() {
-                    continue;
-                }
-
-                let rdf_batch = lazy_batch
-                    .clone()
-                    .select(combined_selection.clone())
-                    .collect()
-                    .map_err(|e| {
-                        PolarsError::ComputeError(format!("RDF selection failed: {}", e).into())
-                    })?;
-
-                if let Some(ref mut w) = *writer.borrow_mut() {
-                    w.write_batch(&rdf_batch)?;
-                }
-            }
-            Ok(())
-        })
-        .map_err(|e| RdfError::Write(e.to_string()))?;
-
-    if let Some(w) = writer.borrow_mut().take() {
-        w.finish().map_err(|e| RdfError::Finalize(e.to_string()))?;
-    }
-
-    Ok(Value::Unit)
+    serialize_oxigraph(path, format, plan, &output_configs, batch_size)
 }
 
 /// Oxigraph-based serialization (supports all RDF formats)
@@ -374,18 +328,18 @@ fn serialize_columnar(
 fn serialize_oxigraph(
     path: PathBuf,
     format: RdfFormat,
-    output_plan: &OutputPlan,
+    plan: &Plan,
     output_configs: &[(Vec<Expr>, RdfMetadata)],
     batch_size: usize,
 ) -> Result<Value, CompileError> {
-    let writer = RdfBatchWriter::new(path, format)
-        .map_err(|e| RdfError::CreateWriter(e.to_string()))?;
+    let writer =
+        RdfBatchWriter::new(path, format).map_err(|e| RdfError::CreateWriter(e.to_string()))?;
 
     let writer = RefCell::new(writer);
 
     let executor = ChunkedExecutor::new(batch_size);
     executor
-        .execute_plan_batched(&output_plan.source, |batch| {
+        .execute_plan_batched(plan, |batch| {
             let lazy_batch = batch.clone().lazy();
 
             for (combined_selection, _rdf_metadata) in output_configs {

@@ -6,57 +6,7 @@ use polars::prelude::*;
 
 use crate::context::{DefId, Symbol};
 use crate::ir::{ExprId, Param};
-
-/// Describes the source of data for a RecordsPlan
-///
-/// This is a description, not actual data. The source is only
-/// materialized when a sink (like Rdf::serialize) executes the plan.
-#[derive(Clone)]
-pub enum SourceDescriptor {
-    /// CSV file source
-    Csv {
-        path: String,
-        delimiter: u8,
-        has_header: bool,
-    },
-    /// Parquet file source
-    Parquet { path: String },
-    /// In-memory DataFrame (for tests or small datasets)
-    /// This is the only variant that holds actual data
-    InMemory(Arc<DataFrame>),
-    /// Empty source (for empty lists/records)
-    Empty,
-    /// Pending transformation (used during List::map tracing)
-    /// Contains select expressions that will be applied to a source later.
-    /// This is NOT a real source - it's a transformation template.
-    Pending { select_exprs: Vec<Expr> },
-    /// Concatenation of multiple sources (lazy union)
-    /// Used when combining multiple RecordsPlan values.
-    Concat(Vec<Box<RecordsPlan>>),
-    /// Join of two sources (lazy)
-    /// Keeps the join lazy until execution at the sink.
-    Join {
-        left: Box<RecordsPlan>,
-        right: Box<RecordsPlan>,
-        left_on: String,
-        right_on: String,
-    },
-}
-
-impl SourceDescriptor {
-    /// Check if this is a pending transformation (not a real source)
-    pub fn is_pending(&self) -> bool {
-        matches!(self, SourceDescriptor::Pending { .. })
-    }
-
-    /// Extract select expressions from a Pending source
-    pub fn take_select_exprs(&self) -> Option<Vec<Expr>> {
-        match self {
-            SourceDescriptor::Pending { select_exprs } => Some(select_exprs.clone()),
-            _ => None,
-        }
-    }
-}
+use crate::traits::source::Source;
 
 /// A transformation to apply to a LazyFrame
 ///
@@ -82,15 +32,15 @@ impl Transform {
     }
 }
 
-/// A lazy plan for record processing
+/// A lazy plan for data processing
 ///
-/// Contains a source descriptor and accumulated transformations.
+/// Contains an optional source and accumulated transformations.
 /// Nothing is materialized until a sink executes the plan.
 /// This design guarantees constant memory usage regardless of dataset size.
 #[derive(Clone)]
-pub struct RecordsPlan {
-    /// Where the data comes from (file path, format, options)
-    pub source: SourceDescriptor,
+pub struct Plan {
+    /// Data source (None = empty/pending plan)
+    pub source: Option<Box<dyn Source>>,
     /// Transformations to apply (in order)
     pub transforms: Vec<Transform>,
     /// Type definition ID (for obtaining type metadata from attributes)
@@ -99,53 +49,71 @@ pub struct RecordsPlan {
     pub schema: Arc<Schema>,
     /// Meta-fields from record construction (@name = expr)
     pub meta_fields: MetaFields,
+    /// Output specs for multi-output serialization
+    /// Empty = single output normal plan, non-empty = multi-output plan
+    pub outputs: Vec<OutputSpec>,
+    /// Pending select expressions (used during tracing)
+    /// When Some, this plan is a template to be applied to a real source later
+    pub pending_exprs: Option<Vec<Expr>>,
 }
 
-impl RecordsPlan {
-    /// Create a new plan from a source descriptor and schema
-    pub fn new(source: SourceDescriptor, schema: Schema) -> Self {
+impl Plan {
+    /// Create a new plan from a source and schema
+    pub fn from_source(source: Box<dyn Source>, schema: Schema) -> Self {
         Self {
-            source,
+            source: Some(source),
             transforms: Vec::new(),
             type_def_id: None,
             schema: Arc::new(schema),
             meta_fields: Vec::new(),
+            outputs: Vec::new(),
+            pending_exprs: None,
         }
     }
 
-    /// Create a plan with type information
-    pub fn with_type(source: SourceDescriptor, schema: Schema, type_def_id: DefId) -> Self {
+    /// Create a plan with source and type information
+    pub fn from_source_with_type(
+        source: Box<dyn Source>,
+        schema: Schema,
+        type_def_id: DefId,
+    ) -> Self {
         Self {
-            source,
+            source: Some(source),
             transforms: Vec::new(),
             type_def_id: Some(type_def_id),
             schema: Arc::new(schema),
             meta_fields: Vec::new(),
+            outputs: Vec::new(),
+            pending_exprs: None,
         }
     }
 
-    /// Create a pending transformation plan (used during List::map tracing)
+    /// Create a pending transformation plan (used during tracing)
     ///
     /// This creates a "template" that will be applied to a real source later.
     /// The schema represents the output schema after the transformation.
-    pub fn from_exprs(select_exprs: Vec<Expr>, type_def_id: DefId, schema: Schema) -> Self {
+    pub fn pending(select_exprs: Vec<Expr>, type_def_id: DefId, schema: Schema) -> Self {
         Self {
-            source: SourceDescriptor::Pending { select_exprs },
+            source: None,
             transforms: Vec::new(),
             type_def_id: Some(type_def_id),
             schema: Arc::new(schema),
             meta_fields: Vec::new(),
+            outputs: Vec::new(),
+            pending_exprs: Some(select_exprs),
         }
     }
 
-    /// Create an empty plan (for empty lists/records)
-    pub fn empty() -> Self {
+    /// Create an empty plan (for empty lists/tracing context)
+    pub fn empty(schema: Schema) -> Self {
         Self {
-            source: SourceDescriptor::Empty,
+            source: None,
             transforms: Vec::new(),
             type_def_id: None,
-            schema: Arc::new(Schema::default()),
+            schema: Arc::new(schema),
             meta_fields: Vec::new(),
+            outputs: Vec::new(),
+            pending_exprs: None,
         }
     }
 
@@ -169,28 +137,49 @@ impl RecordsPlan {
 
     /// Check if this is a pending transformation (not backed by a real source)
     pub fn is_pending(&self) -> bool {
-        self.source.is_pending()
+        self.pending_exprs.is_some()
+    }
+
+    /// Take pending expressions (consumes them)
+    pub fn take_pending_exprs(&mut self) -> Option<Vec<Expr>> {
+        self.pending_exprs.take()
     }
 
     /// Apply a pending transformation to this plan
     ///
     /// If `other` is a pending plan (from tracing), extracts its select expressions
     /// and adds them as a Transform::Select to this plan.
-    pub fn apply_pending(&self, other: &RecordsPlan) -> Option<Self> {
-        if let Some(select_exprs) = other.source.take_select_exprs() {
+    pub fn apply_pending(&self, other: &Plan) -> Option<Self> {
+        if let Some(ref select_exprs) = other.pending_exprs {
             let mut result = self.clone();
-            result.transforms.push(Transform::Select(select_exprs));
+            result
+                .transforms
+                .push(Transform::Select(select_exprs.clone()));
             result.type_def_id = other.type_def_id;
             result.schema = other.schema.clone();
+            result.outputs = other.outputs.clone();
             Some(result)
         } else {
             None
         }
     }
 
-    // NOTE: No to_lazy_frame() method here!
-    // Execution is ONLY done through ChunkedExecutor in the sink.
-    // This ensures no accidental materialization can happen.
+    /// Check if this plan has multi-output specs
+    pub fn has_outputs(&self) -> bool {
+        !self.outputs.is_empty()
+    }
+
+    /// Add an output spec to the plan (converts to multi-output plan)
+    pub fn with_output(mut self, output: OutputSpec) -> Self {
+        self.outputs.push(output);
+        self
+    }
+
+    /// Set output specs for multi-output serialization
+    pub fn with_outputs(mut self, outputs: Vec<OutputSpec>) -> Self {
+        self.outputs = outputs;
+        self
+    }
 }
 
 /// Output specification for a single type in an OutputPlan
@@ -210,48 +199,7 @@ pub struct OutputSpec {
     pub meta_fields: MetaFields,
 }
 
-/// Meta-fields from record construction (@name = expr)
-///
-/// These are contextual metadata evaluated at runtime.
-/// Keys are the meta-field names (without @), values are Polars expressions.
 pub type MetaFields = Vec<(crate::context::Symbol, Expr)>;
-
-/// Multi-output plan for streaming RDF serialization
-///
-/// Enables a single pass over source data to produce multiple outputs.
-/// Created by chaining `to()` calls:
-///
-/// ```fossil
-/// source
-/// |> to(Student, fn(row) -> Student { name = row.name })
-/// |> to(Sport, fn(row) -> Sport { name = row.sport })
-/// |> Rdf::serialize("output.nq")
-/// ```
-///
-/// Each `to()` adds an output to the plan without consuming the source.
-/// `Rdf::serialize` then iterates the source ONCE, applying each transform.
-#[derive(Clone)]
-pub struct OutputPlan {
-    /// The source data plan
-    pub source: RecordsPlan,
-    /// Output specifications for each type
-    pub outputs: Vec<OutputSpec>,
-}
-
-impl OutputPlan {
-    /// Create a new OutputPlan from a source with an initial output
-    pub fn new(source: RecordsPlan, first_output: OutputSpec) -> Self {
-        Self {
-            source,
-            outputs: vec![first_output],
-        }
-    }
-
-    /// Add another output to the plan
-    pub fn add_output(&mut self, output: OutputSpec) {
-        self.outputs.push(output);
-    }
-}
 
 /// Runtime values in the Fossil language
 ///
@@ -277,16 +225,12 @@ pub enum Value {
     /// - String concatenation: `concat_str([...])`
     Expr(polars::prelude::Expr),
 
-    /// A lazy plan for record processing (source + transforms)
+    /// A lazy plan for data processing (source + transforms)
     /// Everything stays lazy until a sink executes the plan.
     /// Also used as tracing context in to() (with Empty source).
-    Records(RecordsPlan),
+    /// When `outputs` is non-empty, this is a multi-output plan for serialization.
+    Plan(Plan),
 
-    /// Multi-output plan for streaming RDF serialization
-    /// Created by to() chains, consumed by Rdf::serialize
-    OutputPlan(OutputPlan),
-
-    // ===== FUNCTIONS (code, not data) =====
     /// User-defined function with captured environment
     Closure {
         params: Vec<Param>,
@@ -399,17 +343,12 @@ fn extract_literal_bool(expr: &polars::prelude::Expr) -> Option<bool> {
     })
 }
 
-/// Environment for variable bindings during execution
 #[derive(Clone, Default)]
 pub struct Environment {
     bindings: HashMap<Symbol, Value>,
 }
 
 impl Environment {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn bind(&mut self, name: Symbol, value: Value) {
         self.bindings.insert(name, value);
     }

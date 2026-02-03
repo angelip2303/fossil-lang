@@ -1,14 +1,16 @@
-const ROOT = "lib/fossil-stdlib/examples/shex-provider"
+const ROOT = "lib/fossil-stdlib/examples/end-to-end"
 
 type PersonData = csv!("${ROOT}/people.csv")
 type Person = shex!("${ROOT}/person.shex", shape: "PersonShape")
 
-PersonData::load()
-|> map(fn(row) ->
+let to_rdf = fn(row) -> {
     Person {
         @id = "http://example.com/person/${row.email}",
         name = row.name,
         age = row.age,
     }
-)
+}
+
+PersonData::load()
+|> map(to_rdf)
 |> Rdf::serialize("results.ttl")

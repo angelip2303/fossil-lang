@@ -1,25 +1,14 @@
 //! Shared utilities for shape-based providers (ShEx, SHACL)
-//!
-//! This module contains common functionality used by both ShEx and SHACL providers
-//! for extracting type information from RDF shape languages.
 
-use fossil_lang::ast::ast::PrimitiveType;
+use fossil_lang::ast::ast::{PrimitiveType, TypeId};
 
 pub mod shex;
 
-/// Field extracted from a shape definition
 #[derive(Debug)]
 pub struct ShapeField {
-    /// Field name (derived from predicate local name)
     pub name: String,
-    /// Full predicate IRI
     pub predicate_uri: String,
-    /// Fossil primitive type
-    pub fossil_type: PrimitiveType,
-    /// Whether the field is optional
-    pub optional: bool,
-    /// Whether the field is a list
-    pub is_list: bool,
+    pub ty: TypeId,
 }
 
 /// Extract local name from IRI (last segment after # or /)

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::ast::Loc;
 use crate::context::{DefId, DefKind, Symbol, TypeMetadata};
 use crate::error::{CompileError, CompileErrors, ResolutionError};
-use crate::ir::{Argument, ExprId, ExprKind, Ident, Ir, Path, StmtId, StmtKind, TypeId, TypeKind};
+use crate::ir::{ExprId, ExprKind, Ident, Ir, Path, StmtId, StmtKind, TypeId, TypeKind};
 use crate::passes::GlobalContext;
 
 /// Scope for name resolution
@@ -108,9 +108,6 @@ impl IrResolver {
         if !errors.is_empty() {
             return Err(errors);
         }
-
-        // Phase 3: Desugar pipes
-        self.desugar_pipes();
 
         Ok((self.ir, self.gcx))
     }
@@ -318,11 +315,6 @@ impl IrResolver {
                 }
             }
 
-            ExprKind::Pipe { lhs, rhs } => {
-                self.resolve_expr(*lhs, errors);
-                self.resolve_expr(*rhs, errors);
-            }
-
             ExprKind::FieldAccess { expr, .. } => {
                 self.resolve_expr(*expr, errors);
             }
@@ -517,44 +509,11 @@ impl IrResolver {
             let ctor_def_id =
                 self.gcx
                     .definitions
-                    .insert(type_def_id, type_name, DefKind::Func(None));
+                    .insert(type_def_id, type_name, DefKind::RecordConstructor);
             self.scopes
                 .current_mut()
                 .values
                 .insert(type_name, ctor_def_id);
-        }
-    }
-
-    fn desugar_pipes(&mut self) {
-        let expr_ids: Vec<ExprId> = self.ir.exprs.iter().map(|(id, _)| id).collect();
-        for expr_id in expr_ids {
-            self.desugar_pipe_expr(expr_id);
-        }
-    }
-
-    fn desugar_pipe_expr(&mut self, expr_id: ExprId) {
-        let expr = self.ir.exprs.get(expr_id).clone();
-
-        if let ExprKind::Pipe { lhs, rhs } = expr.kind {
-            let rhs_expr = self.ir.exprs.get(rhs).clone();
-
-            let new_kind = match &rhs_expr.kind {
-                ExprKind::Application { callee, args } => {
-                    let mut new_args = vec![Argument::Positional(lhs)];
-                    new_args.extend(args.iter().cloned());
-                    ExprKind::Application {
-                        callee: *callee,
-                        args: new_args,
-                    }
-                }
-                _ => ExprKind::Application {
-                    callee: rhs,
-                    args: vec![Argument::Positional(lhs)],
-                },
-            };
-
-            let expr_mut = self.ir.exprs.get_mut(expr_id);
-            expr_mut.kind = new_kind;
         }
     }
 }
