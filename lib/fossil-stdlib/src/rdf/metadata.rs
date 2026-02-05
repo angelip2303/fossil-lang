@@ -60,6 +60,8 @@ pub struct RdfFieldInfo {
 pub struct RdfTypeAttrs {
     #[attr("rdf.type")]
     pub rdf_type: Option<String>,
+    #[attr("rdf.base")]
+    pub base: Option<String>,
 }
 
 #[derive(Debug, Clone, FromAttrs)]
@@ -91,6 +93,7 @@ impl RdfMetadataResult {
 #[derive(Debug, Clone, Default)]
 pub struct RdfMetadata {
     pub rdf_type: Option<String>,
+    pub base: Option<String>,
     pub fields: HashMap<Symbol, RdfFieldInfo>,
 }
 
@@ -131,6 +134,7 @@ impl RdfMetadata {
 
         let mut metadata = RdfMetadata {
             rdf_type: type_attrs.rdf_type.clone(),
+            base: type_attrs.base.clone(),
             fields: HashMap::new(),
         };
 

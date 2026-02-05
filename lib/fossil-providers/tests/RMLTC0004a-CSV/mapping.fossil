@@ -1,26 +1,21 @@
 type StudentSport = csv!("tests/RMLTC0004a-CSV/student_sport.csv")
 
 #[rdf(type = "http://example.com/Student")]
-type Student = {
+type Student(subject: string) = {
     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
     Name: string,
 }
 
 #[rdf(type = "http://example.com/Sport")]
-type Sport = {
+type Sport(subject: string) = {
     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
     Name: string,
 }
 
-StudentSport::load()
-|> map(
-    fn(row) -> Student {
-        @id = "http://example.com/${row.Student}",
-        Name = row.Student
-    },
-    fn(row) -> Sport {
-        @id = "http://example.com/${row.Sport}",
-        Name = row.Sport
+let transformations =
+    for row in StudentSport::load() {
+        yield Student("http://example.com/${row.Student}") { Name = row.Student }
+        yield Sport("http://example.com/${row.Sport}") { Name = row.Sport }
     }
-)
-|> Rdf::serialize("tests/RMLTC0004a-CSV/actual.nq")
+
+Rdf::serialize(transformations, "tests/RMLTC0004a-CSV/actual.nq")

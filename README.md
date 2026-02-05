@@ -1,3 +1,9 @@
+- base se debería de poder inferir de las shapes
+
+
+
+
+
 - [ ] Explorar cómo manejar el tema de los duplicados
 
 - [ ] ¿Qué pasa si dos sujetos son iguales? Hay que tener en cuenta también el concepto de RML de rr:constant, que puede aparecer en un subjectMap, predicateMap y objectMap:

@@ -5,8 +5,8 @@
 
 use crate::ast::ast;
 use crate::ir::{
-    Argument, Expr, ExprKind, Ident, Ir, Literal, Param, Path, PrimitiveType, ProviderArgument,
-    RecordFields, Stmt, StmtKind, Type, TypeKind, TypeRef,
+    Argument, Expr, ExprKind, Ident, Ir, IrForYieldOutput, Literal, Param, Path, PrimitiveType,
+    ProviderArgument, RecordFields, Stmt, StmtKind, Type, TypeKind, TypeRef,
 };
 
 /// Convert AST to IR
@@ -38,13 +38,11 @@ impl AstToIrConverter {
         let loc = stmt.loc;
 
         let kind = match &stmt.kind {
-            ast::StmtKind::Let { name, ty, value } => {
-                let ir_ty = ty.map(|t| self.convert_type(ast, t));
+            ast::StmtKind::Let { name, value } => {
                 let ir_value = self.convert_expr(ast, *value);
                 StmtKind::Let {
                     name: *name,
                     def_id: None,
-                    ty: ir_ty,
                     value: ir_value,
                 }
             }
@@ -58,12 +56,25 @@ impl AstToIrConverter {
                 }
             }
 
-            ast::StmtKind::Type { name, ty, attrs } => {
+            ast::StmtKind::Type {
+                name,
+                ty,
+                attrs,
+                ctor_params,
+            } => {
                 let ir_ty = self.convert_type(ast, *ty);
+                let ir_ctor_params = ctor_params
+                    .iter()
+                    .map(|p| crate::ir::CtorParam {
+                        name: p.name,
+                        ty: self.convert_type(ast, p.ty),
+                    })
+                    .collect();
                 StmtKind::Type {
                     name: *name,
                     ty: ir_ty,
                     attrs: attrs.clone(),
+                    ctor_params: ir_ctor_params,
                 }
             }
 
@@ -94,23 +105,14 @@ impl AstToIrConverter {
                 ExprKind::List(ir_items)
             }
 
-            ast::ExprKind::NamedRecordConstruction {
-                type_path,
-                fields,
-                metadata,
-            } => {
+            ast::ExprKind::NamedRecordConstruction { type_path, fields } => {
                 let ir_fields = fields
-                    .iter()
-                    .map(|(name, expr)| (*name, self.convert_expr(ast, *expr)))
-                    .collect();
-                let ir_meta_fields = metadata
                     .iter()
                     .map(|(name, expr)| (*name, self.convert_expr(ast, *expr)))
                     .collect();
                 ExprKind::NamedRecordConstruction {
                     type_ident: Ident::Unresolved(convert_path(type_path)),
                     fields: ir_fields,
-                    meta_fields: ir_meta_fields,
                 }
             }
 
@@ -124,7 +126,6 @@ impl AstToIrConverter {
                     .map(|p| Param {
                         name: p.name,
                         def_id: None,
-                        ty: p.ty.map(|t| self.convert_type(ast, t)),
                         default: p.default.map(|e| self.convert_expr(ast, e)),
                     })
                     .collect();
@@ -157,11 +158,9 @@ impl AstToIrConverter {
             }
 
             ast::ExprKind::Pipe { lhs, rhs } => {
-                // Desugar pipe immediately: lhs |> rhs  →  rhs(lhs)
+                // Desugar pipe: lhs |> rhs
                 let ir_lhs = self.convert_expr(ast, *lhs);
-                let ir_rhs = self.convert_expr(ast, *rhs);
 
-                // Check if rhs is already an application
                 let rhs_expr = ast.exprs.get(*rhs);
                 match &rhs_expr.kind {
                     ast::ExprKind::Application { callee, args } => {
@@ -184,6 +183,7 @@ impl AstToIrConverter {
                     }
                     _ => {
                         // rhs is just f, so result is f(lhs)
+                        let ir_rhs = self.convert_expr(ast, *rhs);
                         ExprKind::Application {
                             callee: ir_rhs,
                             args: vec![Argument::Positional(ir_lhs)],
@@ -210,6 +210,20 @@ impl AstToIrConverter {
                 ExprKind::StringInterpolation {
                     parts: parts.clone(),
                     exprs: ir_exprs,
+                }
+            }
+
+            ast::ExprKind::ForYield { binding, source, outputs } => {
+                let ir_source = self.convert_expr(ast, *source);
+                let ir_outputs = outputs
+                    .iter()
+                    .map(|o| self.convert_for_yield_output(ast, o))
+                    .collect();
+                ExprKind::ForYield {
+                    binding: *binding,
+                    binding_def_id: None,
+                    source: ir_source,
+                    outputs: ir_outputs,
                 }
             }
         };
@@ -280,6 +294,28 @@ impl AstToIrConverter {
         };
 
         self.ir.types.alloc(Type { loc, kind })
+    }
+
+    fn convert_for_yield_output(
+        &mut self,
+        ast: &ast::Ast,
+        output: &ast::ForYieldOutput,
+    ) -> IrForYieldOutput {
+        let ir_ctor_args = output
+            .ctor_args
+            .iter()
+            .map(|&e| self.convert_expr(ast, e))
+            .collect();
+        let ir_fields = output
+            .fields
+            .iter()
+            .map(|(name, expr)| (*name, self.convert_expr(ast, *expr)))
+            .collect();
+        IrForYieldOutput {
+            type_ident: Ident::Unresolved(convert_path(&output.type_path)),
+            ctor_args: ir_ctor_args,
+            fields: ir_fields,
+        }
     }
 }
 

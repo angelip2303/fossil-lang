@@ -19,21 +19,33 @@ pub struct Stmt {
     pub kind: StmtKind,
 }
 
+/// A constructor parameter in a type definition (e.g., `id: string` in `type Person(id: string)`)
+///
+/// These parameters are passed when constructing instances of the type
+/// and can be used by serialization backends to add metadata to outputs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CtorParam {
+    pub name: Symbol,
+    pub ty: TypeId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StmtKind {
-    /// A value binding `let name = expr` or `let name: Type = expr`
+    /// A value binding `let name = expr`
     Let {
         name: Symbol,
-        ty: Option<TypeId>,
         value: ExprId,
     },
     /// A constant binding `const name = expr`
     Const { name: Symbol, value: ExprId },
-    /// A type definition `type name = type` with optional type-level attributes
+    /// A type definition `type name(params) = type` with optional type-level attributes
+    /// and constructor parameters.
     Type {
         name: Symbol,
         ty: TypeId,
         attrs: Vec<Attribute>,
+        /// Constructor parameters like `(id: string, graph: string)`
+        ctor_params: Vec<CtorParam>,
     },
     /// An expression declaration `expr`
     Expr(ExprId),
@@ -45,17 +57,6 @@ pub struct Expr {
     pub kind: ExprKind,
 }
 
-/// Meta-fields for record construction (@name = expr)
-///
-/// Meta-fields are special fields prefixed with `@` that provide
-/// contextual metadata. Functions like `map()` and `Rdf::serialize`
-/// interpret these fields according to their semantics.
-///
-/// Common meta-fields:
-/// - `@id`: Entity identifier (interpreted by RDF as subject URI)
-/// - `@graph`: Named graph (interpreted by RDF as graph URI)
-pub type RecordMetadata = Vec<(Symbol, ExprId)>;
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExprKind {
     /// A local or qualified identifier (unresolved)
@@ -66,12 +67,10 @@ pub enum ExprKind {
     Literal(Literal),
     /// A list `[expr, expr, ...]`
     List(Vec<ExprId>),
-    /// A named record construction `TypeName { @id = ..., field = value, ... }`
-    /// Supports @id and @graph metadata fields
+    /// A named record construction `TypeName { field = value, ... }`
     NamedRecordConstruction {
         type_path: Path,
         fields: Vec<(Symbol, ExprId)>,
-        metadata: RecordMetadata,
     },
     /// A function definition `fn (param1, param2, ...) -> expr`
     /// Optionally with attributes: `#[rdf(id = "...")] fn(r) -> ...`
@@ -95,6 +94,30 @@ pub enum ExprKind {
         parts: Vec<Symbol>,
         exprs: Vec<ExprId>,
     },
+    /// A for-yield expression for transforming data
+    /// Single output: `for row in source yield TypeName(args) { fields }`
+    /// Multiple outputs: `for row in source yield { TypeName(args) { fields }, ... }`
+    ///
+    /// This provides a declarative way to transform rows into typed records.
+    ForYield {
+        /// The binding name for each row (e.g., `row`)
+        binding: Symbol,
+        /// The source expression to iterate over (e.g., `Data::load()`)
+        source: ExprId,
+        /// One or more output specifications
+        outputs: Vec<ForYieldOutput>,
+    },
+}
+
+/// A single output in a for-yield expression
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ForYieldOutput {
+    /// The type path for the output records
+    pub type_path: Path,
+    /// Arguments for constructor parameters in order matching type definition
+    pub ctor_args: Vec<ExprId>,
+    /// Named field assignments: `{ name = value, age = value }`
+    pub fields: Vec<(Symbol, ExprId)>,
 }
 
 #[derive(Debug)]
@@ -254,7 +277,6 @@ impl ProviderArgument {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Param {
     pub name: Symbol,
-    pub ty: Option<TypeId>,
     pub default: Option<ExprId>,
 }
 

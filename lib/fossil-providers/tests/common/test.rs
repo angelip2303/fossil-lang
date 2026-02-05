@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::path::PathBuf;
 
@@ -18,13 +19,13 @@ fn test(test_case: &str) -> Result<bool, TestSuiteError> {
     let result = compiler.compile(CompilerInput::File(mapping))?;
     let _ = IrExecutor::execute(result.program)?;
 
-    let actual = RdfParser::from_format(oxrdfio::RdfFormat::NQuads)
+    let actual: HashSet<_> = RdfParser::from_format(oxrdfio::RdfFormat::NQuads)
         .for_reader(File::open(format!("tests/{}/actual.nq", test_case))?)
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<HashSet<_>, _>>()?;
 
-    let expected = RdfParser::from_format(oxrdfio::RdfFormat::NQuads)
+    let expected: HashSet<_> = RdfParser::from_format(oxrdfio::RdfFormat::NQuads)
         .for_reader(File::open(format!("tests/{}/output.nq", test_case))?)
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<HashSet<_>, _>>()?;
 
     Ok(actual == expected)
 }

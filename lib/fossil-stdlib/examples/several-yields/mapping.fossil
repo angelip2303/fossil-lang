@@ -1,0 +1,18 @@
+type StudentSport = csv!("lib/fossil-stdlib/examples/several-yields/student_sport.csv")
+
+#[rdf(type = "http://example.com/Student", base = "http://example.com/")]
+type Student(subject: string) = {
+    #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
+    Name: string,
+}
+
+#[rdf(type = "http://example.com/Sport", base = "http://example.com/")]
+type Sport(subject: string) = {
+    #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
+    Name: string,
+}
+
+for row in StudentSport::load() {
+    yield Student(row.Student) { Name = row.Student }
+    yield Sport(row.Sport) { Name = row.Sport }
+} |> Rdf::serialize("actual.nq")

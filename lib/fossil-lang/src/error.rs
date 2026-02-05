@@ -1,21 +1,14 @@
-//! Error types using miette for diagnostics
-//!
-//! Single unified error type with all variants. Uses miette's derive macros
-//! for automatic diagnostic generation.
-
 use miette::{Diagnostic, SourceSpan};
 use thiserror::Error;
 
 use crate::ast::Loc;
 
-/// Convert Loc to miette's SourceSpan
 impl From<Loc> for SourceSpan {
     fn from(loc: Loc) -> Self {
         (loc.span.start, loc.span.end - loc.span.start).into()
     }
 }
 
-/// Type variable for type inference
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeVar(pub usize);
 
@@ -25,10 +18,8 @@ impl std::fmt::Display for TypeVar {
     }
 }
 
-/// Unified error type for the Fossil compiler
 #[derive(Debug, Error, Diagnostic)]
 pub enum FossilError {
-    // ===== Parse Errors =====
     #[error("syntax error: {message}")]
     #[diagnostic(code(fossil::parse::syntax))]
     Syntax {
@@ -37,7 +28,6 @@ pub enum FossilError {
         span: SourceSpan,
     },
 
-    // ===== Resolution Errors =====
     #[error("undefined variable '{name}'")]
     #[diagnostic(
         code(fossil::resolve::undefined_var),
@@ -115,7 +105,6 @@ pub enum FossilError {
         span: SourceSpan,
     },
 
-    // ===== Type Errors =====
     #[error("type mismatch: {message}")]
     #[diagnostic(code(fossil::types::mismatch))]
     TypeMismatch {
@@ -158,7 +147,6 @@ pub enum FossilError {
         span: SourceSpan,
     },
 
-    // ===== Runtime Errors =====
     #[error("{message}")]
     #[diagnostic(code(fossil::runtime::eval))]
     Evaluation {
@@ -175,7 +163,6 @@ pub enum FossilError {
         span: SourceSpan,
     },
 
-    // ===== Provider Errors =====
     #[error("{provider} provider requires '{name}' argument")]
     #[diagnostic(code(fossil::provider::missing_arg))]
     MissingArgument {
@@ -279,7 +266,6 @@ pub enum FossilError {
     Polars(#[from] polars::error::PolarsError),
 }
 
-// ===== Constructors that resolve Symbol → String =====
 impl FossilError {
     pub fn syntax(message: impl Into<String>, loc: Loc) -> Self {
         Self::Syntax {
@@ -488,7 +474,6 @@ impl FossilError {
     }
 }
 
-/// Extension trait to add location to errors
 pub trait AtLoc {
     fn at(self, loc: Loc) -> FossilError;
 }
@@ -505,7 +490,6 @@ impl AtLoc for polars::error::PolarsError {
     }
 }
 
-/// Collection of errors
 #[derive(Debug, Default)]
 pub struct FossilErrors(pub Vec<FossilError>);
 
@@ -527,11 +511,7 @@ impl FossilErrors {
     }
 
     pub fn into_result<T>(self, ok: T) -> Result<T, Self> {
-        if self.is_empty() {
-            Ok(ok)
-        } else {
-            Err(self)
-        }
+        if self.is_empty() { Ok(ok) } else { Err(self) }
     }
 }
 
@@ -558,7 +538,6 @@ impl IntoIterator for FossilErrors {
     }
 }
 
-// ===== Warnings =====
 #[derive(Debug, Clone)]
 pub enum FossilWarning {
     RdfTypeConflict {

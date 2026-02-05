@@ -1,16 +1,10 @@
 const ROOT = "lib/fossil-stdlib/examples/end-to-end"
 
-type PersonData = csv!("${ROOT}/people.csv")
-type Person = shex!("${ROOT}/person.shex", shape: "PersonShape")
+type Data = csv!("${ROOT}/people.csv")
 
-let to_rdf = fn(row) -> {
-    Person {
-        @id = "http://example.com/person/${row.email}",
-        name = row.name,
-        age = row.age,
-    }
-}
+#[rdf(base = "http://example.com/person/")] // this should be automatically inferred
+type Person(id: string) = shex!("${ROOT}/person.shex", shape: "PersonShape")
 
-PersonData::load()
-|> map(to_rdf)
-|> Rdf::serialize("results.ttl")
+for row in Data::load() {
+    yield Person(row.email) { name = row.name, age = row.age }
+} |> Rdf::serialize("actual.nq")

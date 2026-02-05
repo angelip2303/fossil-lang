@@ -14,8 +14,12 @@ pub enum Token<'a> {
     Type,
     #[token("fn")]
     Func,
-    #[token("+")]
-    Plus,
+    #[token("for")]
+    For,
+    #[token("in")]
+    In,
+    #[token("yield")]
+    Yield,
     #[token("true")]
     True,
     #[token("false")]

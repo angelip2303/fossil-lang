@@ -169,8 +169,6 @@ impl ChunkedExecutor {
     fn apply_transform(safe_lf: SafeLazyFrame, transform: &Transform) -> SafeLazyFrame {
         match transform {
             Transform::Select(exprs) => safe_lf.select(exprs.clone()),
-            Transform::Filter(expr) => safe_lf.filter(expr.clone()),
-            Transform::WithColumn(expr) => safe_lf.with_column(expr.clone()),
         }
     }
 }

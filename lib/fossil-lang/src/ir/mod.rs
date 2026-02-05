@@ -96,6 +96,7 @@ impl Ir {
             kind: TypeKind::Named(Ident::Resolved(def_id)),
         })
     }
+
 }
 
 /// An identifier that can be unresolved (Path) or resolved (DefId)
@@ -177,14 +178,20 @@ impl Stmt {
     }
 }
 
+/// A constructor parameter in a type definition
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CtorParam {
+    pub name: Symbol,
+    pub ty: TypeId,
+}
+
 /// A statement in the IR
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StmtKind {
-    /// A value binding `let name = expr` with optional type annotation and resolved DefId
+    /// A value binding `let name = expr` with resolved DefId
     Let {
         name: Symbol,
         def_id: Option<DefId>,
-        ty: Option<TypeId>,
         value: ExprId,
     },
     /// A constant binding `const name = expr` with resolved DefId
@@ -193,11 +200,13 @@ pub enum StmtKind {
         def_id: Option<DefId>,
         value: ExprId,
     },
-    /// A type definition `type name = type` with optional type-level attributes
+    /// A type definition `type name(params) = type` with optional type-level attributes
     Type {
         name: Symbol,
         ty: TypeId,
         attrs: Vec<Attribute>,
+        /// Constructor parameters like `(id: string, graph: string)`
+        ctor_params: Vec<CtorParam>,
     },
     /// An expression statement `expr`
     Expr(ExprId),
@@ -221,14 +230,12 @@ pub enum ExprKind {
     Literal(Literal),
     /// A list `[expr, expr, ...]`
     List(Vec<ExprId>),
-    /// A named record construction `TypeName { @id = ..., field = value, ... }`
+    /// A named record construction `TypeName { field = value, ... }`
     NamedRecordConstruction {
         /// Identifier for the type (resolved to DefId after resolution)
         type_ident: Ident,
         /// Named fields (field_name, value_expr)
         fields: Vec<(Symbol, ExprId)>,
-        /// Meta-fields (@name = expr) - keys are names without the @ prefix
-        meta_fields: Vec<(Symbol, ExprId)>,
     },
     /// A function definition `fn (param1, param2, ...) -> expr`
     Function {
@@ -247,6 +254,30 @@ pub enum ExprKind {
         parts: Vec<Symbol>,
         exprs: Vec<ExprId>,
     },
+    /// A for-yield expression for transforming data
+    /// Single: `for row in source yield TypeName(args) { fields }`
+    /// Multiple: `for row in source yield { Type1(args) { fields }, Type2(args) { fields } }`
+    ForYield {
+        /// The binding name for each row
+        binding: Symbol,
+        /// The DefId for the binding (set during resolution)
+        binding_def_id: Option<DefId>,
+        /// The source expression (produces a Plan)
+        source: ExprId,
+        /// One or more output specifications
+        outputs: Vec<IrForYieldOutput>,
+    },
+}
+
+/// A single output in a for-yield expression (IR version)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IrForYieldOutput {
+    /// The type identifier (resolved to DefId after resolution)
+    pub type_ident: Ident,
+    /// Arguments for constructor parameters in order
+    pub ctor_args: Vec<ExprId>,
+    /// Named field assignments: `{ name = value, age = value }`
+    pub fields: Vec<(Symbol, ExprId)>,
 }
 
 /// A parameter in a function
@@ -254,7 +285,6 @@ pub enum ExprKind {
 pub struct Param {
     pub name: Symbol,
     pub def_id: Option<DefId>,
-    pub ty: Option<TypeId>,
     pub default: Option<ExprId>,
 }
 

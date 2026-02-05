@@ -3,8 +3,9 @@
 //! Provides helpers for type variable generation and formatting.
 
 use crate::ast::Loc;
+use crate::context::DefId;
 use crate::error::FossilError;
-use crate::ir::{Ident, RecordFields, Type, TypeId, TypeKind};
+use crate::ir::{Ident, RecordFields, StmtKind, Type, TypeId, TypeKind};
 
 use super::TypeChecker;
 
@@ -109,5 +110,41 @@ impl TypeChecker {
                 ))
             }
         }
+    }
+
+    /// Get the number of constructor parameters for a type
+    pub fn get_type_ctor_param_count(&self, type_def_id: DefId) -> usize {
+        let type_def = self.gcx.definitions.get(type_def_id);
+
+        // Look for the type statement in the IR
+        for &stmt_id in &self.ir.root {
+            let stmt = self.ir.stmts.get(stmt_id);
+            if let StmtKind::Type {
+                name, ctor_params, ..
+            } = &stmt.kind
+            {
+                if *name == type_def.name {
+                    return ctor_params.len();
+                }
+            }
+        }
+
+        0
+    }
+
+    /// Check that constructor argument count matches type parameters
+    pub fn check_ctor_arg_count(
+        &self,
+        type_def_id: DefId,
+        actual_args: usize,
+        loc: Loc,
+    ) -> Result<(), FossilError> {
+        let expected_params = self.get_type_ctor_param_count(type_def_id);
+
+        if actual_args != expected_params {
+            return Err(FossilError::arity_mismatch(expected_params, actual_args, loc));
+        }
+
+        Ok(())
     }
 }

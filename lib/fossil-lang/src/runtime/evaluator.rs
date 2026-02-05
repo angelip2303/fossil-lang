@@ -5,7 +5,9 @@ use polars::prelude::*;
 use crate::ast::Loc;
 use crate::context::{DefId, Symbol};
 use crate::error::FossilError;
-use crate::ir::{Argument, ExprId, ExprKind, Ident, Ir, StmtId, StmtKind, TypeKind, TypeRef};
+use crate::ir::{
+    Argument, ExprId, ExprKind, Ident, Ir, IrForYieldOutput, StmtId, StmtKind, TypeKind, TypeRef,
+};
 use crate::passes::GlobalContext;
 use crate::runtime::value::Value;
 use crate::traits::function::RuntimeContext;
@@ -171,11 +173,9 @@ impl<'a> IrEvaluator<'a> {
                 }
             }
 
-            ExprKind::NamedRecordConstruction {
-                type_ident,
-                fields,
-                meta_fields,
-            } => self.eval_named_record(type_ident, fields, meta_fields),
+            ExprKind::NamedRecordConstruction { type_ident, fields } => {
+                self.eval_named_record(type_ident, fields)
+            }
 
             ExprKind::List(items) => self.eval_list(items),
 
@@ -200,6 +200,25 @@ impl<'a> IrEvaluator<'a> {
 
             ExprKind::StringInterpolation { parts, exprs } => {
                 self.eval_string_interpolation(parts, exprs)
+            }
+
+            ExprKind::ForYield {
+                source,
+                binding,
+                outputs,
+                ..
+            } => {
+                // Evaluate the source first to get its Plan
+                let source_val = self.eval(*source)?;
+                let source_plan = match source_val {
+                    Value::Plan(plan) => plan,
+                    _ => {
+                        return Err(
+                            self.make_error("for-yield source must be a Plan (from Input::load())")
+                        );
+                    }
+                };
+                self.eval_for_yield(source_plan, *binding, outputs)
             }
         }
     }
@@ -240,18 +259,16 @@ impl<'a> IrEvaluator<'a> {
         Ok(Value::Expr(concat_expr))
     }
 
-    /// Evaluate a named record construction `TypeName { @id = ..., field = value, ... }`
+    /// Evaluate a named record construction `TypeName { field = value, ... }`
     ///
     /// All field values are Expr, so we always build a lazy plan.
     /// The type_ident provides the DefId for metadata lookup.
-    /// Meta-fields (@name = expr) are evaluated and stored separately.
     fn eval_named_record(
         &mut self,
         type_ident: &Ident,
         fields: &[(Symbol, ExprId)],
-        meta_fields: &[(Symbol, ExprId)],
     ) -> Result<Value, FossilError> {
-        use crate::runtime::value::{MetaFields, Plan};
+        use crate::runtime::value::Plan;
 
         // Get the DefId from the resolved type identifier
         let type_def_id = match type_ident {
@@ -261,23 +278,9 @@ impl<'a> IrEvaluator<'a> {
             }
         };
 
-        // Evaluate meta-field expressions
-        let evaluated_meta_fields: MetaFields = meta_fields
-            .iter()
-            .filter_map(|(name, expr_id)| {
-                let val = self.eval(*expr_id).ok()?;
-                if let Value::Expr(e) = val {
-                    Some((*name, e))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
         if fields.is_empty() {
             let mut plan = Plan::empty(Schema::default());
             plan.type_def_id = type_def_id;
-            plan.meta_fields = evaluated_meta_fields;
             return Ok(Value::Plan(plan));
         }
 
@@ -297,13 +300,12 @@ impl<'a> IrEvaluator<'a> {
         // Build schema from expressions
         let schema = build_schema_from_exprs(&select_exprs);
 
-        // Store as pending transformation with type info and meta-fields
+        // Store as pending transformation with type info
         Ok(Value::Plan(Plan {
             source: None,
             transforms: Vec::new(),
             type_def_id,
             schema: std::sync::Arc::new(schema),
-            meta_fields: evaluated_meta_fields,
             outputs: Vec::new(),
             pending_exprs: Some(select_exprs),
         }))
@@ -342,8 +344,99 @@ impl<'a> IrEvaluator<'a> {
 
         // Create a Polars list expression from the elements
         Ok(Value::Expr(concat_list(exprs).map_err(|e| {
-            self.make_error(&format!("Failed to create list expression: {}", e))
+            self.make_error(format!("Failed to create list expression: {}", e))
         })?))
+    }
+
+    /// Evaluate a for-yield expression with one or more outputs.
+    ///
+    /// Single: `for row in source yield TypeName(args) { fields }`
+    /// Multiple: `for row in source yield { Type1(args) { fields }, Type2(args) { fields } }`
+    fn eval_for_yield(
+        &mut self,
+        source_plan: crate::runtime::value::Plan,
+        binding: Symbol,
+        outputs: &[IrForYieldOutput],
+    ) -> Result<Value, FossilError> {
+        use crate::runtime::value::{OutputSpec, Plan};
+
+        // Get source schema from the provided plan
+        let source_schema = source_plan.schema.as_ref().clone();
+
+        // Create a row context plan for field access tracing
+        let row_plan = Plan::empty(source_schema);
+
+        // Bind the row variable for field access tracing
+        self.env.bind(binding, Value::Plan(row_plan));
+
+        // Start with the source plan
+        let mut result_plan = source_plan;
+
+        // Process each output
+        for output in outputs {
+            // Get the DefId from the resolved type identifier
+            let type_def_id = match &output.type_ident {
+                Ident::Resolved(def_id) => *def_id,
+                Ident::Unresolved(_) => {
+                    return Err(self.make_error("Unresolved type identifier in for-yield"));
+                }
+            };
+
+            // Evaluate constructor arguments (positional: subject, graph, ...)
+            let ctor_args: Vec<Expr> = output
+                .ctor_args
+                .iter()
+                .filter_map(|expr_id| {
+                    if let Ok(Value::Expr(e)) = self.eval(*expr_id) {
+                        Some(e)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Build select expressions from all fields
+            let select_exprs: Vec<Expr> = output
+                .fields
+                .iter()
+                .map(|(name, expr_id)| {
+                    let value = self.eval(*expr_id)?;
+                    let name_str = self.gcx.interner.resolve(*name);
+                    match value {
+                        Value::Expr(expr) => Ok(expr.alias(name_str)),
+                        _ => Ok(lit(NULL).alias(name_str)),
+                    }
+                })
+                .collect::<Result<Vec<_>, FossilError>>()?;
+
+            // Build schema from expressions
+            let schema = build_schema_from_exprs(&select_exprs);
+
+            // Create an OutputSpec
+            let output_spec = OutputSpec {
+                type_def_id,
+                select_exprs,
+                schema: std::sync::Arc::new(schema),
+                ctor_args,
+            };
+
+            result_plan.outputs.push(output_spec);
+        }
+
+        Ok(Value::Plan(result_plan))
+    }
+
+    /// Find a type statement by name, returning its TypeId
+    fn find_type_by_name(&self, type_name: Symbol) -> Option<crate::ir::TypeId> {
+        for &stmt_id in &self.ir.root {
+            let stmt = self.ir.stmts.get(stmt_id);
+            if let StmtKind::Type { name, ty, .. } = &stmt.kind {
+                if *name == type_name {
+                    return Some(*ty);
+                }
+            }
+        }
+        None
     }
 
     /// Check if we've exceeded the maximum recursion depth
@@ -561,16 +654,7 @@ impl<'a> IrEvaluator<'a> {
 
     /// Get the field names for a record type by its name
     fn get_record_field_names(&self, type_name: Symbol) -> Result<Vec<Symbol>, FossilError> {
-        // Find the type definition in the IR root statements
-        let type_def = self.ir.root.iter().find_map(|stmt_id| {
-            let stmt = self.ir.stmts.get(*stmt_id);
-            match &stmt.kind {
-                StmtKind::Type { name, ty, .. } if *name == type_name => Some(*ty),
-                _ => None,
-            }
-        });
-
-        let Some(ty_id) = type_def else {
+        let Some(ty_id) = self.find_type_by_name(type_name) else {
             return Err(self.make_error(format!(
                 "Record type '{}' not found",
                 self.gcx.interner.resolve(type_name)

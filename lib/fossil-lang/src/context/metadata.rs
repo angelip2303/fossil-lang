@@ -164,7 +164,7 @@ pub fn extract_type_metadata(ast: &crate::ast::ast::Ast) -> HashMap<Symbol, Type
     for &stmt_id in &ast.root {
         let stmt = ast.stmts.get(stmt_id);
 
-        if let StmtKind::Type { name, ty, attrs } = &stmt.kind {
+        if let StmtKind::Type { name, ty, attrs, .. } = &stmt.kind {
             let ty_node = ast.types.get(*ty);
 
             // Create metadata (DefId will be set during resolution)

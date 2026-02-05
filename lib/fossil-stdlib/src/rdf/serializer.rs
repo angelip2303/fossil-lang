@@ -23,6 +23,35 @@ impl ParsedSubject {
     }
 }
 
+/// Parsed graph name for RDF quads
+#[derive(Clone)]
+enum ParsedGraph {
+    Default,
+    Named(NamedNode),
+}
+
+impl ParsedGraph {
+    fn as_ref(&self) -> GraphNameRef<'_> {
+        match self {
+            ParsedGraph::Default => GraphNameRef::DefaultGraph,
+            ParsedGraph::Named(n) => GraphNameRef::NamedNode(n.as_ref()),
+        }
+    }
+}
+
+fn parse_graph(s: Option<&str>) -> ParsedGraph {
+    match s {
+        None => ParsedGraph::Default,
+        Some(s) => {
+            let uri = s.strip_prefix('<').and_then(|s| s.strip_suffix('>')).unwrap_or(s);
+            match NamedNode::new(uri) {
+                Ok(n) => ParsedGraph::Named(n),
+                Err(_) => ParsedGraph::Default,
+            }
+        }
+    }
+}
+
 #[inline]
 fn clean_subject(s: &str) -> &str {
     s.strip_prefix('<')
@@ -122,6 +151,16 @@ impl RdfBatchWriter {
             .filter_map(|s| parse_subject(clean_subject(s)).ok())
             .collect();
 
+        // Parse graph names if _graph column exists
+        let parsed_graphs: Vec<ParsedGraph> = if let Ok(graph_col) = filtered.column("_graph") {
+            let graphs = graph_col.cast(&DataType::String)?;
+            let graphs = graphs.str()?;
+            graphs.iter().map(parse_graph).collect()
+        } else {
+            // All default graphs
+            vec![ParsedGraph::Default; filtered.height()]
+        };
+
         // Stream rdf:type triples (if present)
         if let Ok(type_col) = filtered.column("_type") {
             let types = type_col.cast(&DataType::String)?;
@@ -129,10 +168,10 @@ impl RdfBatchWriter {
             let pred = parse_predicate(RDF_TYPE)?;
 
             // Subject guaranteed non-null, only check object
-            for (subj, obj) in parsed_subjects.iter().zip(types.iter()) {
+            for ((subj, graph), obj) in parsed_subjects.iter().zip(parsed_graphs.iter()).zip(types.iter()) {
                 if let Some(obj) = obj {
                     let subj_ref = subj.as_ref();
-                    self.write_quad_parsed(&subj_ref, &pred, obj)?;
+                    self.write_quad_parsed(&subj_ref, &pred, obj, graph)?;
                 }
             }
         }
@@ -143,7 +182,7 @@ impl RdfBatchWriter {
             .into_iter()
             .filter(|n| {
                 let s = n.as_str();
-                s != "_subject" && s != "_type"
+                s != "_subject" && s != "_type" && s != "_graph"
             })
             .map(|n| n.to_string())
             .collect();
@@ -155,10 +194,10 @@ impl RdfBatchWriter {
             let objects = objects.str()?;
 
             // Subject guaranteed non-null, only check object
-            for (subj, obj) in parsed_subjects.iter().zip(objects.iter()) {
+            for ((subj, graph), obj) in parsed_subjects.iter().zip(parsed_graphs.iter()).zip(objects.iter()) {
                 if let Some(obj) = obj {
                     let subj_ref = subj.as_ref();
-                    self.write_quad_parsed(&subj_ref, &pred, obj)?;
+                    self.write_quad_parsed(&subj_ref, &pred, obj, graph)?;
                 }
             }
         }
@@ -166,7 +205,7 @@ impl RdfBatchWriter {
         Ok(())
     }
 
-    /// Write a quad with pre-parsed subject (avoids re-parsing subject for each predicate)
+    /// Write a quad with pre-parsed subject and graph
     ///
     /// Uses QuadRef to avoid cloning subject/predicate strings - only references are passed.
     #[inline]
@@ -175,10 +214,11 @@ impl RdfBatchWriter {
         subj: &NamedOrBlankNode,
         pred: &NamedNode,
         obj: &str,
+        graph: &ParsedGraph,
     ) -> PolarsResult<()> {
         let obj = parse_object(obj)?;
         // Use QuadRef::new with references - no string cloning
-        let quad = QuadRef::new(subj, pred, &obj, GraphNameRef::DefaultGraph);
+        let quad = QuadRef::new(subj, pred, &obj, graph.as_ref());
         self.serializer
             .serialize_quad(quad)
             .map_err(|_| PolarsError::ComputeError("Serialization failed".into()))

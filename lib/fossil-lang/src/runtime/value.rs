@@ -9,27 +9,10 @@ use crate::ir::{ExprId, Param};
 use crate::traits::source::Source;
 
 /// A transformation to apply to a LazyFrame
-///
-/// Transformations are accumulated and only applied when the plan is executed.
 #[derive(Debug, Clone)]
 pub enum Transform {
     /// Select specific columns/expressions
     Select(Vec<Expr>),
-    /// Filter rows based on a predicate
-    Filter(Expr),
-    /// Add or replace a column
-    WithColumn(Expr),
-}
-
-impl Transform {
-    /// Apply this transformation to a LazyFrame
-    pub fn apply(&self, lf: LazyFrame) -> LazyFrame {
-        match self {
-            Transform::Select(exprs) => lf.select(exprs.clone()),
-            Transform::Filter(expr) => lf.filter(expr.clone()),
-            Transform::WithColumn(expr) => lf.with_column(expr.clone()),
-        }
-    }
 }
 
 /// A lazy plan for data processing
@@ -47,8 +30,6 @@ pub struct Plan {
     pub type_def_id: Option<DefId>,
     /// Schema of the output (known at compile-time)
     pub schema: Arc<Schema>,
-    /// Meta-fields from record construction (@name = expr)
-    pub meta_fields: MetaFields,
     /// Output specs for multi-output serialization
     /// Empty = single output normal plan, non-empty = multi-output plan
     pub outputs: Vec<OutputSpec>,
@@ -65,7 +46,6 @@ impl Plan {
             transforms: Vec::new(),
             type_def_id: None,
             schema: Arc::new(schema),
-            meta_fields: Vec::new(),
             outputs: Vec::new(),
             pending_exprs: None,
         }
@@ -82,7 +62,6 @@ impl Plan {
             transforms: Vec::new(),
             type_def_id: Some(type_def_id),
             schema: Arc::new(schema),
-            meta_fields: Vec::new(),
             outputs: Vec::new(),
             pending_exprs: None,
         }
@@ -98,7 +77,6 @@ impl Plan {
             transforms: Vec::new(),
             type_def_id: Some(type_def_id),
             schema: Arc::new(schema),
-            meta_fields: Vec::new(),
             outputs: Vec::new(),
             pending_exprs: Some(select_exprs),
         }
@@ -111,28 +89,9 @@ impl Plan {
             transforms: Vec::new(),
             type_def_id: None,
             schema: Arc::new(schema),
-            meta_fields: Vec::new(),
             outputs: Vec::new(),
             pending_exprs: None,
         }
-    }
-
-    /// Add a transformation to the plan
-    pub fn add_transform(mut self, transform: Transform) -> Self {
-        self.transforms.push(transform);
-        self
-    }
-
-    /// Add type def id to the plan
-    pub fn with_type_def_id(mut self, def_id: DefId) -> Self {
-        self.type_def_id = Some(def_id);
-        self
-    }
-
-    /// Update the schema (after a transformation changes it)
-    pub fn with_schema(mut self, schema: Schema) -> Self {
-        self.schema = Arc::new(schema);
-        self
     }
 
     /// Check if this is a pending transformation (not backed by a real source)
@@ -140,52 +99,16 @@ impl Plan {
         self.pending_exprs.is_some()
     }
 
-    /// Take pending expressions (consumes them)
-    pub fn take_pending_exprs(&mut self) -> Option<Vec<Expr>> {
-        self.pending_exprs.take()
-    }
-
-    /// Apply a pending transformation to this plan
-    ///
-    /// If `other` is a pending plan (from tracing), extracts its select expressions
-    /// and adds them as a Transform::Select to this plan.
-    pub fn apply_pending(&self, other: &Plan) -> Option<Self> {
-        if let Some(ref select_exprs) = other.pending_exprs {
-            let mut result = self.clone();
-            result
-                .transforms
-                .push(Transform::Select(select_exprs.clone()));
-            result.type_def_id = other.type_def_id;
-            result.schema = other.schema.clone();
-            result.outputs = other.outputs.clone();
-            Some(result)
-        } else {
-            None
-        }
-    }
-
     /// Check if this plan has multi-output specs
     pub fn has_outputs(&self) -> bool {
         !self.outputs.is_empty()
-    }
-
-    /// Add an output spec to the plan (converts to multi-output plan)
-    pub fn with_output(mut self, output: OutputSpec) -> Self {
-        self.outputs.push(output);
-        self
-    }
-
-    /// Set output specs for multi-output serialization
-    pub fn with_outputs(mut self, outputs: Vec<OutputSpec>) -> Self {
-        self.outputs = outputs;
-        self
     }
 }
 
 /// Output specification for a single type in an OutputPlan
 ///
 /// Contains the type's DefId (for metadata lookup), the transformation
-/// expressions to apply to the source data, and projection attributes.
+/// expressions to apply to the source data, and constructor arguments.
 #[derive(Clone)]
 pub struct OutputSpec {
     /// DefId of the output type (for obtaining RdfMetadata)
@@ -195,11 +118,9 @@ pub struct OutputSpec {
     pub select_exprs: Vec<Expr>,
     /// Output schema after transformation
     pub schema: Arc<Schema>,
-    /// Meta-fields from record construction (@name = expr)
-    pub meta_fields: MetaFields,
+    /// Constructor arguments (positional: subject, graph, ...)
+    pub ctor_args: Vec<Expr>,
 }
-
-pub type MetaFields = Vec<(crate::context::Symbol, Expr)>;
 
 /// Runtime values in the Fossil language
 ///
@@ -260,22 +181,6 @@ impl Value {
             _ => None,
         }
     }
-
-    /// Try to extract a literal i64 from an Expr value
-    pub fn as_literal_int(&self) -> Option<i64> {
-        match self {
-            Value::Expr(expr) => extract_literal_int(expr),
-            _ => None,
-        }
-    }
-
-    /// Try to extract a literal bool from an Expr value
-    pub fn as_literal_bool(&self) -> Option<bool> {
-        match self {
-            Value::Expr(expr) => extract_literal_bool(expr),
-            _ => None,
-        }
-    }
 }
 
 /// Generic helper to extract a value from a Polars literal expression
@@ -316,33 +221,6 @@ fn extract_literal_string(expr: &polars::prelude::Expr) -> Option<String> {
     })
 }
 
-/// Extract an integer literal from a Polars expression
-fn extract_literal_int(expr: &polars::prelude::Expr) -> Option<i64> {
-    use polars::prelude::AnyValue;
-
-    extract_literal(expr, |av| match av {
-        AnyValue::Int64(i) => Some(*i),
-        AnyValue::Int32(i) => Some(*i as i64),
-        AnyValue::Int16(i) => Some(*i as i64),
-        AnyValue::Int8(i) => Some(*i as i64),
-        AnyValue::UInt64(i) => Some(*i as i64),
-        AnyValue::UInt32(i) => Some(*i as i64),
-        AnyValue::UInt16(i) => Some(*i as i64),
-        AnyValue::UInt8(i) => Some(*i as i64),
-        _ => None,
-    })
-}
-
-/// Extract a boolean literal from a Polars expression
-fn extract_literal_bool(expr: &polars::prelude::Expr) -> Option<bool> {
-    use polars::prelude::AnyValue;
-
-    extract_literal(expr, |av| match av {
-        AnyValue::Boolean(b) => Some(*b),
-        _ => None,
-    })
-}
-
 #[derive(Clone, Default)]
 pub struct Environment {
     bindings: HashMap<Symbol, Value>,
@@ -355,10 +233,5 @@ impl Environment {
 
     pub fn lookup(&self, name: Symbol) -> Option<&Value> {
         self.bindings.get(&name)
-    }
-
-    pub fn with_binding(mut self, name: Symbol, value: Value) -> Self {
-        self.bind(name, value);
-        self
     }
 }

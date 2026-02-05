@@ -1,7 +1,7 @@
 pub mod rdf;
 
 // RDF serialization
-pub use rdf::{MapFunction, RdfMetadata, RdfSerializeFunction};
+pub use rdf::{RdfMetadata, RdfSerializeFunction};
 
 use fossil_lang::passes::GlobalContext;
 
@@ -30,8 +30,4 @@ pub fn init(gcx: &mut GlobalContext) {
 
     // Register RDF serialization functions
     gcx.register_function("Rdf", "serialize", RdfSerializeFunction);
-
-    // Register map() as a variadic function for multi-output streaming
-    // Accepts: map(source, fn1, fn2, fn3, ...)
-    gcx.register_variadic_toplevel_function("map", MapFunction);
 }

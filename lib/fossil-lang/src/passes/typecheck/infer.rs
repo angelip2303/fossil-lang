@@ -117,11 +117,7 @@ impl TypeChecker {
                 }
             }
 
-            ExprKind::NamedRecordConstruction {
-                type_ident,
-                fields,
-                meta_fields,
-            } => {
+            ExprKind::NamedRecordConstruction { type_ident, fields } => {
                 // Get the type from the resolved identifier
                 let type_def_id = type_ident.def_id();
 
@@ -130,12 +126,6 @@ impl TypeChecker {
 
                 for (_name, field_expr) in fields {
                     let (s, _field_ty) = self.infer(*field_expr)?;
-                    subst = subst.compose(&s, &mut self.ir);
-                }
-
-                // Infer meta-field expressions
-                for (_name, meta_expr) in meta_fields {
-                    let (s, _) = self.infer(*meta_expr)?;
                     subst = subst.compose(&s, &mut self.ir);
                 }
 
@@ -150,11 +140,7 @@ impl TypeChecker {
                 let mut local_env = self.env.clone();
 
                 for param in params {
-                    let param_ty = if let Some(annotation_ty) = param.ty {
-                        annotation_ty
-                    } else {
-                        self.fresh_type_var(loc)
-                    };
+                    let param_ty = self.fresh_type_var(loc);
 
                     if let Some(def_id) = param.def_id {
                         local_env.insert(def_id, Polytype::mono(param_ty));
@@ -328,6 +314,53 @@ impl TypeChecker {
                 }
                 let ty = self.ir.string_type();
                 Ok((subst, ty))
+            }
+
+            ExprKind::ForYield {
+                source,
+                outputs,
+                binding_def_id,
+                ..
+            } => {
+                // Infer source type first
+                let (mut subst, _source_ty) = self.infer(*source)?;
+
+                // Add binding to type environment with a fresh type variable
+                // (the binding represents a row which has dynamic fields)
+                let saved_env = self.env.clone();
+
+                if let Some(def_id) = binding_def_id {
+                    let row_ty = self.fresh_type_var(loc);
+                    self.env.insert(*def_id, Polytype::mono(row_ty));
+                }
+
+                // Infer types for all outputs, collecting their DefIds
+                let mut output_def_ids = Vec::new();
+                for output in outputs {
+                    let type_def_id = output.type_ident.def_id();
+                    output_def_ids.push(type_def_id);
+
+                    // Verify constructor argument count matches type parameters
+                    self.check_ctor_arg_count(type_def_id, output.ctor_args.len(), loc)?;
+
+                    // Infer types for constructor args
+                    for ctor_arg in &output.ctor_args {
+                        let (s, _arg_ty) = self.infer(*ctor_arg)?;
+                        subst = subst.compose(&s, &mut self.ir);
+                    }
+
+                    // Infer types for fields
+                    for (_name, field_expr) in &output.fields {
+                        let (s, _field_ty) = self.infer(*field_expr)?;
+                        subst = subst.compose(&s, &mut self.ir);
+                    }
+                }
+
+                // Restore environment
+                self.env = saved_env;
+
+                let result_ty = self.fresh_type_var(loc);
+                Ok((subst, result_ty))
             }
         };
 

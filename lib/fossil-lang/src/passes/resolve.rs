@@ -169,13 +169,8 @@ impl IrResolver {
 
         match &stmt.kind {
             StmtKind::Let {
-                name, ty, value, ..
+                name, value, ..
             } => {
-                // Resolve type if present
-                if let Some(type_id) = ty {
-                    self.resolve_type(*type_id, errors);
-                }
-
                 // Resolve value
                 self.resolve_expr(*value, errors);
 
@@ -241,11 +236,7 @@ impl IrResolver {
                 }
             }
 
-            ExprKind::NamedRecordConstruction {
-                type_ident,
-                fields,
-                meta_fields,
-            } => {
+            ExprKind::NamedRecordConstruction { type_ident, fields } => {
                 // Resolve the type identifier
                 if let Ident::Unresolved(path) = type_ident
                     && let Some(def_id) = self.resolve_type_path(path, expr.loc, errors)
@@ -262,11 +253,6 @@ impl IrResolver {
                 for (_, field_expr) in fields {
                     self.resolve_expr(*field_expr, errors);
                 }
-
-                // Resolve meta-field expressions
-                for (_, meta_expr) in meta_fields {
-                    self.resolve_expr(*meta_expr, errors);
-                }
             }
 
             ExprKind::Function { params, body, .. } => {
@@ -282,11 +268,6 @@ impl IrResolver {
                     let expr_mut = self.ir.exprs.get_mut(expr_id);
                     if let ExprKind::Function { params: ps, .. } = &mut expr_mut.kind {
                         ps[i].def_id = Some(def_id);
-                    }
-
-                    // Resolve type annotation
-                    if let Some(ty) = param.ty {
-                        self.resolve_type(ty, errors);
                     }
 
                     // Resolve default
@@ -322,6 +303,65 @@ impl IrResolver {
                 for &expr in exprs {
                     self.resolve_expr(expr, errors);
                 }
+            }
+
+            ExprKind::ForYield {
+                source,
+                outputs,
+                binding,
+                ..
+            } => {
+                // Resolve the source expression first (outside the binding scope)
+                self.resolve_expr(*source, errors);
+
+                // Create a new scope for the binding
+                self.scopes.push();
+
+                // Add binding to scope and store in IR
+                let binding_def_id =
+                    self.gcx
+                        .definitions
+                        .insert(None, *binding, crate::context::DefKind::Let);
+                self.scopes
+                    .current_mut()
+                    .values
+                    .insert(*binding, binding_def_id);
+
+                // Store the binding_def_id in the IR expression
+                {
+                    let expr_mut = self.ir.exprs.get_mut(expr_id);
+                    if let ExprKind::ForYield {
+                        binding_def_id: bd, ..
+                    } = &mut expr_mut.kind
+                    {
+                        *bd = Some(binding_def_id);
+                    }
+                }
+
+                // Resolve each output
+                for (idx, output) in outputs.iter().enumerate() {
+                    // Resolve the type identifier
+                    if let Ident::Unresolved(path) = &output.type_ident
+                        && let Some(def_id) = self.resolve_type_path(path, expr.loc, errors)
+                    {
+                        let expr_mut = self.ir.exprs.get_mut(expr_id);
+                        if let ExprKind::ForYield { outputs: o, .. } = &mut expr_mut.kind {
+                            o[idx].type_ident = Ident::Resolved(def_id);
+                        }
+                    }
+
+                    // Resolve constructor arguments
+                    for ctor_arg in &output.ctor_args {
+                        self.resolve_expr(*ctor_arg, errors);
+                    }
+
+                    // Resolve field expressions
+                    for (_, field_expr) in &output.fields {
+                        self.resolve_expr(*field_expr, errors);
+                    }
+                }
+
+                self.scopes.pop();
             }
 
             ExprKind::Unit | ExprKind::Literal(_) => {}

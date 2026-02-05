@@ -11,9 +11,9 @@ use chumsky::pratt::{infix, left, postfix};
 use chumsky::prelude::*;
 
 use crate::ast::ast::{
-    self as ast, Argument, Ast, Attribute, AttributeArg, Expr, ExprId, ExprKind, Literal, Param,
-    Path, PrimitiveType, ProviderArgument, RecordField, Stmt, StmtId, StmtKind, Type, TypeId,
-    TypeKind,
+    Argument, Ast, Attribute, AttributeArg, CtorParam, Expr, ExprId, ExprKind, ForYieldOutput,
+    Literal, Param, Path, PrimitiveType, ProviderArgument, RecordField, Stmt, StmtId, StmtKind,
+    Type, TypeId, TypeKind,
 };
 use crate::ast::{Loc, SourceId};
 use crate::context::{Interner, Symbol};
@@ -21,11 +21,6 @@ use crate::parser::lexer::Token;
 
 type ParserError<'a> = extra::Err<Rich<'a, Token<'a>, SimpleSpan>>;
 
-/// Helper enum for parsing record fields (regular or metadata)
-enum RecordFieldOrMeta {
-    Field(Symbol, ExprId),
-    Meta(Symbol, ExprId),
-}
 
 #[derive(Clone)]
 pub struct AstCtx {
@@ -78,11 +73,10 @@ where
     // Use parse_binding_name to allow both identifiers and underscore (discard pattern)
     let let_stmt = just(Token::Let)
         .then(parse_binding_name(ctx))
-        .then(just(Token::Colon).ignore_then(parse_type(ctx)).or_not())
         .then_ignore(just(Token::Eq))
         .then(expr.clone())
-        .map_with(|(((_, name), ty), value), e| {
-            ctx.alloc_stmt(StmtKind::Let { name, ty, value }, ctx.to_loc(e.span()))
+        .map_with(|((_, name), value), e| {
+            ctx.alloc_stmt(StmtKind::Let { name, value }, ctx.to_loc(e.span()))
         });
 
     // Const statement: const name = expr
@@ -94,32 +88,45 @@ where
             ctx.alloc_stmt(StmtKind::Const { name, value }, ctx.to_loc(e.span()))
         });
 
-    // Type statement with optional leading attributes:
-    // #[rdf(type = "...", id = "...")]
-    // type Name = Type
+    // Type statement with optional leading attributes and constructor params:
+    // #[rdf(type = "...", base = "...")]
+    // type Name(id: string, graph: string) = Type
+    //
+    // Constructor params are optional and provide metadata for record construction.
+
+    // Parse a single constructor param: name: type
+    let ctor_param = parse_symbol(ctx)
+        .then_ignore(just(Token::Colon))
+        .then(parse_type(ctx))
+        .map(|(name, ty)| CtorParam { name, ty });
+
+    // Parse optional constructor params list: (id: string, graph: string)
+    let ctor_params = ctor_param
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LParen), just(Token::RParen))
+        .or_not()
+        .map(|opt| opt.unwrap_or_default());
+
     let type_stmt = parse_attribute(ctx)
         .repeated()
         .collect::<Vec<_>>()
         .then(just(Token::Type))
         .then(parse_symbol(ctx))
-        .then(
-            // Detect invalid type annotation pattern: `: SomeType`
-            just(Token::Colon)
-                .ignore_then(parse_type(ctx))
-                .map_with(|_, e| Some(e.span()))
-                .or_not()
-                .map(|opt| opt.flatten())
-        )
+        .then(ctor_params)
         .then_ignore(just(Token::Eq))
         .then(parse_type(ctx))
-        .validate(|((((attrs, _), name), invalid_annotation_span), ty), e, emitter| {
-            if let Some(annotation_span) = invalid_annotation_span {
-                emitter.emit(Rich::custom(
-                    annotation_span,
-                    "Type declarations cannot have type annotations. Remove the `: <type>` after the name."
-                ));
-            }
-            ctx.alloc_stmt(StmtKind::Type { name, ty, attrs }, ctx.to_loc(e.span()))
+        .map_with(|((((attrs, _), name), ctor_params), ty), e| {
+            ctx.alloc_stmt(
+                StmtKind::Type {
+                    name,
+                    ty,
+                    attrs,
+                    ctor_params,
+                },
+                ctx.to_loc(e.span()),
+            )
         });
 
     let expr_stmt =
@@ -176,8 +183,8 @@ where
     }
 }
 
-/// Parse a parameter with optional type annotation and default value:
-/// `name`, `name: type`, `name = default`, or `name: type = default`
+/// Parse a parameter with optional default value:
+/// `name` or `name = default`
 fn parse_param<'a, I>(
     ctx: &'a AstCtx,
     expr: impl Parser<'a, I, ExprId, ParserError<'a>> + Clone + 'a,
@@ -186,9 +193,8 @@ where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
     parse_param_name(ctx)
-        .then(just(Token::Colon).ignore_then(parse_type(ctx)).or_not())
         .then(just(Token::Eq).ignore_then(expr).or_not())
-        .map(|((name, ty), default)| Param { name, ty, default })
+        .map(|(name, default)| Param { name, default })
 }
 
 fn parse_primitive_type<'a, I>() -> impl Parser<'a, I, PrimitiveType, ParserError<'a>> + Clone
@@ -285,25 +291,11 @@ where
                 ctx.alloc_expr(ExprKind::Block { stmts }, ctx.to_loc(e.span()))
             });
 
-        // Named record construction: TypeName { @id = ..., @graph = ..., field = value, ... }
+        // Named record construction: TypeName { field = value, ... }
         // Uses = for field assignment (consistent with let syntax)
-        // @id and @graph are special metadata fields
-
-        // Regular field: name = expr
-        let regular_field = parse_symbol(ctx)
+        let record_field = parse_symbol(ctx)
             .then_ignore(just(Token::Eq))
-            .then(expr.clone())
-            .map(|(name, value)| RecordFieldOrMeta::Field(name, value));
-
-        // Metadata field: @id = expr or @graph = expr
-        let meta_field = just(Token::At)
-            .ignore_then(parse_symbol(ctx))
-            .then_ignore(just(Token::Eq))
-            .then(expr.clone())
-            .map(|(name, value)| RecordFieldOrMeta::Meta(name, value));
-
-        // Either regular field or metadata field
-        let record_field = meta_field.or(regular_field);
+            .then(expr.clone());
 
         let named_record = parse_path(ctx)
             .then(
@@ -313,27 +305,9 @@ where
                     .collect::<Vec<_>>()
                     .delimited_by(just(Token::LBrace), just(Token::RBrace)),
             )
-            .map_with(|(type_path, items), e| {
-                let mut fields = Vec::new();
-                let mut metadata: ast::RecordMetadata = Vec::new();
-
-                for item in items {
-                    match item {
-                        RecordFieldOrMeta::Field(name, value) => {
-                            fields.push((name, value));
-                        }
-                        RecordFieldOrMeta::Meta(name, value) => {
-                            metadata.push((name, value));
-                        }
-                    }
-                }
-
+            .map_with(|(type_path, fields), e| {
                 ctx.alloc_expr(
-                    ExprKind::NamedRecordConstruction {
-                        type_path,
-                        fields,
-                        metadata,
-                    },
+                    ExprKind::NamedRecordConstruction { type_path, fields },
                     ctx.to_loc(e.span()),
                 )
             });
@@ -403,11 +377,78 @@ where
                 ctx.alloc_expr(ExprKind::Application { callee, args }, ctx.to_loc(e.span()))
             });
 
+        // For-yield expression:
+        // Single output: for row in source yield Type(args) { name = value }
+        // Multiple outputs: for row in source { yield Type(args) { ... }  yield Type(args) { ... } }
+
+        // Field assignment: name = expr
+        let for_yield_field = parse_symbol(ctx)
+            .then_ignore(just(Token::Eq))
+            .then(expr.clone());
+
+        // Constructor arguments: (expr, expr, ...)
+        let ctor_args = expr
+            .clone()
+            .separated_by(just(Token::Comma))
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LParen), just(Token::RParen));
+
+        // Named fields: { name = value, ... }
+        let named_fields = for_yield_field
+            .clone()
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace));
+
+        // Single output: Type(ctor_args) { fields }
+        let single_output = parse_path(ctx)
+            .then(ctor_args.clone())
+            .then(named_fields.clone())
+            .map(|((type_path, ctor_args), fields)| ForYieldOutput {
+                type_path,
+                ctor_args,
+                fields,
+            });
+
+        // Multiple outputs with yield statements: { yield A  yield B }
+        let yield_stmt = just(Token::Yield)
+            .ignore_then(single_output.clone());
+
+        let multiple_outputs = yield_stmt
+            .repeated()
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace));
+
+        // for row in source yield Type(...) { fields }   -- single output
+        // for row in source { yield Type1(...)  yield Type2(...) }  -- multiple outputs
+        let for_yield = just(Token::For)
+            .ignore_then(parse_symbol(ctx))
+            .then_ignore(just(Token::In))
+            .then(expr.clone())
+            .then(
+                // Single output: yield Type(args) { fields }
+                just(Token::Yield)
+                    .ignore_then(single_output)
+                    .map(|o| vec![o])
+                    // Multiple outputs: { yield Type1, yield Type2 }
+                    .or(multiple_outputs),
+            )
+            .map_with(|((binding, source), outputs), e| {
+                ctx.alloc_expr(
+                    ExprKind::ForYield { binding, source, outputs },
+                    ctx.to_loc(e.span()),
+                )
+            });
+
         // Ordering matters:
         // - Function must come before application/path to avoid parsing 'fn' as identifier
+        // - for_yield must come before other expressions (starts with 'for' keyword)
         // - named_record must come before path (TypeName { ... } vs TypeName)
         // - block must be after named_record since both involve { }
         let atom = choice((
+            for_yield,
             function,
             application,
             unit,

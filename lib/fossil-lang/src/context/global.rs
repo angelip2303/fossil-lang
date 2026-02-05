@@ -178,11 +178,10 @@ impl GlobalContext {
     /// Example:
     /// ```ignore
     /// use fossil_lang::passes::GlobalContext;
-    /// use fossil_stdlib::MapFunction;
     ///
     /// let mut gcx = GlobalContext::default();
-    /// gcx.register_variadic_toplevel_function("map", MapFunction);
-    /// // Now callable as: map(source, fn1, fn2, fn3, ...)
+    /// gcx.register_variadic_toplevel_function("print", PrintFunction);
+    /// // Now callable as: print(arg1, arg2, arg3, ...)
     /// ```
     pub fn register_variadic_toplevel_function(
         &mut self,

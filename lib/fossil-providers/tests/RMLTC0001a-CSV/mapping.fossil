@@ -1,13 +1,10 @@
 type Input = csv!("tests/RMLTC0001a-CSV/student.csv")
 
-type Output = {
+#[rdf(base = "http://example.com/")]
+type Output(subject: string) = {
     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
     Name: string,
 }
 
-Input::load()
-|> map(fn(row) -> Output {
-    @id = "http://example.com/${row.Name}",
-    Name = row.Name
-})
+for row in Input::load() yield Output(row.Name) { Name = row.Name }
 |> Rdf::serialize("tests/RMLTC0001a-CSV/actual.nq")

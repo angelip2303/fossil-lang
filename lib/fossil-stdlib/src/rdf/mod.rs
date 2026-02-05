@@ -12,7 +12,7 @@ use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::chunked_executor::{ChunkedExecutor, estimate_batch_size_from_plan};
-use fossil_lang::runtime::value::{OutputSpec, Plan, Value};
+use fossil_lang::runtime::value::{Plan, Value};
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 
 use oxrdf::{NamedNode, Term, TermParseError};
@@ -30,22 +30,6 @@ pub enum RdfError {
     InvalidPredicate(String),
     #[error(transparent)]
     TermParse(#[from] TermParseError),
-
-    // Function argument errors
-    #[error("map() requires at least 1 argument: source")]
-    MapMissingSource,
-    #[error("map() first argument must be Records (from a type provider)")]
-    MapInvalidSource,
-    #[error("map() requires at least one transform closure")]
-    MapMissingTransform,
-    #[error("map() transform must return a typed record (e.g., Type {{ field = value }})")]
-    MapTransformNotTyped,
-    #[error("map() transform must return a record type")]
-    MapTransformNotRecord,
-    #[error("map() transform requires at least one parameter")]
-    MapTransformNoParams,
-    #[error("map() expects a function as argument")]
-    MapNotAFunction,
 
     // Serialize errors
     #[error("Rdf::serialize requires input and filename")]
@@ -82,119 +66,6 @@ pub fn is_subject(s: &str) -> Result<(), RdfError> {
 pub fn is_predicate(s: &str) -> Result<(), RdfError> {
     NamedNode::from_str(s).map_err(|_| RdfError::InvalidPredicate(s.into()))?;
     Ok(())
-}
-
-pub struct MapFunction;
-
-impl FunctionImpl for MapFunction {
-    fn signature(
-        &self,
-        ir: &mut Ir,
-        next_type_var: &mut dyn FnMut() -> TypeVar,
-        _gcx: &GlobalContext,
-    ) -> Polytype {
-        // forall S O R. (List<S>, fn(S) -> O) -> R
-        let s_var = next_type_var();
-        let o_var = next_type_var();
-        let r_var = next_type_var();
-
-        let s_ty = ir.var_type(s_var);
-        let o_ty = ir.var_type(o_var);
-        let r_ty = ir.var_type(r_var);
-
-        let list_s = ir.list_type(s_ty);
-        let transform_fn = ir.fn_type(vec![s_ty], o_ty);
-
-        Polytype::poly(
-            vec![s_var, o_var, r_var],
-            ir.fn_type(vec![list_s, transform_fn], r_ty),
-        )
-    }
-
-    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
-        if args.is_empty() {
-            return Err(RdfError::MapMissingSource.into());
-        }
-
-        let source_plan = match &args[0] {
-            Value::Plan(plan) => plan.clone(),
-            _ => return Err(RdfError::MapInvalidSource.into()),
-        };
-
-        let closures = &args[1..];
-        if closures.is_empty() {
-            return Err(RdfError::MapMissingTransform.into());
-        }
-
-        let mut outputs = Vec::with_capacity(closures.len());
-
-        for transform_fn in closures {
-            let row_context = Value::Plan(Plan::empty(source_plan.schema.as_ref().clone()));
-
-            let traced_result = trace_transform(transform_fn, row_context, ctx)?;
-
-            let (select_exprs, output_schema, type_def_id, meta_fields) = match traced_result {
-                Value::Plan(mut traced_plan) => {
-                    if let Some(exprs) = traced_plan.take_pending_exprs() {
-                        let type_def_id = traced_plan
-                            .type_def_id
-                            .ok_or(RdfError::MapTransformNotTyped)?;
-                        (
-                            exprs,
-                            traced_plan.schema,
-                            type_def_id,
-                            traced_plan.meta_fields.clone(),
-                        )
-                    } else {
-                        return Err(RdfError::MapTransformNotRecord.into());
-                    }
-                }
-                _ => return Err(RdfError::MapTransformNotRecord.into()),
-            };
-
-            outputs.push(OutputSpec {
-                type_def_id,
-                select_exprs,
-                schema: output_schema,
-                meta_fields,
-            });
-        }
-
-        // Return Plan with outputs (unified abstraction)
-        let mut result = source_plan.clone();
-        result.outputs = outputs;
-        Ok(Value::Plan(result))
-    }
-}
-
-/// Trace a transformation function to discover the output structure
-fn trace_transform(
-    transform_fn: &Value,
-    row_context: Value,
-    ctx: &RuntimeContext,
-) -> Result<Value, FossilError> {
-    use fossil_lang::runtime::evaluator::IrEvaluator;
-
-    match transform_fn {
-        Value::Closure {
-            params, body, env, ..
-        } => {
-            let mut closure_env = (**env).clone();
-
-            if let Some(first_param) = params.first() {
-                closure_env.bind(first_param.name, row_context);
-            } else {
-                return Err(RdfError::MapTransformNoParams.into());
-            }
-
-            let mut evaluator = IrEvaluator::new(ctx.ir, ctx.gcx, closure_env);
-            Ok(evaluator.eval(*body)?)
-        }
-
-        Value::BuiltinFunction(_, func) => func.call(vec![row_context], ctx),
-
-        _ => Err(RdfError::MapNotAFunction.into()),
-    }
 }
 
 pub struct RdfSerializeFunction;
@@ -286,14 +157,20 @@ fn serialize_rdf(
             // Build a combined selection that operates on source columns directly
             let mut combined_selection: Vec<Expr> = Vec::new();
 
-            // 1. Generate _subject column from @id meta-field
-            // Look for @id by comparing symbol names
-            for (name, expr) in &output_spec.meta_fields {
-                let name_str = interner.resolve(*name);
-                if name_str == "id" {
-                    combined_selection.push(expr.clone().alias("_subject"));
-                }
-                // TODO: Handle @graph for named graphs
+            // 1. Generate _subject and _graph columns from constructor arguments (positional)
+            // Position 0 = subject, Position 1 = graph (optional)
+            if let Some(subject_expr) = output_spec.ctor_args.first() {
+                // Apply base prefix if defined
+                let subject_expr = if let Some(ref base) = rdf_metadata.base {
+                    concat_str([lit(base.as_str()), subject_expr.clone()], "", true)
+                } else {
+                    subject_expr.clone()
+                };
+                combined_selection.push(subject_expr.alias("_subject"));
+            }
+
+            if let Some(graph_expr) = output_spec.ctor_args.get(1) {
+                combined_selection.push(graph_expr.clone().alias("_graph"));
             }
 
             // 2. Add _type column if rdf_type is specified

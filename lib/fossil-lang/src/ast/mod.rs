@@ -2,9 +2,9 @@ pub mod ast;
 
 // Re-export commonly used types from ast module directly
 pub use self::ast::{
-    Argument, Ast, Attribute, AttributeArg, Expr, ExprId, ExprKind, Literal, Param, Path,
-    PrimitiveType, ProviderArgument, RecordField, RecordMetadata, Stmt, StmtId, StmtKind, Type,
-    TypeId, TypeKind,
+    Argument, Ast, Attribute, AttributeArg, CtorParam, Expr, ExprId, ExprKind, Literal, Param,
+    Path, PrimitiveType, ProviderArgument, RecordField, Stmt, StmtId, StmtKind, Type, TypeId,
+    TypeKind,
 };
 
 pub type SourceId = usize;

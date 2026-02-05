@@ -157,25 +157,15 @@ impl TypeChecker {
     fn check_stmt(&mut self, stmt_id: StmtId) -> Result<(), FossilError> {
         let stmt = self.ir.stmts.get(stmt_id);
         let stmt_kind = stmt.kind.clone();
-        let loc = stmt.loc;
 
         match stmt_kind {
             StmtKind::Let {
                 name: _,
                 def_id,
-                ty: type_annotation,
                 value,
             } => {
-                let (mut subst, inferred_ty) = self.infer(value)?;
-                let inferred_ty = subst.apply(inferred_ty, &mut self.ir);
-
-                let final_ty = if let Some(annotation_ty) = type_annotation {
-                    let s = self.unify(annotation_ty, inferred_ty, loc)?;
-                    subst = subst.compose(&s, &mut self.ir);
-                    subst.apply(annotation_ty, &mut self.ir)
-                } else {
-                    inferred_ty
-                };
+                let (subst, inferred_ty) = self.infer(value)?;
+                let final_ty = subst.apply(inferred_ty, &mut self.ir);
 
                 self.global_subst = self.global_subst.compose(&subst, &mut self.ir);
 
