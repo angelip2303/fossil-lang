@@ -235,3 +235,112 @@ impl Environment {
         self.bindings.get(&name)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::Interner;
+    use polars::prelude::{lit, Schema};
+
+    // ── Value tests ──────────────────────────────────────────────
+
+    #[test]
+    fn value_unit() {
+        let v = Value::Unit;
+        let v2 = v.clone();
+        assert!(matches!(v, Value::Unit));
+        assert!(matches!(v2, Value::Unit));
+    }
+
+    #[test]
+    fn value_as_literal_string_from_expr() {
+        let v = Value::Expr(lit("hello"));
+        assert_eq!(v.as_literal_string(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn value_as_literal_string_from_non_string() {
+        let v = Value::Expr(lit(42));
+        assert_eq!(v.as_literal_string(), None);
+    }
+
+    #[test]
+    fn value_as_literal_string_from_unit() {
+        assert_eq!(Value::Unit.as_literal_string(), None);
+    }
+
+    #[test]
+    fn value_as_literal_string_from_plan() {
+        let v = Value::Plan(Plan::empty(Schema::default()));
+        assert_eq!(v.as_literal_string(), None);
+    }
+
+    // ── Environment tests ────────────────────────────────────────
+
+    #[test]
+    fn env_bind_and_lookup() {
+        let mut interner = Interner::default();
+        let sym_x = interner.intern("x");
+
+        let mut env = Environment::default();
+        env.bind(sym_x, Value::Expr(lit(42)));
+
+        assert!(env.lookup(sym_x).is_some());
+    }
+
+    #[test]
+    fn env_lookup_missing() {
+        let mut interner = Interner::default();
+        let sym_x = interner.intern("x");
+
+        let env = Environment::default();
+        assert!(env.lookup(sym_x).is_none());
+    }
+
+    #[test]
+    fn env_overwrite_binding() {
+        let mut interner = Interner::default();
+        let sym_x = interner.intern("x");
+
+        let mut env = Environment::default();
+        env.bind(sym_x, Value::Expr(lit(1)));
+        env.bind(sym_x, Value::Expr(lit(2)));
+
+        // Should retrieve the latest binding
+        let val = env.lookup(sym_x).unwrap();
+        match val {
+            Value::Expr(expr) => {
+                let s = format!("{:?}", expr);
+                assert!(s.contains('2'), "expected lit(2), got {:?}", s);
+            }
+            _ => panic!("expected Value::Expr"),
+        }
+    }
+
+    #[test]
+    fn env_multiple_bindings() {
+        let mut interner = Interner::default();
+        let sym_x = interner.intern("x");
+        let sym_y = interner.intern("y");
+        let sym_z = interner.intern("z");
+
+        let mut env = Environment::default();
+        env.bind(sym_x, Value::Expr(lit(1)));
+        env.bind(sym_y, Value::Expr(lit("two")));
+        env.bind(sym_z, Value::Unit);
+
+        assert!(env.lookup(sym_x).is_some());
+        assert!(env.lookup(sym_y).is_some());
+        assert!(env.lookup(sym_z).is_some());
+    }
+
+    #[test]
+    fn env_default_empty() {
+        let mut interner = Interner::default();
+        let sym_a = interner.intern("a");
+
+        let env = Environment::default();
+        assert!(env.lookup(sym_a).is_none());
+        assert_eq!(env.bindings.len(), 0);
+    }
+}

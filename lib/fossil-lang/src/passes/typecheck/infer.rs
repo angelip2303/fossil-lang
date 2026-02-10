@@ -315,53 +315,6 @@ impl TypeChecker {
                 let ty = self.ir.string_type();
                 Ok((subst, ty))
             }
-
-            ExprKind::ForYield {
-                source,
-                outputs,
-                binding_def_id,
-                ..
-            } => {
-                // Infer source type first
-                let (mut subst, _source_ty) = self.infer(*source)?;
-
-                // Add binding to type environment with a fresh type variable
-                // (the binding represents a row which has dynamic fields)
-                let saved_env = self.env.clone();
-
-                if let Some(def_id) = binding_def_id {
-                    let row_ty = self.fresh_type_var(loc);
-                    self.env.insert(*def_id, Polytype::mono(row_ty));
-                }
-
-                // Infer types for all outputs, collecting their DefIds
-                let mut output_def_ids = Vec::new();
-                for output in outputs {
-                    let type_def_id = output.type_ident.def_id();
-                    output_def_ids.push(type_def_id);
-
-                    // Verify constructor argument count matches type parameters
-                    self.check_ctor_arg_count(type_def_id, output.ctor_args.len(), loc)?;
-
-                    // Infer types for constructor args
-                    for ctor_arg in &output.ctor_args {
-                        let (s, _arg_ty) = self.infer(*ctor_arg)?;
-                        subst = subst.compose(&s, &mut self.ir);
-                    }
-
-                    // Infer types for fields
-                    for (_name, field_expr) in &output.fields {
-                        let (s, _field_ty) = self.infer(*field_expr)?;
-                        subst = subst.compose(&s, &mut self.ir);
-                    }
-                }
-
-                // Restore environment
-                self.env = saved_env;
-
-                let result_ty = self.fresh_type_var(loc);
-                Ok((subst, result_ty))
-            }
         };
 
         // Cache the result
@@ -370,5 +323,328 @@ impl TypeChecker {
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ir::{PrimitiveType, StmtKind, TypeKind, TypeRef};
+
+    /// Compile source and return the IrProgram
+    fn compile_ok(src: &str) -> crate::passes::IrProgram {
+        let parsed = crate::passes::parse::Parser::parse(src, 0).expect("parse failed");
+        let expand_result = crate::passes::expand::ProviderExpander::new((parsed.ast, parsed.gcx))
+            .expand()
+            .expect("expand failed");
+        let ty = crate::context::extract_type_metadata(&expand_result.ast);
+        let ir = crate::passes::convert::ast_to_ir(expand_result.ast);
+        let (ir, gcx) = crate::passes::resolve::IrResolver::new(ir, expand_result.gcx)
+            .with_type_metadata(ty)
+            .resolve()
+            .expect("resolve failed");
+        super::TypeChecker::new(ir, gcx)
+            .check()
+            .expect("typecheck failed")
+    }
+
+    /// Compile and expect a type error
+    fn compile_type_err(src: &str) {
+        let parsed = crate::passes::parse::Parser::parse(src, 0).expect("parse failed");
+        let expand_result = crate::passes::expand::ProviderExpander::new((parsed.ast, parsed.gcx))
+            .expand()
+            .expect("expand failed");
+        let ty = crate::context::extract_type_metadata(&expand_result.ast);
+        let ir = crate::passes::convert::ast_to_ir(expand_result.ast);
+        let (ir, gcx) = crate::passes::resolve::IrResolver::new(ir, expand_result.gcx)
+            .with_type_metadata(ty)
+            .resolve()
+            .expect("resolve failed");
+        assert!(
+            super::TypeChecker::new(ir, gcx).check().is_err(),
+            "Expected a type error but compilation succeeded"
+        );
+    }
+
+    /// Get the type of the value expression of a let binding at a given root stmt index
+    fn get_let_value_type(prog: &crate::passes::IrProgram, stmt_idx: usize) -> &TypeKind {
+        let stmt_id = prog.ir.root[stmt_idx];
+        let stmt = prog.ir.stmts.get(stmt_id);
+        if let StmtKind::Let { value, .. } = &stmt.kind {
+            let expr = prog.ir.exprs.get(*value);
+            if let TypeRef::Known(ty_id) = &expr.ty {
+                return &prog.ir.types.get(*ty_id).kind;
+            }
+        }
+        panic!("Expected let with known type at index {}", stmt_idx);
+    }
+
+    // ---------------------------------------------------------------
+    // Literals
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn infer_integer_literal() {
+        let prog = compile_ok("let x = 42");
+        let ty = get_let_value_type(&prog, 0);
+        assert!(
+            matches!(ty, TypeKind::Primitive(PrimitiveType::Int)),
+            "Expected Primitive(Int), got {:?}",
+            ty
+        );
+    }
+
+    #[test]
+    fn infer_string_literal() {
+        let prog = compile_ok(r#"let x = "hello""#);
+        let ty = get_let_value_type(&prog, 0);
+        assert!(
+            matches!(ty, TypeKind::Primitive(PrimitiveType::String)),
+            "Expected Primitive(String), got {:?}",
+            ty
+        );
+    }
+
+    #[test]
+    fn infer_bool_literal() {
+        let prog = compile_ok("let x = true");
+        let ty = get_let_value_type(&prog, 0);
+        assert!(
+            matches!(ty, TypeKind::Primitive(PrimitiveType::Bool)),
+            "Expected Primitive(Bool), got {:?}",
+            ty
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Variables
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn infer_variable_reference() {
+        let prog = compile_ok("let x = 42\nlet y = x");
+        let ty = get_let_value_type(&prog, 1);
+        assert!(
+            matches!(ty, TypeKind::Primitive(PrimitiveType::Int)),
+            "Expected Primitive(Int), got {:?}",
+            ty
+        );
+    }
+
+    #[test]
+    fn infer_let_binding_propagates_type() {
+        let prog = compile_ok("let x = \"hi\"\nlet y = x");
+        let ty = get_let_value_type(&prog, 1);
+        assert!(
+            matches!(ty, TypeKind::Primitive(PrimitiveType::String)),
+            "Expected Primitive(String), got {:?}",
+            ty
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Lists
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn infer_homogeneous_list() {
+        let prog = compile_ok("let x = [1, 2, 3]");
+        let ty = get_let_value_type(&prog, 0);
+        match ty {
+            TypeKind::List(elem_ty_id) => {
+                let elem_ty = &prog.ir.types.get(*elem_ty_id).kind;
+                assert!(
+                    matches!(elem_ty, TypeKind::Primitive(PrimitiveType::Int)),
+                    "Expected list element Primitive(Int), got {:?}",
+                    elem_ty
+                );
+            }
+            _ => panic!("Expected List type, got {:?}", ty),
+        }
+    }
+
+    #[test]
+    fn infer_empty_list() {
+        let prog = compile_ok("let x = []");
+        let ty = get_let_value_type(&prog, 0);
+        assert!(
+            matches!(ty, TypeKind::List(_)),
+            "Expected List type, got {:?}",
+            ty
+        );
+    }
+
+    #[test]
+    fn infer_heterogeneous_list_error() {
+        compile_type_err("let x = [1, \"hello\"]");
+    }
+
+    // ---------------------------------------------------------------
+    // Functions
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn infer_function() {
+        let prog = compile_ok("let f = fn(x) -> x");
+        let ty = get_let_value_type(&prog, 0);
+        match ty {
+            TypeKind::Function(params, _ret) => {
+                assert_eq!(params.len(), 1, "Expected 1 parameter, got {}", params.len());
+            }
+            _ => panic!("Expected Function type, got {:?}", ty),
+        }
+    }
+
+    #[test]
+    fn infer_function_application() {
+        let prog = compile_ok("let f = fn(x) -> x\nlet y = f(42)");
+        let ty = get_let_value_type(&prog, 1);
+        assert!(
+            matches!(ty, TypeKind::Primitive(PrimitiveType::Int)),
+            "Expected Primitive(Int), got {:?}",
+            ty
+        );
+    }
+
+    #[test]
+    fn infer_function_application_arity_error() {
+        compile_type_err("let f = fn(x) -> x\nf(1, 2)");
+    }
+
+    // ---------------------------------------------------------------
+    // Records and Fields
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn infer_record_construction() {
+        let prog = compile_ok("type T = { Name: string }\nlet x = T { Name = \"hi\" }");
+        // stmt 0 is the type, stmt 1 is the let
+        let ty = get_let_value_type(&prog, 1);
+        assert!(
+            matches!(ty, TypeKind::Named(_)),
+            "Expected Named type, got {:?}",
+            ty
+        );
+    }
+
+    #[test]
+    fn infer_field_access() {
+        let prog = compile_ok(
+            "type T = { Name: string }\nlet x = T { Name = \"hi\" }\nlet y = x.Name",
+        );
+        // stmt 0 = type, stmt 1 = let x, stmt 2 = let y
+        let ty = get_let_value_type(&prog, 2);
+        assert!(
+            matches!(ty, TypeKind::Primitive(PrimitiveType::String)),
+            "Expected Primitive(String), got {:?}",
+            ty
+        );
+    }
+
+    #[test]
+    fn infer_field_not_found_error() {
+        compile_type_err(
+            "type T = { Name: string }\nlet x = T { Name = \"hi\" }\nlet y = x.Age",
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Blocks
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn infer_block_returns_last() {
+        let prog = compile_ok("let x = {\n  let y = 42\n  y\n}");
+        let ty = get_let_value_type(&prog, 0);
+        assert!(
+            matches!(ty, TypeKind::Primitive(PrimitiveType::Int)),
+            "Expected Primitive(Int), got {:?}",
+            ty
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // String interpolation
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn infer_string_interpolation() {
+        let prog = compile_ok("let name = \"world\"\nlet x = \"hello ${name}\"");
+        let ty = get_let_value_type(&prog, 1);
+        assert!(
+            matches!(ty, TypeKind::Primitive(PrimitiveType::String)),
+            "Expected Primitive(String), got {:?}",
+            ty
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Unit rejection
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn infer_unit_literal() {
+        // Unit is a valid expression; binding it to a let is allowed in the current type system
+        let prog = compile_ok("let x = ()");
+        let ty = get_let_value_type(&prog, 0);
+        assert!(
+            matches!(ty, TypeKind::Unit),
+            "Expected Unit type, got {:?}",
+            ty
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Additional tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn infer_list_of_strings() {
+        let prog = compile_ok(r#"let x = ["a", "b", "c"]"#);
+        let ty = get_let_value_type(&prog, 0);
+        match ty {
+            TypeKind::List(elem_ty_id) => {
+                let elem_ty = &prog.ir.types.get(*elem_ty_id).kind;
+                assert!(
+                    matches!(elem_ty, TypeKind::Primitive(PrimitiveType::String)),
+                    "Expected list element Primitive(String), got {:?}",
+                    elem_ty
+                );
+            }
+            _ => panic!("Expected List type, got {:?}", ty),
+        }
+    }
+
+    #[test]
+    fn infer_function_identity_param_return_match() {
+        // Identity function: param type and return type should unify
+        let prog = compile_ok("let f = fn(x) -> x");
+        let ty = get_let_value_type(&prog, 0);
+        match ty {
+            TypeKind::Function(params, ret) => {
+                assert_eq!(params.len(), 1);
+                // The param type and return type should be the same type id
+                assert_eq!(params[0], *ret, "Identity function param and return should unify");
+            }
+            _ => panic!("Expected Function type, got {:?}", ty),
+        }
+    }
+
+    #[test]
+    fn infer_nested_field_access() {
+        // Access a field on a record obtained from another record's field
+        let prog = compile_ok(
+            "type Inner = { Value: int }\n\
+             type Outer = { Child: Inner }\n\
+             let inner = Inner { Value = 42 }\n\
+             let outer = Outer { Child = inner }\n\
+             let v = outer.Child.Value",
+        );
+        // stmt 0 = type Inner, 1 = type Outer, 2 = let inner, 3 = let outer, 4 = let v
+        let ty = get_let_value_type(&prog, 4);
+        assert!(
+            matches!(ty, TypeKind::Primitive(PrimitiveType::Int)),
+            "Expected Primitive(Int), got {:?}",
+            ty
+        );
     }
 }

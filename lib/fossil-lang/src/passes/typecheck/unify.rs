@@ -91,6 +91,23 @@ impl TypeChecker {
                 self.unify(elem1, elem2, loc)
             }
 
+            // Optional types: T? ~ T? → unify inner
+            (TypeKind::Optional(inner1), TypeKind::Optional(inner2)) => {
+                let inner1 = *inner1;
+                let inner2 = *inner2;
+                self.unify(inner1, inner2, loc)
+            }
+
+            // Widening: T ~ T? → unify T with inner
+            (_, TypeKind::Optional(inner2)) => {
+                let inner2 = *inner2;
+                self.unify(ty1_id, inner2, loc)
+            }
+            (TypeKind::Optional(inner1), _) => {
+                let inner1 = *inner1;
+                self.unify(inner1, ty2_id, loc)
+            }
+
             // Applied types (generic types like List<T>, Entity<T>)
             (
                 TypeKind::App {
@@ -223,6 +240,7 @@ impl TypeChecker {
                 params.iter().any(|p| self.occurs_in(var, *p)) || self.occurs_in(var, *ret)
             }
             TypeKind::List(elem) => self.occurs_in(var, *elem),
+            TypeKind::Optional(inner) => self.occurs_in(var, *inner),
             TypeKind::Primitive(_)
             | TypeKind::Named(_)
             | TypeKind::Unit

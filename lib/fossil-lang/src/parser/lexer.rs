@@ -14,12 +14,6 @@ pub enum Token<'a> {
     Type,
     #[token("fn")]
     Func,
-    #[token("for")]
-    For,
-    #[token("in")]
-    In,
-    #[token("yield")]
-    Yield,
     #[token("true")]
     True,
     #[token("false")]
@@ -69,6 +63,8 @@ pub enum Token<'a> {
     Bang,
     #[token("@")]
     At,
+    #[token("?")]
+    Question,
 
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice(), priority = 2)]
     Identifier(&'a str),

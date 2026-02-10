@@ -94,30 +94,6 @@ pub enum ExprKind {
         parts: Vec<Symbol>,
         exprs: Vec<ExprId>,
     },
-    /// A for-yield expression for transforming data
-    /// Single output: `for row in source yield TypeName(args) { fields }`
-    /// Multiple outputs: `for row in source yield { TypeName(args) { fields }, ... }`
-    ///
-    /// This provides a declarative way to transform rows into typed records.
-    ForYield {
-        /// The binding name for each row (e.g., `row`)
-        binding: Symbol,
-        /// The source expression to iterate over (e.g., `Data::load()`)
-        source: ExprId,
-        /// One or more output specifications
-        outputs: Vec<ForYieldOutput>,
-    },
-}
-
-/// A single output in a for-yield expression
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ForYieldOutput {
-    /// The type path for the output records
-    pub type_path: Path,
-    /// Arguments for constructor parameters in order matching type definition
-    pub ctor_args: Vec<ExprId>,
-    /// Named field assignments: `{ name = value, age = value }`
-    pub fields: Vec<(Symbol, ExprId)>,
 }
 
 #[derive(Debug)]
@@ -143,6 +119,8 @@ pub enum TypeKind {
     Function(Vec<TypeId>, TypeId),
     /// A list type `[T]`
     List(TypeId),
+    /// An optional type `T?`
+    Optional(TypeId),
     /// A record type `{ field: T, field: T, ... }`
     Record(Vec<RecordField>),
     /// An applied type (type constructor application) `Name<T1, T2, ...>`

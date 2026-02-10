@@ -51,12 +51,12 @@ impl GlobalContext {
     /// Register a type constructor
     ///
     /// This allows external crates (like fossil-stdlib) to register
-    /// generic types like Entity, Option, Result, etc.
+    /// generic types like Validated, Entity, Result, etc.
     ///
     /// # Arguments
     ///
-    /// * `name` - The name of the type constructor (e.g., "Entity", "Option")
-    /// * `arity` - The number of type parameters (e.g., 1 for Entity<T>, 2 for Map<K,V>)
+    /// * `name` - The name of the type constructor (e.g., "Validated", "Entity")
+    /// * `arity` - The number of type parameters (e.g., 1 for Validated<T>, 2 for Map<K,V>)
     ///
     /// # Returns
     ///
@@ -69,8 +69,8 @@ impl GlobalContext {
     /// use fossil_lang::passes::GlobalContext;
     ///
     /// let mut gcx = GlobalContext::default();
-    /// let option_def_id = gcx.register_type_constructor("Option", 1);
-    /// // Now Option can be used as Option<T> in the type system
+    /// let validated_def_id = gcx.register_type_constructor("Validated", 1);
+    /// // Now Validated can be used as Validated<T> in the type system
     /// ```
     pub fn register_type_constructor(&mut self, name: &str, arity: usize) -> DefId {
         let sym = self.interner.intern(name);

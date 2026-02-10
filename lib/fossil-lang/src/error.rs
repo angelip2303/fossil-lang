@@ -619,3 +619,59 @@ impl IntoIterator for FossilWarnings {
         self.0.into_iter()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::Loc;
+
+    fn dummy_loc() -> Loc {
+        Loc::new(0, 0..10)
+    }
+
+    #[test]
+    fn errors_push_and_len() {
+        let mut errors = FossilErrors::new();
+        errors.push(FossilError::syntax("bad token", dummy_loc()));
+        errors.push(FossilError::syntax("another error", dummy_loc()));
+        assert_eq!(errors.len(), 2);
+    }
+
+    #[test]
+    fn errors_is_empty() {
+        let mut errors = FossilErrors::new();
+        assert!(errors.is_empty());
+        errors.push(FossilError::syntax("oops", dummy_loc()));
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn errors_into_result_ok() {
+        let errors = FossilErrors::new();
+        let result = errors.into_result(42);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn errors_into_result_err() {
+        let mut errors = FossilErrors::new();
+        errors.push(FossilError::syntax("fail", dummy_loc()));
+        let result = errors.into_result(42);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn error_constructors() {
+        let loc = dummy_loc();
+
+        let syntax_err = FossilError::syntax("unexpected token", loc);
+        assert!(matches!(syntax_err, FossilError::Syntax { ref message, .. } if message == "unexpected token"));
+
+        let undef_err = FossilError::undefined_variable("x", loc);
+        assert!(matches!(undef_err, FossilError::UndefinedVariable { ref name, .. } if name == "x"));
+
+        let mismatch_err = FossilError::type_mismatch("expected Int, got String", loc);
+        assert!(matches!(mismatch_err, FossilError::TypeMismatch { ref message, .. } if message == "expected Int, got String"));
+    }
+}

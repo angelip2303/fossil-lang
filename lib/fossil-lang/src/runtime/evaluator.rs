@@ -6,7 +6,7 @@ use crate::ast::Loc;
 use crate::context::{DefId, Symbol};
 use crate::error::FossilError;
 use crate::ir::{
-    Argument, ExprId, ExprKind, Ident, Ir, IrForYieldOutput, StmtId, StmtKind, TypeKind, TypeRef,
+    Argument, ExprId, ExprKind, Ident, Ir, StmtId, StmtKind, TypeKind, TypeRef,
 };
 use crate::passes::GlobalContext;
 use crate::runtime::value::Value;
@@ -201,25 +201,6 @@ impl<'a> IrEvaluator<'a> {
             ExprKind::StringInterpolation { parts, exprs } => {
                 self.eval_string_interpolation(parts, exprs)
             }
-
-            ExprKind::ForYield {
-                source,
-                binding,
-                outputs,
-                ..
-            } => {
-                // Evaluate the source first to get its Plan
-                let source_val = self.eval(*source)?;
-                let source_plan = match source_val {
-                    Value::Plan(plan) => plan,
-                    _ => {
-                        return Err(
-                            self.make_error("for-yield source must be a Plan (from Input::load())")
-                        );
-                    }
-                };
-                self.eval_for_yield(source_plan, *binding, outputs)
-            }
         }
     }
 
@@ -346,84 +327,6 @@ impl<'a> IrEvaluator<'a> {
         Ok(Value::Expr(concat_list(exprs).map_err(|e| {
             self.make_error(format!("Failed to create list expression: {}", e))
         })?))
-    }
-
-    /// Evaluate a for-yield expression with one or more outputs.
-    ///
-    /// Single: `for row in source yield TypeName(args) { fields }`
-    /// Multiple: `for row in source yield { Type1(args) { fields }, Type2(args) { fields } }`
-    fn eval_for_yield(
-        &mut self,
-        source_plan: crate::runtime::value::Plan,
-        binding: Symbol,
-        outputs: &[IrForYieldOutput],
-    ) -> Result<Value, FossilError> {
-        use crate::runtime::value::{OutputSpec, Plan};
-
-        // Get source schema from the provided plan
-        let source_schema = source_plan.schema.as_ref().clone();
-
-        // Create a row context plan for field access tracing
-        let row_plan = Plan::empty(source_schema);
-
-        // Bind the row variable for field access tracing
-        self.env.bind(binding, Value::Plan(row_plan));
-
-        // Start with the source plan
-        let mut result_plan = source_plan;
-
-        // Process each output
-        for output in outputs {
-            // Get the DefId from the resolved type identifier
-            let type_def_id = match &output.type_ident {
-                Ident::Resolved(def_id) => *def_id,
-                Ident::Unresolved(_) => {
-                    return Err(self.make_error("Unresolved type identifier in for-yield"));
-                }
-            };
-
-            // Evaluate constructor arguments (positional: subject, graph, ...)
-            let ctor_args: Vec<Expr> = output
-                .ctor_args
-                .iter()
-                .filter_map(|expr_id| {
-                    if let Ok(Value::Expr(e)) = self.eval(*expr_id) {
-                        Some(e)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            // Build select expressions from all fields
-            let select_exprs: Vec<Expr> = output
-                .fields
-                .iter()
-                .map(|(name, expr_id)| {
-                    let value = self.eval(*expr_id)?;
-                    let name_str = self.gcx.interner.resolve(*name);
-                    match value {
-                        Value::Expr(expr) => Ok(expr.alias(name_str)),
-                        _ => Ok(lit(NULL).alias(name_str)),
-                    }
-                })
-                .collect::<Result<Vec<_>, FossilError>>()?;
-
-            // Build schema from expressions
-            let schema = build_schema_from_exprs(&select_exprs);
-
-            // Create an OutputSpec
-            let output_spec = OutputSpec {
-                type_def_id,
-                select_exprs,
-                schema: std::sync::Arc::new(schema),
-                ctor_args,
-            };
-
-            result_plan.outputs.push(output_spec);
-        }
-
-        Ok(Value::Plan(result_plan))
     }
 
     /// Find a type statement by name, returning its TypeId

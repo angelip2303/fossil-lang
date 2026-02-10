@@ -89,6 +89,14 @@ impl Ir {
         })
     }
 
+    /// Create an Optional type wrapping the given inner type
+    pub fn optional_type(&mut self, inner: TypeId) -> TypeId {
+        self.types.alloc(Type {
+            loc: Loc::generated(),
+            kind: TypeKind::Optional(inner),
+        })
+    }
+
     /// Create a Named type referencing a defined type by its DefId
     pub fn named_type(&mut self, def_id: DefId) -> TypeId {
         self.types.alloc(Type {
@@ -254,30 +262,6 @@ pub enum ExprKind {
         parts: Vec<Symbol>,
         exprs: Vec<ExprId>,
     },
-    /// A for-yield expression for transforming data
-    /// Single: `for row in source yield TypeName(args) { fields }`
-    /// Multiple: `for row in source yield { Type1(args) { fields }, Type2(args) { fields } }`
-    ForYield {
-        /// The binding name for each row
-        binding: Symbol,
-        /// The DefId for the binding (set during resolution)
-        binding_def_id: Option<DefId>,
-        /// The source expression (produces a Plan)
-        source: ExprId,
-        /// One or more output specifications
-        outputs: Vec<IrForYieldOutput>,
-    },
-}
-
-/// A single output in a for-yield expression (IR version)
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct IrForYieldOutput {
-    /// The type identifier (resolved to DefId after resolution)
-    pub type_ident: Ident,
-    /// Arguments for constructor parameters in order
-    pub ctor_args: Vec<ExprId>,
-    /// Named field assignments: `{ name = value, age = value }`
-    pub fields: Vec<(Symbol, ExprId)>,
 }
 
 /// A parameter in a function
@@ -336,6 +320,8 @@ pub enum TypeKind {
     Function(Vec<TypeId>, TypeId),
     /// A list type `[T]`
     List(TypeId),
+    /// An optional type `T?`
+    Optional(TypeId),
     /// A record type with named fields (no row polymorphism)
     Record(RecordFields),
     /// An applied type `Name<T1, T2, ...>`

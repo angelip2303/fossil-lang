@@ -6,7 +6,6 @@ type Output(subject: string) = {
     owes: int,
 }
 
-for row in Input::load() yield Output("http://example.com/${row.fname};${row.lname}") {
-    owes = row.amount
-}
+Input::load()
+|> fn(row) -> Output("http://example.com/${row.fname};${row.lname}") { owes = row.amount }
 |> Rdf::serialize("tests/RMLTC0005a-CSV/actual.nq")

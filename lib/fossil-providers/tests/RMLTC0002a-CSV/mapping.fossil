@@ -5,7 +5,6 @@ type Output(subject: string) = {
     Name: string,
 }
 
-for row in Input::load() yield Output("http://example.com/${row.Name}") {
-    Name = row.Name
-}
+Input::load()
+|> fn(row) -> Output("http://example.com/${row.Name}") { Name = row.Name }
 |> Rdf::serialize("tests/RMLTC0002a-CSV/actual.nq")

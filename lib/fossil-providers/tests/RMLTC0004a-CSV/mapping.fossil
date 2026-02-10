@@ -12,10 +12,11 @@ type Sport(subject: string) = {
     Name: string,
 }
 
-let transformations =
-    for row in StudentSport::load() {
-        yield Student("http://example.com/${row.Student}") { Name = row.Student }
-        yield Sport("http://example.com/${row.Sport}") { Name = row.Sport }
-    }
+let students = StudentSport::load()
+    |> fn(row) -> Student("http://example.com/${row.Student}") { Name = row.Student }
 
-Rdf::serialize(transformations, "tests/RMLTC0004a-CSV/actual.nq")
+let sports = StudentSport::load()
+    |> fn(row) -> Sport("http://example.com/${row.Sport}") { Name = row.Sport }
+
+students |> Rdf::serialize("tests/RMLTC0004a-CSV/actual.nq")
+sports |> Rdf::serialize("tests/RMLTC0004a-CSV/actual.nq")

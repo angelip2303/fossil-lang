@@ -61,6 +61,7 @@ impl TypeChecker {
                 format!("{{{}}}", self.format_fields(fields))
             }
             TypeKind::List(elem) => format!("[{}]", self.format_type(*elem)),
+            TypeKind::Optional(inner) => format!("{}?", self.format_type(*inner)),
             TypeKind::Provider { .. } => "<provider>".to_string(),
         }
     }

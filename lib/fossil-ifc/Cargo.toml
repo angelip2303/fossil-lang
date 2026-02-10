@@ -1,0 +1,24 @@
+[package]
+name = "fossil-ifc"
+version.workspace = true
+description.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# external dependencies
+polars.workspace = true
+
+# internal dependencies
+fossil-lang.workspace = true
+
+[dev-dependencies]
+fossil-providers.workspace = true
+fossil-stdlib.workspace = true

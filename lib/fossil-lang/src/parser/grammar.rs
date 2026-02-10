@@ -11,7 +11,7 @@ use chumsky::pratt::{infix, left, postfix};
 use chumsky::prelude::*;
 
 use crate::ast::ast::{
-    Argument, Ast, Attribute, AttributeArg, CtorParam, Expr, ExprId, ExprKind, ForYieldOutput,
+    Argument, Ast, Attribute, AttributeArg, CtorParam, Expr, ExprId, ExprKind,
     Literal, Param, Path, PrimitiveType, ProviderArgument, RecordField, Stmt, StmtId, StmtKind,
     Type, TypeId, TypeKind,
 };
@@ -377,78 +377,11 @@ where
                 ctx.alloc_expr(ExprKind::Application { callee, args }, ctx.to_loc(e.span()))
             });
 
-        // For-yield expression:
-        // Single output: for row in source yield Type(args) { name = value }
-        // Multiple outputs: for row in source { yield Type(args) { ... }  yield Type(args) { ... } }
-
-        // Field assignment: name = expr
-        let for_yield_field = parse_symbol(ctx)
-            .then_ignore(just(Token::Eq))
-            .then(expr.clone());
-
-        // Constructor arguments: (expr, expr, ...)
-        let ctor_args = expr
-            .clone()
-            .separated_by(just(Token::Comma))
-            .collect::<Vec<_>>()
-            .delimited_by(just(Token::LParen), just(Token::RParen));
-
-        // Named fields: { name = value, ... }
-        let named_fields = for_yield_field
-            .clone()
-            .separated_by(just(Token::Comma))
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(just(Token::LBrace), just(Token::RBrace));
-
-        // Single output: Type(ctor_args) { fields }
-        let single_output = parse_path(ctx)
-            .then(ctor_args.clone())
-            .then(named_fields.clone())
-            .map(|((type_path, ctor_args), fields)| ForYieldOutput {
-                type_path,
-                ctor_args,
-                fields,
-            });
-
-        // Multiple outputs with yield statements: { yield A  yield B }
-        let yield_stmt = just(Token::Yield)
-            .ignore_then(single_output.clone());
-
-        let multiple_outputs = yield_stmt
-            .repeated()
-            .at_least(1)
-            .collect::<Vec<_>>()
-            .delimited_by(just(Token::LBrace), just(Token::RBrace));
-
-        // for row in source yield Type(...) { fields }   -- single output
-        // for row in source { yield Type1(...)  yield Type2(...) }  -- multiple outputs
-        let for_yield = just(Token::For)
-            .ignore_then(parse_symbol(ctx))
-            .then_ignore(just(Token::In))
-            .then(expr.clone())
-            .then(
-                // Single output: yield Type(args) { fields }
-                just(Token::Yield)
-                    .ignore_then(single_output)
-                    .map(|o| vec![o])
-                    // Multiple outputs: { yield Type1, yield Type2 }
-                    .or(multiple_outputs),
-            )
-            .map_with(|((binding, source), outputs), e| {
-                ctx.alloc_expr(
-                    ExprKind::ForYield { binding, source, outputs },
-                    ctx.to_loc(e.span()),
-                )
-            });
-
         // Ordering matters:
         // - Function must come before application/path to avoid parsing 'fn' as identifier
-        // - for_yield must come before other expressions (starts with 'for' keyword)
         // - named_record must come before path (TypeName { ... } vs TypeName)
         // - block must be after named_record since both involve { }
         let atom = choice((
-            for_yield,
             function,
             application,
             unit,
@@ -731,5 +664,13 @@ where
             provider,
             named_or_app,
         ))
+        .then(just(Token::Question).or_not())
+        .map_with(|(inner, opt_q), e| {
+            if opt_q.is_some() {
+                ctx.alloc_type(TypeKind::Optional(inner), ctx.to_loc(e.span()))
+            } else {
+                inner
+            }
+        })
     })
 }

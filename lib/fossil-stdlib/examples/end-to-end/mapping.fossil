@@ -5,6 +5,6 @@ type Data = csv!("${ROOT}/people.csv")
 #[rdf(base = "http://example.com/person/")] // this should be automatically inferred
 type Person(id: string) = shex!("${ROOT}/person.shex", shape: "PersonShape")
 
-for row in Data::load() {
-    yield Person(row.email) { name = row.name, age = row.age }
-} |> Rdf::serialize("actual.nq")
+Data::load()
+|> fn(row) -> Person(row.email) { name = row.name, age = row.age }
+|> Rdf::serialize("actual.nq")

@@ -1,6 +1,10 @@
-- base se debería de poder inferir de las shapes
-
-
+- Eliminar tanta documentación
+- Eliminar const
+- Creo que pub type_constructors: HashMap<DefId, TypeConstructorInfo>, puede ir fuera, en general hay muchas cosas que están mal por ahí a nivel de cosas repetidas y demás
+- Hay cosas de Ast e IR que se pueden consolidar
+- En general del tema de error hay muchas cosas que se pueden mejorar
+- Tiene que existir una sintaxis que sea { Name } cuando input y source comparten el mismo nombre
+- Debe existir una única sintaxis para el tema de opcional (en general comprobar duplicados)
 
 
 

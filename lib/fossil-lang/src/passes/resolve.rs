@@ -305,65 +305,6 @@ impl IrResolver {
                 }
             }
 
-            ExprKind::ForYield {
-                source,
-                outputs,
-                binding,
-                ..
-            } => {
-                // Resolve the source expression first (outside the binding scope)
-                self.resolve_expr(*source, errors);
-
-                // Create a new scope for the binding
-                self.scopes.push();
-
-                // Add binding to scope and store in IR
-                let binding_def_id =
-                    self.gcx
-                        .definitions
-                        .insert(None, *binding, crate::context::DefKind::Let);
-                self.scopes
-                    .current_mut()
-                    .values
-                    .insert(*binding, binding_def_id);
-
-                // Store the binding_def_id in the IR expression
-                {
-                    let expr_mut = self.ir.exprs.get_mut(expr_id);
-                    if let ExprKind::ForYield {
-                        binding_def_id: bd, ..
-                    } = &mut expr_mut.kind
-                    {
-                        *bd = Some(binding_def_id);
-                    }
-                }
-
-                // Resolve each output
-                for (idx, output) in outputs.iter().enumerate() {
-                    // Resolve the type identifier
-                    if let Ident::Unresolved(path) = &output.type_ident
-                        && let Some(def_id) = self.resolve_type_path(path, expr.loc, errors)
-                    {
-                        let expr_mut = self.ir.exprs.get_mut(expr_id);
-                        if let ExprKind::ForYield { outputs: o, .. } = &mut expr_mut.kind {
-                            o[idx].type_ident = Ident::Resolved(def_id);
-                        }
-                    }
-
-                    // Resolve constructor arguments
-                    for ctor_arg in &output.ctor_args {
-                        self.resolve_expr(*ctor_arg, errors);
-                    }
-
-                    // Resolve field expressions
-                    for (_, field_expr) in &output.fields {
-                        self.resolve_expr(*field_expr, errors);
-                    }
-                }
-
-                self.scopes.pop();
-            }
-
             ExprKind::Unit | ExprKind::Literal(_) => {}
         }
     }
@@ -389,6 +330,10 @@ impl IrResolver {
             }
 
             TypeKind::List(inner) => {
+                self.resolve_type(*inner, errors);
+            }
+
+            TypeKind::Optional(inner) => {
                 self.resolve_type(*inner, errors);
             }
 
@@ -547,5 +492,335 @@ impl IrResolver {
                 .values
                 .insert(type_name, ctor_def_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::extract_type_metadata;
+    use crate::error::FossilError;
+    use crate::ir::{ExprKind, Ident, StmtKind};
+    use crate::passes::convert::ast_to_ir;
+    use crate::passes::expand::ProviderExpander;
+    use crate::passes::parse::Parser;
+
+    fn resolve_ok(src: &str) -> (Ir, GlobalContext) {
+        let parsed = Parser::parse(src, 0).expect("parse failed");
+        let expand_result = ProviderExpander::new((parsed.ast, parsed.gcx))
+            .expand()
+            .expect("expand failed");
+        let ty = extract_type_metadata(&expand_result.ast);
+        let ir = ast_to_ir(expand_result.ast);
+        IrResolver::new(ir, expand_result.gcx)
+            .with_type_metadata(ty)
+            .resolve()
+            .expect("resolve failed")
+    }
+
+    fn resolve_err(src: &str) -> crate::error::FossilErrors {
+        let parsed = Parser::parse(src, 0).expect("parse failed");
+        let expand_result = ProviderExpander::new((parsed.ast, parsed.gcx))
+            .expand()
+            .expect("expand failed");
+        let ty = extract_type_metadata(&expand_result.ast);
+        let ir = ast_to_ir(expand_result.ast);
+        match IrResolver::new(ir, expand_result.gcx)
+            .with_type_metadata(ty)
+            .resolve()
+        {
+            Err(errors) => errors,
+            Ok(_) => panic!("expected resolve error, but resolution succeeded"),
+        }
+    }
+
+    // ── Success tests ────────────────────────────────────────────
+
+    #[test]
+    fn let_gets_def_id() {
+        let (ir, _gcx) = resolve_ok("let x = 42");
+        let stmt = ir.stmts.get(ir.root[0]);
+        match &stmt.kind {
+            StmtKind::Let { def_id, .. } => {
+                assert!(def_id.is_some(), "let binding should have a DefId assigned");
+            }
+            other => panic!("expected Let statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn type_gets_def_id() {
+        let (_ir, gcx) = resolve_ok("type T = { Name: string }");
+        let name_sym = gcx.interner.lookup("T").expect("T should be interned");
+        let def = gcx
+            .definitions
+            .get_by_symbol(name_sym)
+            .expect("T should have a definition");
+        assert!(matches!(def.kind, DefKind::Type));
+    }
+
+    #[test]
+    fn variable_reference_resolves() {
+        let (ir, _gcx) = resolve_ok("let x = 42\nlet y = x");
+        let y_stmt = ir.stmts.get(ir.root[1]);
+        let value_id = match &y_stmt.kind {
+            StmtKind::Let { value, .. } => *value,
+            other => panic!("expected Let statement, got {:?}", other),
+        };
+        let value_expr = ir.exprs.get(value_id);
+        assert!(
+            matches!(&value_expr.kind, ExprKind::Identifier(Ident::Resolved(_))),
+            "expected Ident::Resolved, got {:?}",
+            value_expr.kind
+        );
+    }
+
+    #[test]
+    fn record_constructor_generated() {
+        let src = "type T = { Name: string }\nT { Name = \"hi\" }";
+        let (ir, _gcx) = resolve_ok(src);
+        let expr_stmt = ir.stmts.get(ir.root[1]);
+        let expr_id = match &expr_stmt.kind {
+            StmtKind::Expr(id) => *id,
+            other => panic!("expected Expr statement, got {:?}", other),
+        };
+        let expr = ir.exprs.get(expr_id);
+        match &expr.kind {
+            ExprKind::NamedRecordConstruction { type_ident, .. } => {
+                assert!(
+                    matches!(type_ident, Ident::Resolved(_)),
+                    "expected Ident::Resolved for record type, got {:?}",
+                    type_ident
+                );
+            }
+            other => panic!("expected NamedRecordConstruction, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn function_param_gets_def_id() {
+        let (ir, _gcx) = resolve_ok("let f = fn(x) -> x");
+        let f_stmt = ir.stmts.get(ir.root[0]);
+        let value_id = match &f_stmt.kind {
+            StmtKind::Let { value, .. } => *value,
+            other => panic!("expected Let statement, got {:?}", other),
+        };
+        let func_expr = ir.exprs.get(value_id);
+        match &func_expr.kind {
+            ExprKind::Function { params, .. } => {
+                assert!(!params.is_empty(), "function should have parameters");
+                assert!(
+                    params[0].def_id.is_some(),
+                    "function parameter should have a DefId assigned"
+                );
+            }
+            other => panic!("expected Function, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn forward_reference_function() {
+        let src = "let f = fn(x) -> g(x)\nlet g = fn(x) -> x";
+        let (ir, _gcx) = resolve_ok(src);
+        let f_stmt = ir.stmts.get(ir.root[0]);
+        let f_value = match &f_stmt.kind {
+            StmtKind::Let { value, .. } => *value,
+            other => panic!("expected Let, got {:?}", other),
+        };
+        let func = ir.exprs.get(f_value);
+        let body_id = match &func.kind {
+            ExprKind::Function { body, .. } => *body,
+            other => panic!("expected Function, got {:?}", other),
+        };
+        let body = ir.exprs.get(body_id);
+        match &body.kind {
+            ExprKind::Application { callee, .. } => {
+                let callee_expr = ir.exprs.get(*callee);
+                assert!(
+                    matches!(&callee_expr.kind, ExprKind::Identifier(Ident::Resolved(_))),
+                    "forward-referenced function g should be resolved, got {:?}",
+                    callee_expr.kind
+                );
+            }
+            other => panic!("expected Application, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn block_accesses_outer_scope() {
+        // A block should be able to reference variables defined in the outer scope
+        let src = "let x = 1\nlet y = { x }";
+        let (ir, _gcx) = resolve_ok(src);
+
+        let y_stmt = ir.stmts.get(ir.root[1]);
+        let y_value = match &y_stmt.kind {
+            StmtKind::Let { value, .. } => *value,
+            other => panic!("expected Let, got {:?}", other),
+        };
+        let block_expr = ir.exprs.get(y_value);
+        let block_stmts = match &block_expr.kind {
+            ExprKind::Block { stmts } => stmts.clone(),
+            other => panic!("expected Block, got {:?}", other),
+        };
+
+        // The expression `x` inside the block should resolve
+        let inner_expr_stmt = ir.stmts.get(block_stmts[0]);
+        let inner_expr_id = match &inner_expr_stmt.kind {
+            StmtKind::Expr(id) => *id,
+            other => panic!("expected Expr statement, got {:?}", other),
+        };
+        let inner_expr = ir.exprs.get(inner_expr_id);
+        assert!(
+            matches!(&inner_expr.kind, ExprKind::Identifier(Ident::Resolved(_))),
+            "block should resolve reference to outer x, got {:?}",
+            inner_expr.kind
+        );
+    }
+
+    #[test]
+    fn multiple_let_bindings_resolve() {
+        let src = "let a = 1\nlet b = 2\nlet c = a";
+        let (ir, _gcx) = resolve_ok(src);
+        let c_stmt = ir.stmts.get(ir.root[2]);
+        let c_value = match &c_stmt.kind {
+            StmtKind::Let { value, .. } => *value,
+            other => panic!("expected Let, got {:?}", other),
+        };
+        let c_expr = ir.exprs.get(c_value);
+        assert!(
+            matches!(&c_expr.kind, ExprKind::Identifier(Ident::Resolved(_))),
+            "c should resolve reference to a, got {:?}",
+            c_expr.kind
+        );
+    }
+
+    #[test]
+    fn list_elements_resolve() {
+        let src = "let x = 1\nlet y = [x, x]";
+        let (ir, _gcx) = resolve_ok(src);
+        let y_stmt = ir.stmts.get(ir.root[1]);
+        let y_value = match &y_stmt.kind {
+            StmtKind::Let { value, .. } => *value,
+            other => panic!("expected Let, got {:?}", other),
+        };
+        let list_expr = ir.exprs.get(y_value);
+        match &list_expr.kind {
+            ExprKind::List(items) => {
+                for &item_id in items {
+                    let item = ir.exprs.get(item_id);
+                    assert!(
+                        matches!(&item.kind, ExprKind::Identifier(Ident::Resolved(_))),
+                        "list element should resolve, got {:?}",
+                        item.kind
+                    );
+                }
+            }
+            other => panic!("expected List, got {:?}", other),
+        }
+    }
+
+    // ── Error tests ──────────────────────────────────────────────
+
+    #[test]
+    fn undefined_variable() {
+        let errors = resolve_err("x");
+        assert_eq!(errors.len(), 1);
+        assert!(
+            matches!(&errors.0[0], FossilError::UndefinedVariable { name, .. } if name == "x"),
+            "expected UndefinedVariable for x, got {:?}",
+            errors.0[0]
+        );
+    }
+
+    #[test]
+    fn undefined_type() {
+        let errors = resolve_err("type T = { Name: Foo }");
+        assert_eq!(errors.len(), 1);
+        assert!(
+            matches!(&errors.0[0], FossilError::UndefinedType { path, .. } if path == "Foo"),
+            "expected UndefinedType for Foo, got {:?}",
+            errors.0[0]
+        );
+    }
+
+    #[test]
+    fn undefined_path() {
+        let src = "let y = A.b";
+        let errors = resolve_err(src);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            matches!(
+                &errors.0[0],
+                FossilError::UndefinedPath { .. } | FossilError::UndefinedVariable { .. }
+            ),
+            "expected UndefinedPath or UndefinedVariable for A.b, got {:?}",
+            errors.0[0]
+        );
+    }
+
+    #[test]
+    fn duplicate_type_def() {
+        let src = "type T = { }\ntype T = { }";
+        let errors = resolve_err(src);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            matches!(&errors.0[0], FossilError::AlreadyDefined { name, .. } if name == "T"),
+            "expected AlreadyDefined for T, got {:?}",
+            errors.0[0]
+        );
+    }
+
+    #[test]
+    fn duplicate_let_function() {
+        let src = "let f = fn(x) -> x\nlet f = fn(y) -> y";
+        let errors = resolve_err(src);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            matches!(&errors.0[0], FossilError::AlreadyDefined { name, .. } if name == "f"),
+            "expected AlreadyDefined for f, got {:?}",
+            errors.0[0]
+        );
+    }
+
+    #[test]
+    fn forward_reference_non_function() {
+        let src = "let y = x\nlet x = 42";
+        let errors = resolve_err(src);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            matches!(&errors.0[0], FossilError::UndefinedVariable { name, .. } if name == "x"),
+            "expected UndefinedVariable for x, got {:?}",
+            errors.0[0]
+        );
+    }
+
+    #[test]
+    fn undefined_type_in_record_construction() {
+        let src = "Foo { Name = \"hi\" }";
+        let errors = resolve_err(src);
+        assert!(!errors.is_empty(), "should have at least one error");
+        let has_type_error = errors.0.iter().any(|e| {
+            matches!(
+                e,
+                FossilError::UndefinedType { .. } | FossilError::UndefinedVariable { .. }
+            )
+        });
+        assert!(
+            has_type_error,
+            "expected UndefinedType or UndefinedVariable for Foo, got {:?}",
+            errors.0
+        );
+    }
+
+    #[test]
+    fn undefined_variable_in_block() {
+        let src = "let y = { x }";
+        let errors = resolve_err(src);
+        assert!(!errors.is_empty(), "should have at least one error");
+        assert!(
+            matches!(&errors.0[0], FossilError::UndefinedVariable { name, .. } if name == "x"),
+            "expected UndefinedVariable for x inside block, got {:?}",
+            errors.0[0]
+        );
     }
 }
