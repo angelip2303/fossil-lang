@@ -1,11 +1,11 @@
-type Input = csv!("tests/RMLTC0005a-CSV/ious.csv")
+let input = csv!("tests/RMLTC0005a-CSV/ious.csv")
 
-#[rdf(type = "http://xmlns.com/foaf/0.1/Person")]
-type Output(subject: string) = {
-    #[rdf(uri = "http://example.com/owes")]
-    owes: int,
-}
+@rdf(type = "http://xmlns.com/foaf/0.1/Person")
+type Output(subject: string) do
+    @rdf(uri = "http://example.com/owes")
+    owes: int
+end
 
-Input::load()
-|> fn(row) -> Output("http://example.com/${row.fname};${row.lname}") { owes = row.amount }
-|> Rdf::serialize("tests/RMLTC0005a-CSV/actual.nq")
+input
+|> fn row -> Output("http://example.com/${row.fname};${row.lname}") { owes = row.amount } end
+|> Rdf.serialize("tests/RMLTC0005a-CSV/actual.nq")

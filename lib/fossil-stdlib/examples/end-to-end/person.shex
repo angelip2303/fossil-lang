@@ -1,14 +1,8 @@
+PREFIX : <https://example.com/>
 PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-PREFIX ex: <https://example.com/>
 
-ex:PersonShape {
-    foaf:name xsd:string ;
+:PersonShape {
+    foaf:name xsd:string MinLength 2 ;
     foaf:age xsd:integer
-}
-
-ex:OrganizationShape {
-    foaf:name xsd:string ;
-    ex:employeeCount xsd:integer ;
-    ex:location xsd:string ?
 }

@@ -105,7 +105,6 @@ fn parse_object(s: &str) -> Result<Term, PolarsError> {
         return Ok(node.into());
     }
 
-    // Default: literal
     Ok(Literal::new_simple_literal(s).into())
 }
 
@@ -137,7 +136,6 @@ impl RdfBatchWriter {
             .filter(col("_subject").is_not_null())
             .collect()?;
 
-        // Early exit if no valid rows
         if filtered.height() == 0 {
             return Ok(());
         }
@@ -151,17 +149,14 @@ impl RdfBatchWriter {
             .filter_map(|s| parse_subject(clean_subject(s)).ok())
             .collect();
 
-        // Parse graph names if _graph column exists
         let parsed_graphs: Vec<ParsedGraph> = if let Ok(graph_col) = filtered.column("_graph") {
             let graphs = graph_col.cast(&DataType::String)?;
             let graphs = graphs.str()?;
             graphs.iter().map(parse_graph).collect()
         } else {
-            // All default graphs
             vec![ParsedGraph::Default; filtered.height()]
         };
 
-        // Stream rdf:type triples (if present)
         if let Ok(type_col) = filtered.column("_type") {
             let types = type_col.cast(&DataType::String)?;
             let types = types.str()?;
@@ -176,7 +171,6 @@ impl RdfBatchWriter {
             }
         }
 
-        // Get predicate columns (excluding meta columns)
         let predicate_cols: Vec<String> = filtered
             .get_column_names()
             .into_iter()
@@ -187,7 +181,6 @@ impl RdfBatchWriter {
             .map(|n| n.to_string())
             .collect();
 
-        // Stream each predicate column using pre-parsed subjects
         for name in &predicate_cols {
             let pred = parse_predicate(name)?;
             let objects = filtered.column(name.as_str())?.cast(&DataType::String)?;

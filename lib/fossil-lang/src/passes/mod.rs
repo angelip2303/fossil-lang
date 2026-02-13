@@ -1,4 +1,4 @@
-use crate::ast::ast;
+use crate::ast::Ast;
 use crate::ir;
 
 pub mod convert;
@@ -9,13 +9,11 @@ pub mod typecheck;
 
 pub use crate::context::GlobalContext;
 
-/// Parsed program (AST representation)
 pub struct ParsedProgram {
-    pub ast: ast::Ast,
+    pub ast: Ast,
     pub gcx: GlobalContext,
 }
 
-/// Unified IR program (after resolution and type checking)
 pub struct IrProgram {
     pub ir: ir::Ir,
     pub gcx: GlobalContext,

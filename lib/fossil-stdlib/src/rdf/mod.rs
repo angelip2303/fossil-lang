@@ -102,7 +102,6 @@ impl FunctionImpl for RdfSerializeFunction {
     }
 }
 
-/// falls back to oxigraph for other formats (Turtle, RDF/XML, etc).
 fn serialize_rdf(
     plan: &Plan,
     destination: &str,
@@ -120,7 +119,6 @@ fn serialize_rdf(
     let format =
         RdfFormat::from_extension(&ext).ok_or_else(|| RdfError::UnsupportedFormat(ext.clone()))?;
 
-    // Estimate batch size from plan schema
     let batch_size = estimate_batch_size_from_plan(plan);
 
     // Prepare combined selections for each output
@@ -129,17 +127,19 @@ fn serialize_rdf(
         .outputs
         .iter()
         .map(|output_spec| {
-            // Get type name for better warning messages
             let type_name = ctx.gcx.definitions.get(output_spec.type_def_id).name;
             let type_name_str = interner.resolve(type_name);
 
-            // Get RDF metadata for this output type (with conflict detection)
             let rdf_result = ctx
                 .gcx
                 .type_metadata
                 .get(&output_spec.type_def_id)
                 .map(|tm| {
-                    RdfMetadata::from_type_metadata_with_warnings(tm, &interner, Some(type_name_str))
+                    RdfMetadata::from_type_metadata_with_warnings(
+                        tm,
+                        &interner,
+                        Some(type_name_str),
+                    )
                 });
 
             // Log any warnings (at runtime, we can't use ariadne)
@@ -154,13 +154,11 @@ fn serialize_rdf(
                 .filter(|m| m.has_metadata())
                 .unwrap_or_default();
 
-            // Build a combined selection that operates on source columns directly
             let mut combined_selection: Vec<Expr> = Vec::new();
 
             // 1. Generate _subject and _graph columns from constructor arguments (positional)
             // Position 0 = subject, Position 1 = graph (optional)
             if let Some(subject_expr) = output_spec.ctor_args.first() {
-                // Apply base prefix if defined
                 let subject_expr = if let Some(ref base) = rdf_metadata.base {
                     concat_str([lit(base.as_str()), subject_expr.clone()], "", true)
                 } else {
@@ -173,13 +171,10 @@ fn serialize_rdf(
                 combined_selection.push(graph_expr.clone().alias("_graph"));
             }
 
-            // 2. Add _type column if rdf_type is specified
             if let Some(ref rdf_type) = rdf_metadata.rdf_type {
                 combined_selection.push(lit(rdf_type.as_str()).alias("_type"));
             }
 
-            // 3. Add predicate columns by applying transform expressions
-            // and renaming to their URIs
             for transform_expr in &output_spec.select_exprs {
                 if let Expr::Alias(inner, field_name) = transform_expr
                     && let Some(field_sym) = interner.lookup(field_name)
@@ -196,9 +191,6 @@ fn serialize_rdf(
     serialize_oxigraph(path, format, plan, &output_configs, batch_size)
 }
 
-/// Oxigraph-based serialization (supports all RDF formats)
-///
-/// Used for Turtle, RDF/XML, and other formats that need special handling.
 fn serialize_oxigraph(
     path: PathBuf,
     format: RdfFormat,

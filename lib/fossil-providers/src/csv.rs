@@ -1,9 +1,4 @@
-use std::sync::Arc;
-
 use fossil_lang::ast::Loc;
-use fossil_lang::ast::ast::{
-    Ast, Literal, ProviderArgument, Type as AstType, TypeKind as AstTypeKind,
-};
 use fossil_lang::context::Interner;
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
@@ -11,15 +6,14 @@ use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 use fossil_lang::traits::provider::{
-    FunctionDef, ModuleSpec, ProviderOutput, ProviderParamInfo, TypeProviderImpl, resolve_args,
+    FunctionDef, ModuleSpec, ProviderArgs, ProviderOutput, ProviderParamInfo, ProviderSchema,
+    TypeProviderImpl,
 };
 use fossil_lang::traits::source::Source;
 
 use polars::prelude::*;
 
-use crate::utils::{
-    extract_string_path, lookup_type_id, schema_to_ast_fields, validate_extension, validate_path,
-};
+use crate::utils::{lookup_type_id, polars_schema_to_field_specs, resolve_path, validate_extension, validate_path};
 
 #[derive(Debug, Clone)]
 pub struct CsvOptions {
@@ -73,36 +67,6 @@ impl Source for CsvSource {
     }
 }
 
-fn parse_csv_options(
-    args: &[ProviderArgument],
-    param_info: &[ProviderParamInfo],
-    interner: &Interner,
-    loc: Loc,
-) -> Result<(PlPath, CsvOptions), FossilError> {
-    let resolved = resolve_args(args, param_info, interner, "csv", loc)?;
-
-    let path_lit = resolved.get_positional(0).expect("path is required");
-    let path = extract_string_path(path_lit, interner, loc)?;
-
-    let mut options = CsvOptions::default();
-
-    if let Some(delimiter_sym) = interner.lookup("delimiter") {
-        if let Some(delim_str) = resolved.get_named_string(delimiter_sym, interner) {
-            if !delim_str.is_empty() {
-                options.delimiter = delim_str.as_bytes()[0];
-            }
-        }
-    }
-
-    if let Some(has_header_sym) = interner.lookup("has_header") {
-        if let Some(has_header) = resolved.get_named_bool(has_header_sym) {
-            options.has_header = has_header;
-        }
-    }
-
-    Ok((path, options))
-}
-
 pub struct CsvProvider;
 
 impl TypeProviderImpl for CsvProvider {
@@ -116,65 +80,59 @@ impl TypeProviderImpl for CsvProvider {
             ProviderParamInfo {
                 name: "delimiter",
                 required: false,
-                default: Some(Literal::String(fossil_lang::context::Symbol::synthetic())), // ","
+                default: None,
             },
             ProviderParamInfo {
                 name: "has_header",
                 required: false,
-                default: Some(Literal::Boolean(true)),
+                default: None,
             },
         ]
     }
 
     fn provide(
         &self,
-        args: &[ProviderArgument],
-        ast: &mut Ast,
+        args: &ProviderArgs,
         interner: &mut Interner,
         type_name: &str,
         loc: Loc,
     ) -> Result<ProviderOutput, FossilError> {
-        let (path, options) = parse_csv_options(args, &self.param_info(), interner, loc)?;
+        let path_str = args.require_string("path", "csv", loc)?;
+        let path = resolve_path(path_str);
         validate_extension(path.as_ref(), &["csv"], loc)?;
         validate_path(path.as_ref(), loc)?;
 
-        let csv_source = CsvSource::new(path.clone(), options.clone());
+        let mut options = CsvOptions::default();
+        if let Some(delim_str) = args.get_string("delimiter") {
+            if !delim_str.is_empty() {
+                options.delimiter = delim_str.as_bytes()[0];
+            }
+        }
+        if let Some(has_header) = args.get_bool("has_header") {
+            options.has_header = has_header;
+        }
+
+        let csv_source = CsvSource::new(path, options);
         let schema = csv_source
             .infer_schema()
             .map_err(|e| FossilError::data_error(e.to_string(), loc))?;
-        let fields = schema_to_ast_fields(&schema, ast, interner);
 
-        let record_ty = ast.types.alloc(AstType {
-            loc,
-            kind: AstTypeKind::Record(fields),
-        });
+        let fields = polars_schema_to_field_specs(&schema, interner);
 
         let module_spec = ModuleSpec {
-            functions: vec![FunctionDef {
-                name: "load".to_string(),
-                implementation: Arc::new(CsvLoadFunction {
-                    source: csv_source,
-                    type_name: type_name.to_string(),
-                    loc,
-                }),
-            }],
+            functions: vec![FunctionDef::new("load", CsvLoadFunction {
+                source: csv_source,
+                type_name: type_name.to_string(),
+                loc,
+            })],
         };
 
-        Ok(ProviderOutput::new(record_ty).with_module(module_spec))
+        Ok(ProviderOutput::new(ProviderSchema { fields })
+            .with_module(module_spec)
+            .as_data())
     }
 }
 
-/// Load function that captures the CSV source at compile-time
-///
-/// This function is generated by the CSV provider and captures the CsvSource
-/// created during type provider invocation. At runtime, it creates a Plan
-/// without loading any data (lazy evaluation).
-///
-/// Example:
-/// ```ignore
-/// type People = csv!("people.csv")
-/// let data = People::load()  // No arguments needed, returns lazy plan
-/// ```
 pub struct CsvLoadFunction {
     source: CsvSource,
     type_name: String,
@@ -189,10 +147,7 @@ impl FunctionImpl for CsvLoadFunction {
         gcx: &GlobalContext,
     ) -> Polytype {
         let result_ty = match lookup_type_id(&self.type_name, gcx) {
-            Some(type_id) => {
-                let record_ty = ir.named_type(type_id);
-                ir.list_type(record_ty)
-            }
+            Some(type_id) => ir.named_type(type_id),
             None => ir.var_type(next_type_var()),
         };
 

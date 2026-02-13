@@ -1,20 +1,15 @@
-use std::rc::Rc;
-
 use polars::prelude::*;
 
 use crate::ast::Loc;
 use crate::context::{DefId, Symbol};
 use crate::error::FossilError;
-use crate::ir::{
-    Argument, ExprId, ExprKind, Ident, Ir, StmtId, StmtKind, TypeKind, TypeRef,
-};
+use crate::ir::{Argument, ExprId, ExprKind, Ident, Ir, StmtKind, TypeKind, TypeRef};
 use crate::passes::GlobalContext;
 use crate::runtime::value::Value;
 use crate::traits::function::RuntimeContext;
 
 pub use crate::runtime::value::Environment as IrEnvironment;
 
-/// Maximum call stack depth to prevent stack overflow
 const MAX_CALL_DEPTH: usize = 1000;
 
 /// Stack frame representing a function call
@@ -32,51 +27,20 @@ pub struct CallStack {
 }
 
 impl CallStack {
-    /// Push a new stack frame
     pub fn push(&mut self, frame: StackFrame) {
         self.frames.push(frame);
     }
 
-    /// Pop the topmost stack frame
     pub fn pop(&mut self) -> Option<StackFrame> {
         self.frames.pop()
     }
 
-    /// Get all frames (most recent last)
-    pub fn frames(&self) -> &[StackFrame] {
-        &self.frames
-    }
-
-    /// Check if the stack is empty
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
     }
 
-    /// Get current depth
     pub fn depth(&self) -> usize {
         self.frames.len()
-    }
-
-    /// Format call stack for error messages
-    pub fn format(&self, _interner: &crate::context::Interner) -> String {
-        if self.is_empty() {
-            return String::new();
-        }
-
-        let mut output = String::from("Call stack (most recent call last):\n");
-
-        for (i, frame) in self.frames.iter().enumerate() {
-            output.push_str(&format!(
-                "  #{}: {} at source {} ({}..{})\n",
-                i,
-                frame.function_name,
-                frame.call_site.source,
-                frame.call_site.span.start,
-                frame.call_site.span.end
-            ));
-        }
-
-        output
     }
 }
 
@@ -97,9 +61,7 @@ impl<'a> IrEvaluator<'a> {
         }
     }
 
-    /// Bind a value in the evaluator's environment
-    ///
-    /// This allows the executor to add top-level bindings without
+    /// Allows the executor to add top-level bindings without
     /// recreating the evaluator (avoiding environment clones).
     pub fn bind(&mut self, name: Symbol, value: Value) {
         self.env.bind(name, value);
@@ -146,55 +108,36 @@ impl<'a> IrEvaluator<'a> {
                 match &def.kind {
                     DefKind::Func(func) => Ok(Value::BuiltinFunction(def_id, func.clone())),
                     DefKind::RecordConstructor => Ok(Value::RecordConstructor(def_id)),
-                    DefKind::Let | DefKind::Const => {
-                        Err(self.make_error(format!(
-                            "Variable '{}' not found in environment",
-                            self.gcx.interner.resolve(def.name)
-                        )))
-                    }
-                    DefKind::Type => {
-                        Err(self.make_error(format!(
-                            "Type '{}' cannot be used as a value",
-                            self.gcx.interner.resolve(def.name)
-                        )))
-                    }
-                    DefKind::Mod { .. } => {
-                        Err(self.make_error(format!(
-                            "Module '{}' cannot be used as a value",
-                            self.gcx.interner.resolve(def.name)
-                        )))
-                    }
-                    DefKind::Provider(_) => {
-                        Err(self.make_error(format!(
-                            "Provider '{}' cannot be used as a value",
-                            self.gcx.interner.resolve(def.name)
-                        )))
-                    }
+                    DefKind::Let => Err(self.make_error(format!(
+                        "Variable '{}' not found in environment",
+                        self.gcx.interner.resolve(def.name)
+                    ))),
+                    DefKind::Type => Err(self.make_error(format!(
+                        "Type '{}' cannot be used as a value",
+                        self.gcx.interner.resolve(def.name)
+                    ))),
+                    DefKind::Mod => Err(self.make_error(format!(
+                        "Module '{}' cannot be used as a value",
+                        self.gcx.interner.resolve(def.name)
+                    ))),
+                    DefKind::Provider(_) => Err(self.make_error(format!(
+                        "Provider '{}' cannot be used as a value",
+                        self.gcx.interner.resolve(def.name)
+                    ))),
                 }
             }
 
-            ExprKind::NamedRecordConstruction { type_ident, fields } => {
-                self.eval_named_record(type_ident, fields)
+            ExprKind::RecordInstance { type_ident, ctor_args, fields } => {
+                self.eval_named_record(type_ident, ctor_args, fields)
             }
-
-            ExprKind::List(items) => self.eval_list(items),
-
-            ExprKind::Function {
-                params,
-                body,
-                attrs,
-            } => Ok(Value::Closure {
-                params: params.clone(),
-                body: *body,
-                env: Rc::new(self.env.clone()),
-                attrs: attrs.clone(),
-            }),
 
             ExprKind::Application { callee, args } => self.eval_application(*callee, args),
 
-            ExprKind::FieldAccess { expr, field } => self.eval_field_access(*expr, *field),
+            ExprKind::Projection { source, binding, outputs, .. } => {
+                self.eval_projection(*source, *binding, outputs)
+            }
 
-            ExprKind::Block { stmts } => self.eval_block(stmts),
+            ExprKind::FieldAccess { expr, field } => self.eval_field_access(*expr, *field),
 
             ExprKind::Unit => Ok(Value::Unit),
 
@@ -247,6 +190,7 @@ impl<'a> IrEvaluator<'a> {
     fn eval_named_record(
         &mut self,
         type_ident: &Ident,
+        ctor_args: &[Argument],
         fields: &[(Symbol, ExprId)],
     ) -> Result<Value, FossilError> {
         use crate::runtime::value::Plan;
@@ -259,7 +203,35 @@ impl<'a> IrEvaluator<'a> {
             }
         };
 
-        if fields.is_empty() {
+        // Evaluate constructor arguments to Polars expressions
+        let ctor_exprs: Vec<Expr> = if !ctor_args.is_empty() {
+            let type_def_id = type_def_id.unwrap();
+            let type_def = self.gcx.definitions.get(type_def_id);
+            let type_name = type_def.name;
+
+            // Look up ctor param names from the type statement
+            let ctor_param_names = self.get_type_ctor_param_names(type_name);
+
+            ctor_args
+                .iter()
+                .enumerate()
+                .map(|(i, arg)| {
+                    let value = self.eval(arg.value())?;
+                    let alias = ctor_param_names
+                        .get(i)
+                        .map(|name| self.gcx.interner.resolve(*name).to_string())
+                        .unwrap_or_else(|| format!("_ctor_{}", i));
+                    match value {
+                        Value::Expr(expr) => Ok(expr.alias(&*alias)),
+                        _ => Ok(lit(NULL).alias(&*alias)),
+                    }
+                })
+                .collect::<Result<Vec<_>, FossilError>>()?
+        } else {
+            vec![]
+        };
+
+        if fields.is_empty() && ctor_args.is_empty() {
             let mut plan = Plan::empty(Schema::default());
             plan.type_def_id = type_def_id;
             return Ok(Value::Plan(plan));
@@ -278,8 +250,9 @@ impl<'a> IrEvaluator<'a> {
             })
             .collect::<Result<Vec<_>, FossilError>>()?;
 
-        // Build schema from expressions
-        let schema = build_schema_from_exprs(&select_exprs);
+        // Combine ctor_exprs + select_exprs for schema
+        let all_exprs: Vec<Expr> = ctor_exprs.iter().chain(select_exprs.iter()).cloned().collect();
+        let schema = build_schema_from_exprs(&all_exprs);
 
         // Store as pending transformation with type info
         Ok(Value::Plan(Plan {
@@ -289,44 +262,42 @@ impl<'a> IrEvaluator<'a> {
             schema: std::sync::Arc::new(schema),
             outputs: Vec::new(),
             pending_exprs: Some(select_exprs),
+            ctor_exprs,
         }))
     }
 
-    /// Evaluate a list expression
-    ///
-    /// Lists of primitives evaluate to Polars list expressions.
-    /// Lists of records/plans are not supported - use type providers.
-    fn eval_list(&mut self, items: &[ExprId]) -> Result<Value, FossilError> {
-        use polars::prelude::concat_list;
+    /// Evaluate a projection: source |> fn param -> outputs end
+    fn eval_projection(
+        &mut self,
+        source: ExprId,
+        binding: Symbol,
+        outputs: &[ExprId],
+    ) -> Result<Value, FossilError> {
+        use crate::runtime::value::OutputSpec;
 
-        if items.is_empty() {
-            // Empty list → empty Polars list literal
-            return Ok(Value::Expr(lit(polars::prelude::Series::new_empty(
-                PlSmallStr::EMPTY,
-                &DataType::Null,
-            ))));
-        }
+        let source_val = self.eval(source)?;
+        let Value::Plan(mut plan) = source_val else {
+            return Err(self.make_error("Projection source must be a Plan"));
+        };
 
-        let mut exprs = Vec::with_capacity(items.len());
+        // Bind param to source plan (for field access in body)
+        self.env.bind(binding, Value::Plan(plan.clone()));
 
-        for item in items {
-            match self.eval(*item)? {
-                Value::Expr(e) => exprs.push(e),
-                Value::Plan(_) => {
-                    return Err(self.make_error(
-                        "Lists of records are not supported. Use type providers to load data.",
-                    ));
-                }
-                _ => {
-                    return Err(self.make_error("Invalid list element"));
+        // Evaluate each output
+        for &output_expr in outputs {
+            let output_val = self.eval(output_expr)?;
+            if let Value::Plan(output_plan) = output_val {
+                if output_plan.is_pending() {
+                    plan.outputs.push(OutputSpec {
+                        type_def_id: output_plan.type_def_id.unwrap(),
+                        select_exprs: output_plan.pending_exprs.unwrap(),
+                        schema: output_plan.schema,
+                        ctor_args: output_plan.ctor_exprs,
+                    });
                 }
             }
         }
-
-        // Create a Polars list expression from the elements
-        Ok(Value::Expr(concat_list(exprs).map_err(|e| {
-            self.make_error(format!("Failed to create list expression: {}", e))
-        })?))
+        Ok(Value::Plan(plan))
     }
 
     /// Find a type statement by name, returning its TypeId
@@ -376,49 +347,6 @@ impl<'a> IrEvaluator<'a> {
             .collect::<Result<Vec<_>, _>>()?;
 
         match callee_val {
-            Value::Closure {
-                params, body, env, ..
-            } => {
-                // Get function name for stack trace
-                let function_name =
-                    if let ExprKind::Identifier(Ident::Resolved(def_id)) = &callee_expr.kind {
-                        let def = self.gcx.definitions.get(*def_id);
-                        self.gcx.interner.resolve(def.name).to_string()
-                    } else {
-                        "<anonymous>".to_string()
-                    };
-
-                // Push stack frame
-                self.call_stack.push(StackFrame {
-                    function_name,
-                    call_site: callee_loc,
-                    def_id: if let ExprKind::Identifier(Ident::Resolved(def_id)) = &callee_expr.kind
-                    {
-                        Some(*def_id)
-                    } else {
-                        None
-                    },
-                });
-
-                // Execute closure with new environment
-                let mut closure_env = (*env).clone();
-
-                // Bind parameters to arguments
-                for (param, arg) in params.iter().zip(arg_values.iter()) {
-                    closure_env.bind(param.name, arg.clone());
-                }
-
-                // Evaluate body with closure environment
-                let saved_env = std::mem::replace(&mut self.env, closure_env);
-                let result = self.eval(body);
-                self.env = saved_env;
-
-                // Pop stack frame
-                self.call_stack.pop();
-
-                result
-            }
-
             Value::BuiltinFunction(def_id, func) => {
                 // Get function name for stack trace
                 let def = self.gcx.definitions.get(def_id);
@@ -531,28 +459,17 @@ impl<'a> IrEvaluator<'a> {
         }
     }
 
-    /// Evaluate a block of statements
-    fn eval_block(&mut self, stmts: &[StmtId]) -> Result<Value, FossilError> {
-        let mut last_value = Value::Unit;
-
-        for stmt_id in stmts {
-            let stmt = self.ir.stmts.get(*stmt_id);
-
-            match &stmt.kind {
-                StmtKind::Let { name, value, .. } | StmtKind::Const { name, value, .. } => {
-                    let val = self.eval(*value)?;
-                    self.env.bind(*name, val);
+    /// Get the constructor parameter names for a type
+    fn get_type_ctor_param_names(&self, type_name: Symbol) -> Vec<Symbol> {
+        for &stmt_id in &self.ir.root {
+            let stmt = self.ir.stmts.get(stmt_id);
+            if let StmtKind::Type { name, ctor_params, .. } = &stmt.kind {
+                if *name == type_name {
+                    return ctor_params.iter().map(|p| p.name).collect();
                 }
-
-                StmtKind::Expr(expr_id) => {
-                    last_value = self.eval(*expr_id)?;
-                }
-
-                StmtKind::Type { .. } => {}
             }
         }
-
-        Ok(last_value)
+        vec![]
     }
 
     /// Get the field names for a record type by its name

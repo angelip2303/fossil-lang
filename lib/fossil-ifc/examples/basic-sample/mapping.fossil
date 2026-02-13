@@ -1,21 +1,14 @@
 @rdf(type = "http://example.com/bim#Wall", base = "http://example.com/wall/")
 type ValidWall(id: string) do
     @rdf("https://w3id.org/digitalconstruction/0.5/Entities#hasLabel")
-    @validate(min_length = 2)
     Name: string
 
     @rdf("http://example.com/bim#Description")
     Description: string?
-
-    @rdf("http://example.com/bim#Tag")
-    @validate(pattern = "W-")
-    Tag: string
 end
 
-let validated =
-    IfcWall.load("lib/fossil-ifc/examples/basic-sample/building.ifc")
-    |> fn wall -> ValidWall(wall.GlobalId) { Name, Description, Tag } end
-    |> ValidWall.check
+let walls = ifc!("lib/fossil-ifc/examples/basic-sample/building.ifc", "IfcWall")
 
-validated |> Report.json("report.json")
-validated |> Rdf.serialize("output.nt")
+walls
+|> fn wall -> ValidWall(wall.GlobalId) { Name = wall.Name, Description = wall.Description } end
+|> Rdf.serialize("output.nt")

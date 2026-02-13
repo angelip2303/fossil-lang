@@ -48,18 +48,15 @@ fn main() -> miette::Result<()> {
 
 fn compile(path: PathBuf) -> miette::Result<CompileResult> {
     let mut gcx = GlobalContext::default();
-    gcx.register_provider("csv", fossil_providers::csv::CsvProvider);
-    gcx.register_provider("shex", fossil_providers::shapes::shex::ShexProvider);
+    fossil_providers::init(&mut gcx);
+    fossil_ifc::init(&mut gcx);
     fossil_stdlib::init(&mut gcx);
 
     let source_content = read_to_string(&path).into_diagnostic()?;
 
     let compiler = Compiler::with_context(gcx);
     let result = compiler.compile(CompilerInput::File(path.clone())).map_err(|errors| {
-        // Convert FossilErrors to miette report with source
         let source = NamedSource::new(path.display().to_string(), source_content.clone());
-
-        // For now, just report the first error
         if let Some(first_error) = errors.0.into_iter().next() {
             Report::new(first_error).with_source_code(source)
         } else {

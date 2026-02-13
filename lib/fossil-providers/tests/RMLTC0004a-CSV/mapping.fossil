@@ -1,22 +1,18 @@
-type StudentSport = csv!("tests/RMLTC0004a-CSV/student_sport.csv")
+let student_sport = csv!("tests/RMLTC0004a-CSV/student_sport.csv")
 
-#[rdf(type = "http://example.com/Student")]
-type Student(subject: string) = {
-    #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
-    Name: string,
-}
+@rdf(type = "http://example.com/Student")
+type Student(subject: string) do
+    @rdf(uri = "http://xmlns.com/foaf/0.1/name")
+    Name: string
+end
 
-#[rdf(type = "http://example.com/Sport")]
-type Sport(subject: string) = {
-    #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
-    Name: string,
-}
+@rdf(type = "http://example.com/Sport")
+type Sport(subject: string) do
+    @rdf(uri = "http://xmlns.com/foaf/0.1/name")
+    Name: string
+end
 
-let students = StudentSport::load()
-    |> fn(row) -> Student("http://example.com/${row.Student}") { Name = row.Student }
-
-let sports = StudentSport::load()
-    |> fn(row) -> Sport("http://example.com/${row.Sport}") { Name = row.Sport }
-
-students |> Rdf::serialize("tests/RMLTC0004a-CSV/actual.nq")
-sports |> Rdf::serialize("tests/RMLTC0004a-CSV/actual.nq")
+student_sport
+|> fn row -> Student("http://example.com/${row.Student}") { Name = row.Student } end
++> fn row -> Sport("http://example.com/${row.Sport}") { Name = row.Sport } end
+|> Rdf.serialize("tests/RMLTC0004a-CSV/actual.nq")

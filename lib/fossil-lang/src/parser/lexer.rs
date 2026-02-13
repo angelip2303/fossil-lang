@@ -3,17 +3,18 @@ use logos::Logos;
 #[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(skip r"[ \t\n\f]+", skip r"//.*")]
 pub enum Token<'a> {
-    /// Lexer error - invalid token
     Error,
 
     #[token("let")]
     Let,
-    #[token("const")]
-    Const,
     #[token("type")]
     Type,
     #[token("fn")]
     Func,
+    #[token("do")]
+    Do,
+    #[token("end")]
+    End,
     #[token("true")]
     True,
     #[token("false")]
@@ -33,14 +34,12 @@ pub enum Token<'a> {
     Dot,
     #[token(":")]
     Colon,
-    #[token(":>")]
-    Cast,
     #[token("|>")]
     Pipe,
+    #[token("+>")]
+    PlusGt,
     #[token(",")]
     Comma,
-    #[token("#")]
-    Hash,
     #[token("(")]
     LParen,
     #[token(")")]
@@ -49,22 +48,12 @@ pub enum Token<'a> {
     LBrace,
     #[token("}")]
     RBrace,
-    #[token("[")]
-    LBracket,
-    #[token("]")]
-    RBracket,
-    #[token("<")]
-    LAngle,
-    #[token(">")]
-    RAngle,
-    #[token("::")]
-    ModuleSep,
     #[token("!")]
     Bang,
-    #[token("@")]
-    At,
     #[token("?")]
     Question,
+    #[token("@")]
+    At,
 
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice(), priority = 2)]
     Identifier(&'a str),

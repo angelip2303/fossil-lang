@@ -1,9 +1,11 @@
 [workspace]
 members = [
     "cli",
-    "lib/fossil-lang", "lib/fossil-macros",
+    "lib/fossil-lang",
+    "lib/fossil-macros",
     "lib/fossil-providers",
     "lib/fossil-stdlib",
+    "lib/fossil-ifc",
 ]
 resolver = "2"
 
@@ -22,7 +24,7 @@ rust-version = "1.88.0"
 
 [workspace.dependencies]
 # external dependencies
-polars = {version = "0.52.0", features = ["lazy", "timezones", "new_streaming", "parquet", "concat_str", "strings"]}
+polars = {version = "0.52.0", features = ["lazy", "timezones", "new_streaming", "parquet", "concat_str", "strings", "csv"]}
 thiserror = "2.0.18"
 
 # internal dependencies
@@ -30,6 +32,7 @@ fossil-lang = { path = "./lib/fossil-lang" }
 fossil-macros = { path = "./lib/fossil-macros" }
 fossil-providers = { path = "./lib/fossil-providers" }
 fossil-stdlib = { path = "./lib/fossil-stdlib" }
+fossil-ifc = { path = "./lib/fossil-ifc" }
 
 [profile.release]
 lto = true

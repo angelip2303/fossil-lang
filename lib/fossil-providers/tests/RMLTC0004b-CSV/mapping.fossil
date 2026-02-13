@@ -1,15 +1,15 @@
-type Input = csv!("tests/RMLTC0004b-CSV/student.csv")
+let input = csv!("tests/RMLTC0004b-CSV/student.csv")
 
-type Output = {
-    #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
-    Name: string,
-}
+type Output do
+    @rdf(uri = "http://xmlns.com/foaf/0.1/name")
+    Name: string
+end
 
 // the subject must be an IRI or a blank node
 // {Name} is not a valid IRI (negative test)
-Input::load()
-|> map(fn(row) -> Output {
+input
+|> map(fn row -> Output {
     @id = "${row.Name}",
     Name = row.Name
-})
-|> Rdf::serialize("tests/RMLTC0004b-CSV/actual.nq")
+} end)
+|> Rdf.serialize("tests/RMLTC0004b-CSV/actual.nq")

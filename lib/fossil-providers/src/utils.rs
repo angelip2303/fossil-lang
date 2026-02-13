@@ -1,26 +1,18 @@
 use fossil_lang::ast::Loc;
-use fossil_lang::ast::ast::{Ast, Literal, PrimitiveType, RecordField, Type, TypeKind};
+use fossil_lang::common::PrimitiveType;
 use fossil_lang::context::{DefId, Interner};
 use fossil_lang::error::FossilError;
 use fossil_lang::passes::GlobalContext;
+use fossil_lang::traits::provider::{FieldSpec, FieldType};
 
 use polars::prelude::{PlPath, PlPathRef, Schema};
 
-pub fn extract_string_path(
-    lit: &Literal,
-    interner: &Interner,
-    loc: Loc,
-) -> Result<PlPath, FossilError> {
-    match lit {
-        Literal::String(sym) => Ok(PlPath::from_str(interner.resolve(*sym))),
-        _ => Err(FossilError::invalid_argument_type("path", "a string", loc)),
-    }
-}
-
 pub fn lookup_type_id(name: &str, gcx: &GlobalContext) -> Option<DefId> {
-    gcx.interner
-        .lookup(name)
-        .and_then(|sym| gcx.definitions.get_by_symbol(sym).map(|d| d.id()))
+    gcx.interner.lookup(name).and_then(|sym| {
+        gcx.definitions
+            .find_by_symbol(sym, |k| matches!(k, fossil_lang::context::DefKind::Type))
+            .map(|d| d.id())
+    })
 }
 
 pub fn validate_extension(path: PlPathRef, allowed: &[&str], loc: Loc) -> Result<(), FossilError> {
@@ -46,25 +38,23 @@ pub fn validate_path(path: PlPathRef, loc: Loc) -> Result<(), FossilError> {
     }
 }
 
-pub fn schema_to_ast_fields(
+pub fn polars_schema_to_field_specs(
     schema: &Schema,
-    ast: &mut Ast,
     interner: &mut Interner,
-) -> Vec<RecordField> {
+) -> Vec<FieldSpec> {
     schema
         .iter()
         .map(|(name, dtype)| {
-            let field_name = interner.intern(name);
             let primitive_type: PrimitiveType = dtype.clone().into();
-            let ty = ast.types.alloc(Type {
-                loc: Loc::generated(),
-                kind: TypeKind::Primitive(primitive_type),
-            });
-            RecordField {
-                name: field_name,
-                ty,
+            FieldSpec {
+                name: interner.intern(name),
+                ty: FieldType::Primitive(primitive_type),
                 attrs: vec![],
             }
         })
         .collect()
+}
+
+pub fn resolve_path(path_str: &str) -> PlPath {
+    PlPath::from_str(path_str)
 }

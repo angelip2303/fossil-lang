@@ -1,15 +1,4 @@
-//! Chunked executor for memory-efficient plan execution
-//!
-//! This is the ONLY place where Plan is materialized into actual data.
-//! All execution goes through this module, ensuring constant memory usage
-//! regardless of dataset size.
-//!
-//! # Lazy Evaluation Guarantee
-//!
-//! This module uses `SafeLazyFrame` internally to build transformation pipelines.
-//! The `.collect()` method is only called here, in `execute_plan_with_select_batched`,
-//! through `SafeLazyFrame::into_inner()`. External code cannot accidentally
-//! materialize data because `SafeLazyFrame` does not expose `.collect()`.
+//! Chunked executor — the only place where Plan is materialized into data.
 
 use polars::prelude::*;
 
@@ -169,6 +158,7 @@ impl ChunkedExecutor {
     fn apply_transform(safe_lf: SafeLazyFrame, transform: &Transform) -> SafeLazyFrame {
         match transform {
             Transform::Select(exprs) => safe_lf.select(exprs.clone()),
+            Transform::Filter(expr) => safe_lf.filter(expr.clone()),
         }
     }
 }
@@ -189,12 +179,10 @@ pub fn estimate_batch_size(schema: &Schema) -> usize {
     (TARGET_BYTES / row_bytes.max(1)).clamp(10_000, 500_000)
 }
 
-/// Estimate optimal batch size from a Plan
 pub fn estimate_batch_size_from_plan(plan: &Plan) -> usize {
     estimate_batch_size(&plan.schema)
 }
 
-/// Estimate average memory size for a data type
 fn estimate_dtype_size(dtype: &DataType) -> usize {
     match dtype {
         DataType::Boolean => 1,

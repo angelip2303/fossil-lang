@@ -1,19 +1,19 @@
-type Input = csv!("tests/RMLTC0002c-CSV/student.csv")
+let input = csv!("tests/RMLTC0002c-CSV/student.csv")
 
-type Output = {
-    #[rdf(uri = "http://example.com/id")]
-    ID: string,
+type Output do
+    @rdf(uri = "http://example.com/id")
+    ID: string
 
-    #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
-    Name: string,
-}
+    @rdf(uri = "http://xmlns.com/foaf/0.1/name")
+    Name: string
+end
 
 // this mapping intentionally uses an invalid field (IDs instead of ID)
 // This should cause a compilation error (negative test)
-Input::load()
-|> map(fn(row) -> Output {
+input
+|> map(fn row -> Output {
     @id = "http://example.com/${row.ID}/${row.Name}",
     ID = row.IDs,
     Name = row.Name
-})
-|> Rdf::serialize("tests/RMLTC0002c-CSV/actual.nq")
+} end)
+|> Rdf.serialize("tests/RMLTC0002c-CSV/actual.nq")

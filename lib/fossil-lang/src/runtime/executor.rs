@@ -14,7 +14,7 @@ impl IrExecutor {
 
         for &stmt_id in &ir.root {
             match &ir.stmts.get(stmt_id).kind {
-                StmtKind::Let { name, value, .. } | StmtKind::Const { name, value, .. } => {
+                StmtKind::Let { name, value, .. } => {
                     let val = evaluator.eval(*value)?;
                     evaluator.bind(*name, val.clone());
                     results.push(val);

@@ -1,121 +1,58 @@
 //! Integration tests: full compilation pipeline (parse → expand → convert → resolve → typecheck)
 
-use fossil_lang::compiler::Compiler;
-use fossil_lang::context::extract_type_metadata;
-use fossil_lang::error::FossilErrors;
-use fossil_lang::ir::{PrimitiveType, StmtKind, TypeKind};
-use fossil_lang::passes::convert::ast_to_ir;
-use fossil_lang::passes::expand::ProviderExpander;
-use fossil_lang::passes::parse::Parser;
-use fossil_lang::passes::resolve::IrResolver;
-use fossil_lang::passes::typecheck::TypeChecker;
+mod common;
+use common::compile;
+
+use fossil_lang::ir::{ExprKind, PrimitiveType, StmtKind, TypeKind};
 use fossil_lang::passes::IrProgram;
 
-/// Full compilation helper: source → IrProgram
-fn compile(src: &str) -> Result<IrProgram, FossilErrors> {
-    let parsed = Parser::parse(src, 0)?;
-    let expand_result = ProviderExpander::new((parsed.ast, parsed.gcx)).expand()?;
-    let ty = extract_type_metadata(&expand_result.ast);
-    let ir = ast_to_ir(expand_result.ast);
-    let (ir, gcx) = IrResolver::new(ir, expand_result.gcx)
-        .with_type_metadata(ty)
-        .resolve()?;
-    let program = TypeChecker::new(ir, gcx).check()?;
-    Ok(program)
-}
-
-/// Helper: get the TypeKind of the value expr for a let at root[idx]
 fn let_value_type<'a>(prog: &'a IrProgram, idx: usize) -> &'a TypeKind {
     let stmt = prog.ir.stmts.get(prog.ir.root[idx]);
     match &stmt.kind {
-        StmtKind::Let { value, .. } | StmtKind::Const { value, .. } => {
+        StmtKind::Let { value, .. } => {
             let expr = prog.ir.exprs.get(*value);
             let ty_id = expr.ty.type_id();
             &prog.ir.types.get(ty_id).kind
         }
-        other => panic!("expected Let/Const at root[{}], got {:?}", idx, other),
+        other => panic!("expected Let at root[{}], got {:?}", idx, other),
     }
 }
 
-// -------------------------------------------------------------------
-// Programs that should compile successfully
-// -------------------------------------------------------------------
-
 #[test]
-fn compile_let_integer() {
-    let prog = compile("let x = 42").unwrap();
-    assert_eq!(prog.ir.root.len(), 1);
-    assert!(
-        matches!(let_value_type(&prog, 0), TypeKind::Primitive(PrimitiveType::Int)),
-        "expected Int"
-    );
-}
-
-#[test]
-fn compile_let_string() {
-    let prog = compile("let x = \"hello\"").unwrap();
-    assert!(matches!(
-        let_value_type(&prog, 0),
-        TypeKind::Primitive(PrimitiveType::String)
-    ));
-}
-
-#[test]
-fn compile_let_bool() {
-    let prog = compile("let x = true").unwrap();
-    assert!(matches!(
-        let_value_type(&prog, 0),
-        TypeKind::Primitive(PrimitiveType::Bool)
-    ));
+fn compile_let_literals() {
+    let cases: &[(&str, fn(&TypeKind) -> bool)] = &[
+        ("let x = 42", |tk| matches!(tk, TypeKind::Primitive(PrimitiveType::Int))),
+        ("let x = \"hello\"", |tk| matches!(tk, TypeKind::Primitive(PrimitiveType::String))),
+        ("let x = true", |tk| matches!(tk, TypeKind::Primitive(PrimitiveType::Bool))),
+    ];
+    for (src, check) in cases {
+        let prog = compile(src).unwrap();
+        assert!(check(let_value_type(&prog, 0)), "failed for: {}", src);
+    }
 }
 
 #[test]
 fn compile_type_and_record_construction() {
     let prog = compile(
-        "type Person = { Name: string, Age: int }\n\
+        "type Person do Name: string Age: int end\n\
          let p = Person { Name = \"Alice\", Age = 30 }",
     )
     .unwrap();
-    assert!(
-        matches!(let_value_type(&prog, 1), TypeKind::Named(_)),
-        "expected Named(Person)"
-    );
-}
-
-#[test]
-fn compile_function_application() {
-    let prog = compile(
-        "let f = fn(x) -> x\n\
-         let y = f(42)",
-    )
-    .unwrap();
-    assert!(
-        matches!(let_value_type(&prog, 1), TypeKind::Primitive(PrimitiveType::Int)),
-        "identity function applied to 42 should infer Int"
-    );
-}
-
-#[test]
-fn compile_list_inference() {
-    let prog = compile("let xs = [1, 2, 3]").unwrap();
-    assert!(
-        matches!(let_value_type(&prog, 0), TypeKind::List(_)),
-        "expected List type"
-    );
+    assert!(matches!(let_value_type(&prog, 1), TypeKind::Named(_)));
 }
 
 #[test]
 fn compile_field_access() {
     let prog = compile(
-        "type T = { Name: string }\n\
+        "type T do Name: string end\n\
          let t = T { Name = \"hi\" }\n\
          let n = t.Name",
     )
     .unwrap();
-    assert!(
-        matches!(let_value_type(&prog, 2), TypeKind::Primitive(PrimitiveType::String)),
-        "t.Name should be String"
-    );
+    assert!(matches!(
+        let_value_type(&prog, 2),
+        TypeKind::Primitive(PrimitiveType::String)
+    ));
 }
 
 #[test]
@@ -127,15 +64,6 @@ fn compile_variable_propagation() {
     .unwrap();
     assert!(matches!(
         let_value_type(&prog, 1),
-        TypeKind::Primitive(PrimitiveType::Int)
-    ));
-}
-
-#[test]
-fn compile_block_expression() {
-    let prog = compile("let x = { let y = 1\n y }").unwrap();
-    assert!(matches!(
-        let_value_type(&prog, 0),
         TypeKind::Primitive(PrimitiveType::Int)
     ));
 }
@@ -154,24 +82,10 @@ fn compile_string_interpolation() {
 }
 
 #[test]
-fn compile_nested_function() {
-    let prog = compile(
-        "let f = fn(x) -> fn(y) -> x\n\
-         let g = f(42)\n\
-         let z = g(\"ignored\")",
-    )
-    .unwrap();
-    assert!(
-        matches!(let_value_type(&prog, 2), TypeKind::Primitive(PrimitiveType::Int)),
-        "nested closure should capture x = Int"
-    );
-}
-
-#[test]
 fn compile_multiple_types() {
     let prog = compile(
-        "type A = { X: int }\n\
-         type B = { Y: string }\n\
+        "type A do X: int end\n\
+         type B do Y: string end\n\
          let a = A { X = 1 }\n\
          let b = B { Y = \"hi\" }",
     )
@@ -181,18 +95,13 @@ fn compile_multiple_types() {
     assert!(matches!(let_value_type(&prog, 3), TypeKind::Named(_)));
 }
 
-// -------------------------------------------------------------------
-// Optional types
-// -------------------------------------------------------------------
-
 #[test]
 fn compile_optional_field() {
     let prog = compile(
-        "type T = { Name: string, Age: int? }\n\
+        "type T do Name: string Age: int? end\n\
          let t = T { Name = \"hi\", Age = 42 }",
     )
     .unwrap();
-    // Check the type definition has an Optional field
     let stmt = prog.ir.stmts.get(prog.ir.root[0]);
     if let StmtKind::Type { ty, .. } = &stmt.kind {
         let ty_node = prog.ir.types.get(*ty);
@@ -200,8 +109,7 @@ fn compile_optional_field() {
             let age_ty = fields.fields[1].1;
             assert!(
                 matches!(prog.ir.types.get(age_ty).kind, TypeKind::Optional(_)),
-                "Age should be Optional, got {:?}",
-                prog.ir.types.get(age_ty).kind
+                "Age should be Optional"
             );
         } else {
             panic!("expected Record");
@@ -213,81 +121,142 @@ fn compile_optional_field() {
 
 #[test]
 fn compile_optional_widening() {
-    // int should unify with int? (widening)
-    let _prog = compile(
-        "type T = { Age: int? }\n\
+    compile(
+        "type T do Age: int? end\n\
          let t = T { Age = 42 }",
     )
     .unwrap();
 }
 
-// -------------------------------------------------------------------
-// Programs that should produce errors
-// -------------------------------------------------------------------
+#[test]
+fn compile_projection() {
+    let prog = compile(
+        "type T do Name: string end\n\
+         let x = 42\n\
+         x |> fn row -> T { Name = \"hi\" } end",
+    )
+    .unwrap();
+    // root[2] is the pipe expression statement
+    let stmt = prog.ir.stmts.get(prog.ir.root[2]);
+    if let StmtKind::Expr(expr_id) = &stmt.kind {
+        let expr = prog.ir.exprs.get(*expr_id);
+        assert!(
+            matches!(&expr.kind, ExprKind::Projection { outputs, .. } if outputs.len() == 1),
+            "expected Projection with 1 output, got {:?}", expr.kind
+        );
+    } else {
+        panic!("expected Expr stmt at root[2]");
+    }
+}
 
 #[test]
-fn compile_record_with_different_field_value() {
-    // Currently the typechecker does not reject mismatched field types
-    // at record construction. This test documents that behavior.
-    let _prog = compile(
-        "type T = { Name: string }\n\
-         let t = T { Name = 42 }",
-    );
+fn compile_record_with_ctor_args() {
+    let prog = compile(
+        "type T(id: string) do Name: string end\n\
+         let t = T(\"abc\") { Name = \"hi\" }",
+    )
+    .unwrap();
+    assert!(matches!(let_value_type(&prog, 1), TypeKind::Named(_)));
 }
 
 #[test]
 fn error_undefined_variable() {
-    let result = compile("let y = x");
-    assert!(result.is_err(), "undefined variable x should fail");
+    assert!(compile("let y = x").is_err());
 }
 
 #[test]
 fn error_undefined_type() {
-    let result = compile("type T = { Name: Foo }");
-    assert!(result.is_err(), "undefined type Foo should fail");
-}
-
-#[test]
-fn error_heterogeneous_list() {
-    let result = compile("let xs = [1, \"hello\"]");
-    assert!(result.is_err(), "mixed int/string list should fail");
-}
-
-#[test]
-fn error_arity_mismatch() {
-    let result = compile(
-        "let f = fn(x) -> x\n\
-         let y = f(1, 2)",
-    );
-    assert!(result.is_err(), "too many args should fail");
+    assert!(compile("type T do Name: Foo end").is_err());
 }
 
 #[test]
 fn error_field_not_found() {
-    let result = compile(
-        "type T = { Name: string }\n\
+    assert!(compile(
+        "type T do Name: string end\n\
          let t = T { Name = \"hi\" }\n\
          let z = t.Age",
-    );
-    assert!(result.is_err(), "accessing missing field Age should fail");
+    ).is_err());
+}
+
+#[test]
+fn compile_add_output_operator() {
+    let prog = compile(
+        "type A do X: int end\n\
+         type B do Y: string end\n\
+         let x = 42\n\
+         x |> fn row -> A { X = 1 } end +> fn row -> B { Y = \"hi\" } end",
+    )
+    .unwrap();
+    // root[3] is the chained pipe expression
+    // +> flattens into a single Projection with 2 outputs
+    let stmt = prog.ir.stmts.get(prog.ir.root[3]);
+    if let StmtKind::Expr(expr_id) = &stmt.kind {
+        let expr = prog.ir.exprs.get(*expr_id);
+        assert!(
+            matches!(&expr.kind, ExprKind::Projection { outputs, .. } if outputs.len() == 2),
+            "expected Projection with 2 outputs, got {:?}", expr.kind
+        );
+    } else {
+        panic!("expected Expr stmt at root[3]");
+    }
+}
+
+#[test]
+fn compile_chained_pipe_and_add_output() {
+    // |> then +> flattens into single Projection with 2 outputs
+    let prog = compile(
+        "type A do X: int end\n\
+         type B do Y: string end\n\
+         let x = 42\n\
+         let result = x |> fn r -> A { X = 1 } end +> fn r -> B { Y = \"hi\" } end",
+    )
+    .unwrap();
+    // result should typecheck (the last output determines type)
+    assert!(matches!(let_value_type(&prog, 3), TypeKind::Named(_)));
+}
+
+#[test]
+fn compile_add_output_produces_multi_output_projection() {
+    // +> flattens to a single Projection with multiple outputs
+    let prog = compile(
+        "type A do X: int end\n\
+         type B do Y: string end\n\
+         let x = 42\n\
+         x |> fn row -> A { X = 1 } end +> fn row -> B { Y = \"hi\" } end",
+    )
+    .unwrap();
+    let stmt = prog.ir.stmts.get(prog.ir.root[3]);
+    if let StmtKind::Expr(expr_id) = &stmt.kind {
+        let expr = prog.ir.exprs.get(*expr_id);
+        assert!(
+            matches!(&expr.kind, ExprKind::Projection { outputs, .. } if outputs.len() == 2),
+            "expected Projection with 2 outputs from +>, got {:?}", expr.kind
+        );
+    } else {
+        panic!("expected Expr stmt at root[3]");
+    }
+}
+
+#[test]
+fn compile_nested_field_access() {
+    let prog = compile(
+        "type Inner do Value: int end\n\
+         type Outer do Child: Inner end\n\
+         let inner = Inner { Value = 42 }\n\
+         let outer = Outer { Child = inner }\n\
+         let v = outer.Child.Value",
+    )
+    .unwrap();
+    assert!(matches!(
+        let_value_type(&prog, 4),
+        TypeKind::Primitive(PrimitiveType::Int)
+    ));
 }
 
 #[test]
 fn error_duplicate_type() {
-    let result = compile(
-        "type T = { A: int }\n\
-         type T = { B: string }",
-    );
-    assert!(result.is_err(), "duplicate type definition should fail");
-}
-
-// -------------------------------------------------------------------
-// Compiler struct API
-// -------------------------------------------------------------------
-
-#[test]
-fn compiler_new_creates_instance() {
-    let compiler = Compiler::new();
-    // Just verify it doesn't panic — the Compiler struct is usable
-    drop(compiler);
+    assert!(compile(
+        "type T do A: int end\n\
+         type T do B: string end",
+    ).is_err());
 }

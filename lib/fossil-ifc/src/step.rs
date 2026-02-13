@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::Path;
 
-/// A token from a STEP attribute list.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum Token {
@@ -34,15 +33,15 @@ impl Token {
     }
 
     #[cfg(test)]
-    pub fn as_enum(&self) -> Option<String> {
+    pub fn as_enum(&self) -> Option<&str> {
         match self {
-            Token::Enum(s) => Some(s.clone()),
+            Token::Enum(s) => Some(s),
+            Token::TypedValue(_, inner) => inner.as_enum(),
             _ => None,
         }
     }
 }
 
-/// A parsed STEP entity: `#id = TYPE_NAME(attr1, attr2, ...);`
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct StepEntity {
@@ -58,8 +57,6 @@ impl StepEntity {
     }
 }
 
-/// A parsed STEP file. Reads the entire file into memory
-/// and provides entity lookup by type name.
 pub struct StepFile {
     content: String,
 }
@@ -71,8 +68,6 @@ impl StepFile {
         Ok(Self { content })
     }
 
-    /// Find all entities of the given STEP type name (e.g., "IFCWALL").
-    /// The type_name comparison is case-insensitive.
     pub fn find_all(&self, type_name: &str) -> Vec<StepEntity> {
         let target = type_name.to_ascii_uppercase();
         let mut results = Vec::new();
@@ -82,13 +77,11 @@ impl StepFile {
         let mut pos = 0;
 
         while pos < len {
-            // Skip to next '#'
             match memchr(b'#', bytes, pos) {
                 Some(hash_pos) => pos = hash_pos,
                 None => break,
             }
 
-            // Parse entity id: #digits
             pos += 1; // skip '#'
             let id_start = pos;
             while pos < len && bytes[pos].is_ascii_digit() {
@@ -103,23 +96,19 @@ impl StepFile {
                 Err(_) => continue,
             };
 
-            // Skip whitespace
             while pos < len && bytes[pos].is_ascii_whitespace() {
                 pos += 1;
             }
 
-            // Expect '='
             if pos >= len || bytes[pos] != b'=' {
                 continue;
             }
             pos += 1;
 
-            // Skip whitespace
             while pos < len && bytes[pos].is_ascii_whitespace() {
                 pos += 1;
             }
 
-            // Parse type name
             let name_start = pos;
             while pos < len && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
                 pos += 1;
@@ -129,12 +118,10 @@ impl StepFile {
             }
             let entity_type = &self.content[name_start..pos];
 
-            // Skip whitespace
             while pos < len && bytes[pos].is_ascii_whitespace() {
                 pos += 1;
             }
 
-            // Expect '('
             if pos >= len || bytes[pos] != b'(' {
                 pos = skip_to_semicolon(bytes, pos);
                 continue;
@@ -145,7 +132,6 @@ impl StepFile {
                 continue;
             }
 
-            // Parse the attribute list
             let (attrs, new_pos) = parse_attribute_list(bytes, &self.content, pos);
             pos = new_pos;
 
@@ -160,12 +146,13 @@ impl StepFile {
     }
 }
 
-/// Simple memchr: find first occurrence of byte `needle` in `bytes` starting at `start`.
 fn memchr(needle: u8, bytes: &[u8], start: usize) -> Option<usize> {
-    bytes[start..].iter().position(|&b| b == needle).map(|i| i + start)
+    bytes[start..]
+        .iter()
+        .position(|&b| b == needle)
+        .map(|i| i + start)
 }
 
-/// Skip past the next semicolon, respecting quoted strings.
 fn skip_to_semicolon(bytes: &[u8], mut pos: usize) -> usize {
     let len = bytes.len();
     while pos < len {
@@ -195,12 +182,9 @@ fn skip_to_semicolon(bytes: &[u8], mut pos: usize) -> usize {
     pos
 }
 
-/// Parse a parenthesized attribute list: `(attr1, attr2, ...)`.
-/// Returns the parsed tokens and the position after the closing `)`.
 fn parse_attribute_list(bytes: &[u8], content: &str, mut pos: usize) -> (Vec<Token>, usize) {
     let len = bytes.len();
 
-    // Skip opening '('
     if pos < len && bytes[pos] == b'(' {
         pos += 1;
     }
@@ -208,7 +192,6 @@ fn parse_attribute_list(bytes: &[u8], content: &str, mut pos: usize) -> (Vec<Tok
     let mut attrs = Vec::new();
 
     loop {
-        // Skip whitespace
         while pos < len && bytes[pos].is_ascii_whitespace() {
             pos += 1;
         }
@@ -217,13 +200,11 @@ fn parse_attribute_list(bytes: &[u8], content: &str, mut pos: usize) -> (Vec<Tok
             break;
         }
 
-        // End of list
         if bytes[pos] == b')' {
             pos += 1;
             break;
         }
 
-        // Skip comma
         if bytes[pos] == b',' {
             pos += 1;
             continue;
@@ -237,11 +218,9 @@ fn parse_attribute_list(bytes: &[u8], content: &str, mut pos: usize) -> (Vec<Tok
     (attrs, pos)
 }
 
-/// Parse a single STEP token at the given position.
 fn parse_token(bytes: &[u8], content: &str, mut pos: usize) -> (Token, usize) {
     let len = bytes.len();
 
-    // Skip whitespace
     while pos < len && bytes[pos].is_ascii_whitespace() {
         pos += 1;
     }

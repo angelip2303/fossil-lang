@@ -1,18 +1,18 @@
 // this file does not exist, it must raise an error
-type Input = csv!("tests/RMLTC0002e-CSV/student2.csv")
+let input = csv!("tests/RMLTC0002e-CSV/student2.csv")
 
-type Output = {
-    #[rdf(uri = "http://example.com/id")]
-    ID: string,
+type Output do
+    @rdf(uri = "http://example.com/id")
+    ID: string
 
-    #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
-    Name: string,
-}
+    @rdf(uri = "http://xmlns.com/foaf/0.1/name")
+    Name: string
+end
 
-Input::load()
-|> map(fn(row) -> Output {
+input
+|> map(fn row -> Output {
     @id = "http://example.com/${row.ID}/${row.Name}",
     ID = row.IDs,
     Name = row.Name
-})
-|> Rdf::serialize("tests/RMLTC0002e-CSV/actual.nq")
+} end)
+|> Rdf.serialize("tests/RMLTC0002e-CSV/actual.nq")

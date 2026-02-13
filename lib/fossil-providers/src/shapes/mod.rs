@@ -1,6 +1,5 @@
-//! Shared utilities for shape-based providers (ShEx, SHACL)
-
-use fossil_lang::ast::ast::{PrimitiveType, TypeId};
+use fossil_lang::ast::PrimitiveType;
+use fossil_lang::traits::provider::FieldType;
 
 pub mod shex;
 
@@ -8,36 +7,28 @@ pub mod shex;
 pub struct ShapeField {
     pub name: String,
     pub predicate_uri: String,
-    pub ty: TypeId,
+    pub ty: FieldType,
+    pub validate_args: Vec<(String, ValidateValue)>,
 }
 
-/// Extract local name from IRI (last segment after # or /)
-///
-/// # Examples
-/// - `<http://xmlns.com/foaf/0.1/name>` -> `"name"`
-/// - `<http://example.org/Person>` -> `"Person"`
-pub fn extract_local_name(iri: &str) -> String {
-    // Remove angle brackets if present
-    let iri = iri.trim_start_matches('<').trim_end_matches('>');
+#[derive(Debug)]
+pub enum ValidateValue {
+    Int(i64),
+    Str(String),
+}
 
-    // Try fragment first
+pub fn extract_local_name(iri: &str) -> String {
+    let iri = iri.trim_start_matches('<').trim_end_matches('>');
     if let Some(pos) = iri.rfind('#') {
         return iri[pos + 1..].to_string();
     }
-
-    // Then try last path segment
     if let Some(pos) = iri.rfind('/') {
         return iri[pos + 1..].to_string();
     }
-
     iri.to_string()
 }
 
-/// Map XSD datatype IRI to Fossil primitive type
-///
-/// Handles common XSD datatypes and maps them to appropriate Fossil types.
 pub fn xsd_to_fossil_type(iri: &str) -> PrimitiveType {
-    // Extract local name from IRI for matching
     let local = iri
         .rsplit_once('#')
         .map(|(_, name)| name)
@@ -46,31 +37,24 @@ pub fn xsd_to_fossil_type(iri: &str) -> PrimitiveType {
         .trim_end_matches('>');
 
     match local {
-        // String types
         "string" | "normalizedString" | "token" | "language" | "Name" | "NCName" | "NMTOKEN"
         | "anyURI" | "QName" | "NOTATION" | "ID" | "IDREF" | "ENTITY" => PrimitiveType::String,
 
-        // Integer types
         "integer" | "int" | "long" | "short" | "byte" | "nonNegativeInteger"
         | "nonPositiveInteger" | "negativeInteger" | "positiveInteger" | "unsignedLong"
         | "unsignedInt" | "unsignedShort" | "unsignedByte" => PrimitiveType::Int,
 
-        // Float types
         "float" | "double" | "decimal" => PrimitiveType::Float,
 
-        // Boolean type
         "boolean" => PrimitiveType::Bool,
 
-        // Date/time types -> String for now (future: native date types)
         "date" | "time" | "dateTime" | "dateTimeStamp" | "gYear" | "gMonth" | "gDay"
         | "gYearMonth" | "gMonthDay" | "duration" | "yearMonthDuration" | "dayTimeDuration" => {
             PrimitiveType::String
         }
 
-        // Binary types -> String (base64 encoded)
         "hexBinary" | "base64Binary" => PrimitiveType::String,
 
-        // Default to string for unknown types
         _ => PrimitiveType::String,
     }
 }

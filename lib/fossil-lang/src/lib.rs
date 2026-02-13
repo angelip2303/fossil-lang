@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod common;
 pub mod compiler;
 pub mod context;
 pub mod error;

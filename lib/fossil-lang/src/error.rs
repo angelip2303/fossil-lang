@@ -28,21 +28,11 @@ pub enum FossilError {
         span: SourceSpan,
     },
 
-    #[error("undefined variable '{name}'")]
-    #[diagnostic(
-        code(fossil::resolve::undefined_var),
-        help("check spelling or define it first")
-    )]
-    UndefinedVariable {
+    #[error("undefined {kind} '{name}'")]
+    #[diagnostic(code(fossil::resolve::undefined))]
+    Undefined {
+        kind: &'static str,
         name: String,
-        #[label("not found in scope")]
-        span: SourceSpan,
-    },
-
-    #[error("undefined path '{path}'")]
-    #[diagnostic(code(fossil::resolve::undefined_path))]
-    UndefinedPath {
-        path: String,
         #[label("not found")]
         span: SourceSpan,
     },
@@ -57,51 +47,12 @@ pub enum FossilError {
         first_def: SourceSpan,
     },
 
-    #[error("undefined type '{path}'")]
-    #[diagnostic(code(fossil::resolve::undefined_type))]
-    UndefinedType {
-        path: String,
-        #[label("type not found")]
-        span: SourceSpan,
-    },
-
-    #[error("undefined module '{path}'")]
-    #[diagnostic(code(fossil::resolve::undefined_module))]
-    UndefinedModule {
-        path: String,
-        #[label("module not found")]
-        span: SourceSpan,
-    },
-
-    #[error("undefined provider '{path}'")]
-    #[diagnostic(code(fossil::resolve::undefined_provider))]
-    UndefinedProvider {
-        path: String,
-        #[label("provider not found")]
-        span: SourceSpan,
-    },
-
-    #[error("'{path}' is not a module")]
-    #[diagnostic(code(fossil::resolve::not_a_module))]
-    NotAModule {
-        path: String,
-        #[label("expected a module")]
-        span: SourceSpan,
-    },
-
-    #[error("'{name}' is not a function")]
-    #[diagnostic(code(fossil::resolve::not_a_function))]
-    NotAFunction {
+    #[error("'{name}' is not a {kind}")]
+    #[diagnostic(code(fossil::resolve::not_a))]
+    NotA {
+        kind: &'static str,
         name: String,
-        #[label("cannot be called")]
-        span: SourceSpan,
-    },
-
-    #[error("'{path}' is not a provider")]
-    #[diagnostic(code(fossil::resolve::not_a_provider))]
-    NotAProvider {
-        path: String,
-        #[label("expected a type provider")]
+        #[label("expected a {kind}")]
         span: SourceSpan,
     },
 
@@ -152,14 +103,6 @@ pub enum FossilError {
     Evaluation {
         message: String,
         #[label("error occurred here")]
-        span: SourceSpan,
-    },
-
-    #[error("stack overflow: maximum recursion depth ({depth}) exceeded")]
-    #[diagnostic(code(fossil::runtime::stack_overflow))]
-    StackOverflow {
-        depth: usize,
-        #[label("recursive call")]
         span: SourceSpan,
     },
 
@@ -224,26 +167,20 @@ pub enum FossilError {
         span: SourceSpan,
     },
 
-    #[error("schema has no shapes defined")]
-    #[diagnostic(code(fossil::provider::no_shapes))]
-    NoShapesDefined {
-        #[label("no shapes")]
-        span: SourceSpan,
-    },
-
-    #[error("shape '{name}' not found")]
-    #[diagnostic(code(fossil::provider::shape_not_found))]
-    ShapeNotFound {
-        name: String,
-        #[label("shape not found")]
-        span: SourceSpan,
-    },
-
     #[error("data error: {message}")]
     #[diagnostic(code(fossil::data))]
     DataError {
         message: String,
         #[label("data error")]
+        span: SourceSpan,
+    },
+
+    #[error("provider '{provider}' {message}")]
+    #[diagnostic(code(fossil::provider::kind_mismatch))]
+    ProviderKindMismatch {
+        provider: String,
+        message: &'static str,
+        #[label("wrong syntax for this provider")]
         span: SourceSpan,
     },
 
@@ -256,7 +193,6 @@ pub enum FossilError {
         span: SourceSpan,
     },
 
-    // ===== External Errors (wrapped) =====
     #[error("IO error: {0}")]
     #[diagnostic(code(fossil::io))]
     Io(#[from] std::io::Error),
@@ -274,18 +210,20 @@ impl FossilError {
         }
     }
 
-    pub fn undefined_variable(name: impl Into<String>, loc: Loc) -> Self {
-        Self::UndefinedVariable {
+    pub fn undefined(kind: &'static str, name: impl Into<String>, loc: Loc) -> Self {
+        Self::Undefined {
+            kind,
             name: name.into(),
             span: loc.into(),
         }
     }
 
+    pub fn undefined_variable(name: impl Into<String>, loc: Loc) -> Self {
+        Self::undefined("variable", name, loc)
+    }
+
     pub fn undefined_path(path: impl Into<String>, loc: Loc) -> Self {
-        Self::UndefinedPath {
-            path: path.into(),
-            span: loc.into(),
-        }
+        Self::undefined("path", path, loc)
     }
 
     pub fn already_defined(name: impl Into<String>, first: Loc, second: Loc) -> Self {
@@ -297,45 +235,19 @@ impl FossilError {
     }
 
     pub fn undefined_type(path: impl Into<String>, loc: Loc) -> Self {
-        Self::UndefinedType {
-            path: path.into(),
-            span: loc.into(),
-        }
+        Self::undefined("type", path, loc)
     }
 
-    pub fn undefined_module(path: impl Into<String>, loc: Loc) -> Self {
-        Self::UndefinedModule {
-            path: path.into(),
-            span: loc.into(),
-        }
-    }
-
-    pub fn undefined_provider(path: impl Into<String>, loc: Loc) -> Self {
-        Self::UndefinedProvider {
-            path: path.into(),
-            span: loc.into(),
-        }
-    }
-
-    pub fn not_a_module(path: impl Into<String>, loc: Loc) -> Self {
-        Self::NotAModule {
-            path: path.into(),
-            span: loc.into(),
-        }
-    }
-
-    pub fn not_a_function(name: impl Into<String>, loc: Loc) -> Self {
-        Self::NotAFunction {
+    pub fn not_a(kind: &'static str, name: impl Into<String>, loc: Loc) -> Self {
+        Self::NotA {
+            kind,
             name: name.into(),
             span: loc.into(),
         }
     }
 
     pub fn not_a_provider(path: impl Into<String>, loc: Loc) -> Self {
-        Self::NotAProvider {
-            path: path.into(),
-            span: loc.into(),
-        }
+        Self::not_a("provider", path, loc)
     }
 
     pub fn type_mismatch(message: impl Into<String>, loc: Loc) -> Self {
@@ -378,13 +290,6 @@ impl FossilError {
     pub fn evaluation(message: impl Into<String>, loc: Loc) -> Self {
         Self::Evaluation {
             message: message.into(),
-            span: loc.into(),
-        }
-    }
-
-    pub fn stack_overflow(depth: usize, loc: Loc) -> Self {
-        Self::StackOverflow {
-            depth,
             span: loc.into(),
         }
     }
@@ -447,20 +352,21 @@ impl FossilError {
         }
     }
 
-    pub fn no_shapes_defined(loc: Loc) -> Self {
-        Self::NoShapesDefined { span: loc.into() }
-    }
-
-    pub fn shape_not_found(name: impl Into<String>, loc: Loc) -> Self {
-        Self::ShapeNotFound {
-            name: name.into(),
+    pub fn data_error(message: impl Into<String>, loc: Loc) -> Self {
+        Self::DataError {
+            message: message.into(),
             span: loc.into(),
         }
     }
 
-    pub fn data_error(message: impl Into<String>, loc: Loc) -> Self {
-        Self::DataError {
-            message: message.into(),
+    pub fn provider_kind_mismatch(
+        provider: impl Into<String>,
+        message: &'static str,
+        loc: Loc,
+    ) -> Self {
+        Self::ProviderKindMismatch {
+            provider: provider.into(),
+            message,
             span: loc.into(),
         }
     }
@@ -539,47 +445,14 @@ impl IntoIterator for FossilErrors {
 }
 
 #[derive(Debug, Clone)]
-pub enum FossilWarning {
-    RdfTypeConflict {
-        type_name: String,
-        attribute_type: String,
-        field_name: String,
-        span: SourceSpan,
-    },
-    ShexRdfTypeIgnored {
-        shape_name: String,
-        span: SourceSpan,
-    },
-    Generic {
-        message: String,
-        span: SourceSpan,
-    },
+pub struct FossilWarning {
+    pub message: String,
+    pub span: SourceSpan,
 }
 
 impl FossilWarning {
-    pub fn rdf_type_conflict(
-        type_name: impl Into<String>,
-        attribute_type: impl Into<String>,
-        field_name: impl Into<String>,
-        loc: Loc,
-    ) -> Self {
-        Self::RdfTypeConflict {
-            type_name: type_name.into(),
-            attribute_type: attribute_type.into(),
-            field_name: field_name.into(),
-            span: loc.into(),
-        }
-    }
-
-    pub fn shex_rdf_type_ignored(shape_name: impl Into<String>, loc: Loc) -> Self {
-        Self::ShexRdfTypeIgnored {
-            shape_name: shape_name.into(),
-            span: loc.into(),
-        }
-    }
-
     pub fn generic(message: impl Into<String>, loc: Loc) -> Self {
-        Self::Generic {
+        Self {
             message: message.into(),
             span: loc.into(),
         }
@@ -669,7 +542,7 @@ mod tests {
         assert!(matches!(syntax_err, FossilError::Syntax { ref message, .. } if message == "unexpected token"));
 
         let undef_err = FossilError::undefined_variable("x", loc);
-        assert!(matches!(undef_err, FossilError::UndefinedVariable { ref name, .. } if name == "x"));
+        assert!(matches!(undef_err, FossilError::Undefined { kind: "variable", ref name, .. } if name == "x"));
 
         let mismatch_err = FossilError::type_mismatch("expected Int, got String", loc);
         assert!(matches!(mismatch_err, FossilError::TypeMismatch { ref message, .. } if message == "expected Int, got String"));

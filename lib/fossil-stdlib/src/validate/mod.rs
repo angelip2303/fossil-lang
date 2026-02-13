@@ -1,189 +1,259 @@
-//! ShEx-driven validation for BIM data
-//!
-//! `ValidWall.check` reads `@validate(...)` attributes from type metadata
-//! and generates Polars boolean expressions to validate data against ShEx constraints.
-//!
-//! Types with `@validate(...)` attributes automatically get a `check()` method
-//! via the auto-method system. The method returns `Validated<T>`.
-//!
-//! # Usage
-//!
-//! ```fossil
-//! let source =
-//!     IfcWall.load("building.ifc")
-//!     |> fn wall ->
-//!         ValidWall("http://example.com/wall/${wall.GlobalId}") {
-//!             name = wall.Name,
-//!         }
-//!     end
-//!
-//! source |> ValidWall.check
-//! ```
-
-pub mod constraints;
-pub mod metadata;
-
-use fossil_lang::error::FossilError;
-use fossil_lang::ir::{Ir, Polytype, StmtKind, TypeKind, TypeVar};
-use fossil_lang::passes::GlobalContext;
-use fossil_lang::runtime::value::{Plan, Transform, Value};
-use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
+use std::sync::Arc;
 
 use polars::prelude::*;
 
-use metadata::ValidateFieldAttrs;
-use constraints::field_checks;
+use fossil_lang::context::{DefId, DefKind, Symbol};
+use fossil_lang::context::global::TypeInfo;
+use fossil_lang::error::FossilError;
+use fossil_lang::ir::{Ir, Polytype, TypeVar};
+use fossil_lang::passes::GlobalContext;
+use fossil_lang::runtime::value::{Plan, Transform, Value};
+use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
+use fossil_lang::traits::provider::{FunctionDef, ModuleSpec};
+use fossil_macros::FromAttrs;
 
-/// A required field discovered by inspecting IR types.
-/// Shared between `validate_plan()` and `extract_validate_rules()`.
-pub(crate) struct RequiredField {
-    pub field_name: String,
-    pub field_sym: fossil_lang::context::Symbol,
-    pub column_name: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidateMode {
+    Validate,
+    Errors,
 }
 
-/// Collect required (non-optional) fields for a type by inspecting the IR.
-pub(crate) fn collect_required_fields(
-    ir: &Ir,
-    type_name: fossil_lang::context::Symbol,
-    interner: &fossil_lang::context::Interner,
-) -> Vec<RequiredField> {
-    let Some(fields) = lookup_record_fields(ir, type_name) else {
+/// Generates `Type.validate()` and `Type.errors()` for record types with `@validate` attributes
+pub fn validate_module_generator(
+    validation_error_def_id: DefId,
+) -> Arc<dyn Fn(&TypeInfo) -> Option<ModuleSpec> + Send + Sync> {
+    Arc::new(move |info: &TypeInfo| {
+        let validate_sym = info.interner.lookup("validate")?;
+        let has_validate = info
+            .fields
+            .iter()
+            .any(|f| f.attrs.iter().any(|a| a.name == validate_sym));
+
+        if !has_validate {
+            return None;
+        }
+
+        Some(ModuleSpec {
+            functions: vec![
+                FunctionDef::new("validate", ValidateFunction {
+                    type_name: info.name,
+                    mode: ValidateMode::Validate,
+                    validation_error_def_id,
+                }),
+                FunctionDef::new("errors", ValidateFunction {
+                    type_name: info.name,
+                    mode: ValidateMode::Errors,
+                    validation_error_def_id,
+                }),
+            ],
+        })
+    })
+}
+
+#[derive(Debug, Clone, FromAttrs)]
+pub struct ValidateFieldAttrs {
+    #[attr("validate.min_length", field)]
+    pub min_length: Option<i64>,
+    #[attr("validate.max_length", field)]
+    pub max_length: Option<i64>,
+    #[attr("validate.pattern", field)]
+    pub pattern: Option<String>,
+}
+
+struct Constraint {
+    field: String,
+    name: &'static str,
+    expected: String,
+    /// Expression that is true when the constraint is SATISFIED
+    valid_expr: Expr,
+}
+
+fn resolve_type_def_id(ctx: &RuntimeContext, type_name: Symbol) -> Option<DefId> {
+    ctx.gcx
+        .definitions
+        .find_by_symbol(type_name, |k| matches!(k, DefKind::Type))
+        .map(|d| d.id())
+}
+
+fn extract_constraints(ctx: &RuntimeContext, type_name: Symbol) -> Vec<Constraint> {
+    let Some(type_def_id) = resolve_type_def_id(ctx, type_name) else {
         return Vec::new();
     };
-    fields
-        .iter()
-        .filter(|(_, type_id)| !is_optional_type(ir, *type_id))
-        .map(|(sym, _)| {
-            let name = interner.resolve(*sym).to_string();
-            let col_name = format!("_check_{}_required", name);
-            RequiredField {
-                field_name: name,
-                field_sym: *sym,
-                column_name: col_name,
-            }
-        })
-        .collect()
+
+    let Some(metadata) = ctx.gcx.type_metadata.get(&type_def_id) else {
+        return Vec::new();
+    };
+
+    let mut constraints = Vec::new();
+
+    for (field_sym, field_meta) in &metadata.field_metadata {
+        let field_name = ctx.gcx.interner.resolve(*field_sym);
+        let attrs = ValidateFieldAttrs::from_field_metadata(field_meta, &ctx.gcx.interner);
+
+        if let Some(n) = attrs.min_length {
+            constraints.push(Constraint {
+                field: field_name.to_string(),
+                name: "min_length",
+                expected: n.to_string(),
+                valid_expr: col(field_name).str().len_chars().gt_eq(lit(n as u32)),
+            });
+        }
+
+        if let Some(n) = attrs.max_length {
+            constraints.push(Constraint {
+                field: field_name.to_string(),
+                name: "max_length",
+                expected: n.to_string(),
+                valid_expr: col(field_name).str().len_chars().lt_eq(lit(n as u32)),
+            });
+        }
+
+        if let Some(ref pat) = attrs.pattern {
+            constraints.push(Constraint {
+                field: field_name.to_string(),
+                name: "pattern",
+                expected: pat.clone(),
+                valid_expr: col(field_name).str().contains(lit(pat.as_str()), false),
+            });
+        }
+    }
+
+    constraints
 }
 
-pub struct ValidateCheckFunction;
+fn combine_valid_filter(constraints: &[Constraint]) -> Option<Expr> {
+    constraints
+        .iter()
+        .map(|c| c.valid_expr.clone())
+        .reduce(|a, b| a.and(b))
+}
 
-impl FunctionImpl for ValidateCheckFunction {
+pub fn validation_error_schema() -> Schema {
+    Schema::from_iter(VALIDATION_ERROR_FIELDS.map(|name| {
+        Field::new(name.into(), DataType::String)
+    }))
+}
+
+const VALIDATION_ERROR_FIELDS: [&str; 5] =
+    ["source_type", "field", "constraint", "expected", "actual"];
+
+pub struct ValidateFunction {
+    type_name: Symbol,
+    mode: ValidateMode,
+    validation_error_def_id: DefId,
+}
+
+impl ValidateFunction {
+    fn take_plan(args: Vec<Value>, label: &str) -> Result<Plan, FossilError> {
+        let loc = fossil_lang::ast::Loc::generated();
+        let input = args
+            .into_iter()
+            .next()
+            .ok_or_else(|| FossilError::evaluation(format!("{label} requires a plan argument"), loc))?;
+        match input {
+            Value::Plan(p) => Ok(p),
+            _ => Err(FossilError::evaluation(format!("{label} expects a Plan"), loc)),
+        }
+    }
+
+    fn call_validate(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
+        let mut plan = Self::take_plan(args, "validate")?;
+        let constraints = extract_constraints(ctx, self.type_name);
+
+        if let Some(filter) = combine_valid_filter(&constraints) {
+            plan.transforms.push(Transform::Filter(filter));
+        }
+
+        Ok(Value::Plan(plan))
+    }
+
+    fn call_errors(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
+        let plan = Self::take_plan(args, "errors")?;
+        let constraints = extract_constraints(ctx, self.type_name);
+
+        let Some(valid_filter) = combine_valid_filter(&constraints) else {
+            return Ok(Value::Plan(Plan::empty(validation_error_schema())));
+        };
+
+        let type_name = ctx.gcx.interner.resolve(self.type_name).to_string();
+
+        // Build when/then chains — reports first violated constraint per row
+        let violation_exprs: Vec<_> = constraints
+            .iter()
+            .map(|c| (c, c.valid_expr.clone().not()))
+            .collect();
+
+        let field_expr = build_when_then(&violation_exprs, |c| lit(c.field.clone()));
+        let constraint_expr = build_when_then(&violation_exprs, |c| lit(c.name));
+        let expected_expr = build_when_then(&violation_exprs, |c| lit(c.expected.clone()));
+        let actual_expr =
+            build_when_then(&violation_exprs, |c| col(&c.field).cast(DataType::String));
+
+        let select_exprs = vec![
+            lit(type_name).alias("source_type"),
+            field_expr.alias("field"),
+            constraint_expr.alias("constraint"),
+            expected_expr.alias("expected"),
+            actual_expr.alias("actual"),
+        ];
+
+        let schema = validation_error_schema();
+        let mut error_plan = Plan {
+            source: plan.source,
+            transforms: plan.transforms,
+            type_def_id: Some(self.validation_error_def_id),
+            schema: Arc::new(schema),
+            outputs: Vec::new(),
+            pending_exprs: None,
+            ctor_exprs: vec![],
+        };
+
+        error_plan.transforms.push(Transform::Filter(valid_filter.not()));
+        error_plan.transforms.push(Transform::Select(select_exprs));
+
+        Ok(Value::Plan(error_plan))
+    }
+}
+
+fn build_when_then(
+    violation_exprs: &[(&Constraint, Expr)],
+    value_fn: impl Fn(&Constraint) -> Expr,
+) -> Expr {
+    let null = lit(Null {}).cast(DataType::String);
+    let mut result = null;
+    for (constraint, violation_cond) in violation_exprs.iter().rev() {
+        result = when(violation_cond.clone())
+            .then(value_fn(constraint))
+            .otherwise(result);
+    }
+    result
+}
+
+impl FunctionImpl for ValidateFunction {
     fn signature(
         &self,
         ir: &mut Ir,
         next_type_var: &mut dyn FnMut() -> TypeVar,
-        gcx: &GlobalContext,
+        _gcx: &GlobalContext,
     ) -> Polytype {
-        // forall T. (T) -> Validated<T>
         let t_var = next_type_var();
         let t_ty = ir.var_type(t_var);
 
-        let validated_def_id = gcx
-            .interner
-            .lookup("Validated")
-            .and_then(|sym| gcx.definitions.get_by_symbol(sym).map(|d| d.id()))
-            .expect("Validated type constructor must be registered");
-        let validated_t = ir.app_type(validated_def_id, vec![t_ty]);
-
-        Polytype::poly(vec![t_var], ir.fn_type(vec![t_ty], validated_t))
+        match self.mode {
+            ValidateMode::Validate => {
+                Polytype::poly(vec![t_var], ir.fn_type(vec![t_ty], t_ty))
+            }
+            ValidateMode::Errors => {
+                let ret_ty = ir.named_type(self.validation_error_def_id);
+                Polytype::poly(vec![t_var], ir.fn_type(vec![t_ty], ret_ty))
+            }
+        }
     }
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
-        let mut args_iter = args.into_iter();
-
-        let input = args_iter.next().ok_or_else(|| {
-            FossilError::evaluation(
-                "Validate.check requires a Plan argument".to_string(),
-                fossil_lang::ast::Loc::generated(),
-            )
-        })?;
-
-        match input {
-            Value::Plan(plan) => validate_plan(plan, ctx),
-            _ => Err(FossilError::evaluation(
-                "Validate.check expects a Plan value".to_string(),
-                fossil_lang::ast::Loc::generated(),
-            )),
+        match self.mode {
+            ValidateMode::Validate => self.call_validate(args, ctx),
+            ValidateMode::Errors => self.call_errors(args, ctx),
         }
     }
-}
-
-/// Check if an IR type is optional (`T?`)
-pub(crate) fn is_optional_type(
-    ir: &Ir,
-    type_id: fossil_lang::ir::TypeId,
-) -> bool {
-    let ty = ir.types.get(type_id);
-    matches!(&ty.kind, TypeKind::Optional(_))
-}
-
-/// Find the IR record type for a given type name by scanning IR statements.
-pub(crate) fn lookup_record_fields(
-    ir: &Ir,
-    def_name: fossil_lang::context::Symbol,
-) -> Option<Vec<(fossil_lang::context::Symbol, fossil_lang::ir::TypeId)>> {
-    for &stmt_id in &ir.root {
-        let stmt = ir.stmts.get(stmt_id);
-        if let StmtKind::Type { name, ty, .. } = &stmt.kind
-            && *name == def_name
-        {
-            let ty_node = ir.types.get(*ty);
-            if let TypeKind::Record(fields) = &ty_node.kind {
-                return Some(fields.to_fields());
-            }
-        }
-    }
-    None
-}
-
-/// Apply validation checks to a Plan based on type metadata and IR types.
-///
-/// Required checks are inferred from the IR: `T` fields get `is_not_null()` checks,
-/// `T?` fields do not. Attribute-based checks (min_length, pattern, etc.)
-/// are extracted from `@validate(...)` annotations.
-fn validate_plan(mut plan: Plan, ctx: &RuntimeContext) -> Result<Value, FossilError> {
-    let interner = &ctx.gcx.interner;
-    let ir = ctx.ir;
-    let mut check_exprs: Vec<Expr> = Vec::new();
-
-    // Collect type DefIds to check — from outputs or from plan itself
-    let type_def_ids = plan.type_def_ids();
-    if type_def_ids.is_empty() {
-        return Ok(Value::Plan(plan));
-    }
-
-    for def_id in type_def_ids {
-        // Generate type-based required checks from IR field types
-        let def = ctx.gcx.definitions.get(def_id);
-        for rf in collect_required_fields(ir, def.name, interner) {
-            check_exprs.push(
-                col(&rf.field_name).is_not_null().alias(&rf.column_name),
-            );
-        }
-
-        // Generate attribute-based checks (min_length, pattern, etc.)
-        if let Some(tm) = ctx.gcx.type_metadata.get(&def_id) {
-            for (field_sym, field_meta) in &tm.field_metadata {
-                let field_name = interner.resolve(*field_sym);
-                let attrs = ValidateFieldAttrs::from_field_metadata(field_meta, interner);
-                for (expr, _constraint, _message) in field_checks(field_name, &attrs) {
-                    check_exprs.push(expr);
-                }
-            }
-        }
-    }
-
-    if check_exprs.is_empty() {
-        // No validation constraints found, return plan unchanged
-        return Ok(Value::Plan(plan));
-    }
-
-    // Add check columns as a Select transform
-    // Keep all existing columns plus add the check columns
-    let mut all_select: Vec<Expr> = vec![col("*")];
-    all_select.extend(check_exprs);
-    plan.transforms.push(Transform::Select(all_select));
-
-    Ok(Value::Plan(plan))
 }

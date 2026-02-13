@@ -1,10 +1,23 @@
-const ROOT = "lib/fossil-stdlib/examples/end-to-end"
+let data = csv!("lib/fossil-stdlib/examples/end-to-end/people.csv")
 
-type Data = csv!("${ROOT}/people.csv")
+// @rdf(base = "http://example.com/person/")
+// type Person(id: string) do
+//     @rdf(uri = "http://xmlns.com/foaf/0.1/name")
+//     @validate(min_length = 2)
+//     name: string
 
-#[rdf(base = "http://example.com/person/")] // this should be automatically inferred
-type Person(id: string) = shex!("${ROOT}/person.shex", shape: "PersonShape")
+//     @rdf(uri = "http://xmlns.com/foaf/0.1/age")
+//     age: int
+// end
 
-Data::load()
-|> fn(row) -> Person(row.email) { name = row.name, age = row.age }
-|> Rdf::serialize("actual.nq")
+@rdf(base = "http://example.com/person/")
+type Person(id: string) = shex!(
+    "lib/fossil-stdlib/examples/end-to-end/person.shex",
+    shape: "PersonShape"
+)
+
+let mapped = data
+    |> fn row -> Person(row.email) { name = row.name, age = row.age } end
+
+mapped |> Person.validate() |> Rdf.serialize("actual.nq")
+mapped |> Person.errors() |> Report.csv("errors.csv")

@@ -1,10 +1,10 @@
-type Input = csv!("tests/RMLTC0002b-CSV/student.csv")
+let input = csv!("tests/RMLTC0002b-CSV/student.csv")
 
-type Output(subject: string) = {
-    #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
-    Name: string,
-}
+type Output(subject: string) do
+    @rdf(uri = "http://xmlns.com/foaf/0.1/name")
+    Name: string
+end
 
-Input::load()
-|> fn(row) -> Output("_:students${row.ID}") { Name = row.Name }
-|> Rdf::serialize("tests/RMLTC0002b-CSV/actual.nq")
+input
+|> fn row -> Output("_:students${row.ID}") { Name = row.Name } end
+|> Rdf.serialize("tests/RMLTC0002b-CSV/actual.nq")

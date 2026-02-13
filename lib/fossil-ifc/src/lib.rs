@@ -4,95 +4,176 @@ pub(crate) mod step;
 
 use std::path::PathBuf;
 
-use fossil_lang::context::DefId;
+use fossil_lang::ast::Loc;
+use fossil_lang::context::{DefKind, Interner};
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
+use fossil_lang::traits::provider::{
+    FieldSpec, FieldType, FunctionDef, ModuleSpec, ProviderArgs, ProviderOutput, ProviderParamInfo,
+    ProviderSchema, TypeProviderImpl,
+};
 use fossil_lang::traits::source::Source;
 
 use polars::prelude::*;
 
-use schema::{IfcEntityDef, ALL_ENTITIES};
+use schema::{datatype_to_primitive, IfcFieldDef, Optionality, ALL_ENTITIES};
 use source::IfcSource;
 
-/// Register all IFC entity types and their load functions
-pub fn register(gcx: &mut GlobalContext) {
-    for entity_def in ALL_ENTITIES {
-        register_entity(gcx, entity_def);
+fn ifc_field_to_field_type(f: &IfcFieldDef) -> FieldType {
+    let prim = datatype_to_primitive(&f.data_type);
+    match f.optional {
+        Optionality::Required => FieldType::Primitive(prim),
+        Optionality::Optional => FieldType::Optional(Box::new(FieldType::Primitive(prim))),
     }
 }
 
-fn register_entity(gcx: &mut GlobalContext, entity_def: &'static IfcEntityDef) {
-    let all_fields = entity_def.all_fields();
-
-    let fields: Vec<(&str, _)> = all_fields
-        .iter()
-        .map(|f| (f.name, f.to_builtin_field_type()))
-        .collect();
-
-    let def_id = gcx.register_record_type_with_optionality(entity_def.fossil_name, fields);
-
-    let schema = Schema::from_iter(all_fields.iter().map(|f| {
-        Field::new(f.name.into(), f.data_type.clone())
-    }));
-
-    gcx.register_function(
-        entity_def.fossil_name,
-        "load",
-        IfcEntityLoadFunction::new(entity_def, def_id, schema),
-    );
+pub fn init(gcx: &mut GlobalContext) {
+    gcx.register_provider("ifc", IfcProvider);
 }
 
-struct IfcEntityLoadFunction {
-    entity_def: &'static IfcEntityDef,
-    def_id: DefId,
-    schema: Schema,
-}
+pub struct IfcProvider;
 
-impl IfcEntityLoadFunction {
-    fn new(entity_def: &'static IfcEntityDef, def_id: DefId, schema: Schema) -> Self {
-        Self {
-            entity_def,
-            def_id,
-            schema,
+impl TypeProviderImpl for IfcProvider {
+    fn param_info(&self) -> Vec<ProviderParamInfo> {
+        vec![
+            ProviderParamInfo {
+                name: "path",
+                required: true,
+                default: None,
+            },
+            ProviderParamInfo {
+                name: "entity",
+                required: true,
+                default: None,
+            },
+        ]
+    }
+
+    fn provide(
+        &self,
+        args: &ProviderArgs,
+        interner: &mut Interner,
+        type_name: &str,
+        loc: Loc,
+    ) -> Result<ProviderOutput, FossilError> {
+        let path_str = args.require_string("path", "ifc", loc)?;
+        let entity_str = args.require_string("entity", "ifc", loc)?;
+
+        let path = PathBuf::from(path_str);
+
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("ifc") => {}
+            Some(other) => {
+                return Err(FossilError::invalid_extension(other, "ifc".to_string(), loc));
+            }
+            None => {
+                return Err(FossilError::invalid_extension(
+                    "(none)",
+                    "ifc".to_string(),
+                    loc,
+                ));
+            }
         }
+
+        if !path.exists() {
+            return Err(FossilError::file_not_found(path.display().to_string(), loc));
+        }
+        if !path.is_file() {
+            return Err(FossilError::not_a_file(path.display().to_string(), loc));
+        }
+
+        let entity_def = ALL_ENTITIES
+            .iter()
+            .find(|e| e.fossil_name == entity_str)
+            .ok_or_else(|| {
+                FossilError::data_error(format!("unknown IFC entity: {}", entity_str), loc)
+            })?;
+
+        let all_fields = entity_def.all_fields();
+        let fields: Vec<FieldSpec> = all_fields
+            .iter()
+            .map(|f| FieldSpec {
+                name: interner.intern(f.name),
+                ty: ifc_field_to_field_type(f),
+                attrs: vec![],
+            })
+            .collect();
+
+        let polars_schema = Schema::from_iter(
+            all_fields
+                .iter()
+                .map(|f| Field::new(f.name.into(), f.data_type.clone())),
+        );
+
+        let module_spec = ModuleSpec {
+            functions: vec![FunctionDef::new("load", IfcLoadFunction {
+                source: IfcSource::new(path, entity_def),
+                schema: polars_schema,
+                type_name: type_name.to_string(),
+            })],
+        };
+
+        Ok(ProviderOutput::new(ProviderSchema { fields })
+            .with_module(module_spec)
+            .as_data())
     }
 }
 
-impl FunctionImpl for IfcEntityLoadFunction {
+struct IfcLoadFunction {
+    source: IfcSource,
+    schema: Schema,
+    type_name: String,
+}
+
+impl FunctionImpl for IfcLoadFunction {
     fn signature(
         &self,
         ir: &mut Ir,
-        _next_type_var: &mut dyn FnMut() -> TypeVar,
-        _gcx: &GlobalContext,
+        next_type_var: &mut dyn FnMut() -> TypeVar,
+        gcx: &GlobalContext,
     ) -> Polytype {
-        let path_ty = ir.string_type();
-        let record_ty = ir.named_type(self.def_id);
-        let list_ty = ir.list_type(record_ty);
-        Polytype::mono(ir.fn_type(vec![path_ty], list_ty))
+        let result_ty = match lookup_type_id(&self.type_name, gcx) {
+            Some(type_id) => ir.named_type(type_id),
+            None => ir.var_type(next_type_var()),
+        };
+        Polytype::mono(ir.fn_type(vec![], result_ty))
     }
 
-    fn call(&self, args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, FossilError> {
+    fn call(&self, _args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, FossilError> {
         use fossil_lang::runtime::value::Plan;
 
-        let path_str = args
-            .first()
-            .and_then(|v| v.as_literal_string())
-            .ok_or_else(|| {
-                FossilError::argument(
-                    "'path' argument must be a string",
-                    fossil_lang::ast::Loc::generated(),
-                )
-            })?;
+        let type_def_id = _ctx
+            .gcx
+            .interner
+            .lookup(&self.type_name)
+            .and_then(|sym| {
+                _ctx.gcx
+                    .definitions
+                    .find_by_symbol(sym, |k| matches!(k, DefKind::Type))
+                    .map(|d| d.id())
+            });
 
-        let path = PathBuf::from(&path_str);
-        let source = IfcSource::new(path, self.entity_def);
-        let plan =
-            Plan::from_source_with_type(source.box_clone(), self.schema.clone(), self.def_id);
+        let plan = match type_def_id {
+            Some(def_id) => {
+                Plan::from_source_with_type(self.source.box_clone(), self.schema.clone(), def_id)
+            }
+            None => Plan::from_source(self.source.box_clone(), self.schema.clone()),
+        };
 
         Ok(Value::Plan(plan))
     }
 }
 
+fn lookup_type_id(
+    name: &str,
+    gcx: &GlobalContext,
+) -> Option<fossil_lang::context::DefId> {
+    gcx.interner.lookup(name).and_then(|sym| {
+        gcx.definitions
+            .find_by_symbol(sym, |k| matches!(k, DefKind::Type))
+            .map(|d| d.id())
+    })
+}

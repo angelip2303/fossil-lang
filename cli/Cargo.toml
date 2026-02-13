@@ -22,3 +22,4 @@ miette = { version = "7", features = ["fancy"] }
 fossil-lang = { workspace = true }
 fossil-stdlib = { workspace = true }
 fossil-providers = { workspace = true }
+fossil-ifc = { workspace = true }

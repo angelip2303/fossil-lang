@@ -26,19 +26,26 @@ pub struct Compiler {
     gcx: Option<GlobalContext>,
 }
 
-impl Compiler {
-    pub fn new() -> Self {
+impl Default for Compiler {
+    fn default() -> Self {
         Self {
             source_id: 0,
             gcx: None,
         }
+    }
+}
+
+impl Compiler {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Create a compiler with a custom GlobalContext
     ///
     /// ```ignore
     /// let mut gcx = GlobalContext::default();
-    /// gcx.register_provider("csv", CsvProvider);
+    /// fossil_providers::init(&mut gcx);
+    /// fossil_stdlib::init(&mut gcx);
     /// let compiler = Compiler::with_context(gcx);
     /// let program = compiler.compile(CompilerInput::File(path))?;
     /// ```

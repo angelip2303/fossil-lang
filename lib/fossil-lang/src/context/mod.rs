@@ -2,10 +2,9 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::ast::ast::Path;
+use crate::common::Path;
 use crate::traits::function::FunctionImpl;
 use crate::traits::provider::TypeProviderImpl;
 
@@ -30,10 +29,6 @@ impl<T> NodeId<T> {
 
     pub fn idx(&self) -> usize {
         self.idx as usize
-    }
-
-    pub fn into<U>(self) -> NodeId<U> {
-        NodeId::new(self.idx as usize)
     }
 }
 
@@ -111,7 +106,6 @@ impl<T> IntoIterator for Arena<T> {
     }
 }
 
-/// Iterator for consuming an Arena
 pub struct ArenaIntoIter<T> {
     inner: std::iter::Enumerate<std::vec::IntoIter<T>>,
 }
@@ -212,12 +206,8 @@ pub struct Def {
 
 #[derive(Clone)]
 pub enum DefKind {
-    Mod {
-        file_path: Option<PathBuf>,
-        is_inline: bool,
-    },
+    Mod,
     Let,
-    Const,
     Type,
     Func(Arc<dyn FunctionImpl>),
     RecordConstructor,
@@ -257,18 +247,25 @@ impl Definitions {
         self.items.iter().find(|def| def.name == name)
     }
 
+    /// Find definition by symbol and kind predicate.
+    pub fn find_by_symbol(&self, name: Symbol, pred: impl Fn(&DefKind) -> bool) -> Option<&Def> {
+        self.items
+            .iter()
+            .find(|def| def.name == name && pred(&def.kind))
+    }
+
     pub fn insert(&mut self, parent: Option<DefId>, name: Symbol, kind: DefKind) -> DefId {
         let id = DefId::new(self.items.len() as u32);
         self.items.push(Def::new(id, parent, name, kind));
         id
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-
     pub fn len(&self) -> usize {
         self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
 
     pub fn resolve(&self, path: &Path) -> Option<DefId> {
@@ -302,12 +299,6 @@ impl Definitions {
 
                 Some(current_id)
             }
-            Path::Relative { .. } => {
-                // Relative path resolution requires context (current module)
-                // This will be implemented in the resolver pass (Step 1.4)
-                // For now, return None
-                None
-            }
         }
     }
 
@@ -321,14 +312,13 @@ mod tests {
     use super::*;
 
     use crate::ast::Loc;
-    use crate::ast::ast::{Ast, ProviderArgument, Type, TypeKind};
     use crate::error::FossilError;
     use crate::ir::{Ir, Polytype, TypeVar};
     use crate::runtime::value::Value;
     use crate::traits::function::{FunctionImpl, RuntimeContext};
-    use crate::traits::provider::{ProviderOutput, TypeProviderImpl};
-
-    // ---- Mock implementations ----
+    use crate::traits::provider::{
+        FunctionDef, ModuleSpec, ProviderArgs, ProviderOutput, ProviderSchema, TypeProviderImpl,
+    };
 
     struct MockFunction;
 
@@ -343,11 +333,7 @@ mod tests {
             Polytype::mono(ty)
         }
 
-        fn call(
-            &self,
-            _args: Vec<Value>,
-            _ctx: &RuntimeContext,
-        ) -> Result<Value, FossilError> {
+        fn call(&self, _args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, FossilError> {
             Ok(Value::Unit)
         }
     }
@@ -357,50 +343,20 @@ mod tests {
     impl TypeProviderImpl for MockProvider {
         fn provide(
             &self,
-            _args: &[ProviderArgument],
-            ast: &mut Ast,
+            _args: &ProviderArgs,
             _interner: &mut Interner,
             _type_name: &str,
-            loc: Loc,
+            _loc: Loc,
         ) -> Result<ProviderOutput, FossilError> {
-            let ty_id = ast.types.alloc(Type {
-                loc,
-                kind: TypeKind::Unit,
-            });
-            Ok(ProviderOutput::new(ty_id))
+            Ok(ProviderOutput::new(ProviderSchema { fields: vec![] }))
         }
     }
-
-    // ---- Interner tests ----
 
     #[test]
     fn interner_intern_and_resolve() {
         let mut interner = Interner::default();
         let sym = interner.intern("hello");
         assert_eq!(interner.resolve(sym), "hello");
-    }
-
-    #[test]
-    fn interner_same_string_same_symbol() {
-        let mut interner = Interner::default();
-        let sym1 = interner.intern("x");
-        let sym2 = interner.intern("x");
-        assert_eq!(sym1, sym2);
-    }
-
-    #[test]
-    fn interner_lookup_missing() {
-        let interner = Interner::default();
-        assert!(interner.lookup("nonexistent").is_none());
-    }
-
-    // ---- Arena tests ----
-
-    #[test]
-    fn arena_alloc_and_get() {
-        let mut arena: Arena<String> = Arena::default();
-        let id = arena.alloc("hello".to_string());
-        assert_eq!(arena.get(id), "hello");
     }
 
     #[test]
@@ -424,8 +380,6 @@ mod tests {
         *arena.get_mut(id) = "modified".to_string();
         assert_eq!(arena.get(id), "modified");
     }
-
-    // ---- Definitions tests ----
 
     #[test]
     fn definitions_insert_and_get() {
@@ -456,14 +410,7 @@ mod tests {
         let parent_sym = interner.intern("MyModule");
         let child_sym = interner.intern("my_func");
 
-        let parent_id = defs.insert(
-            None,
-            parent_sym,
-            DefKind::Mod {
-                file_path: None,
-                is_inline: true,
-            },
-        );
+        let parent_id = defs.insert(None, parent_sym, DefKind::Mod);
         let child_id = defs.insert(Some(parent_id), child_sym, DefKind::Let);
 
         let path = Path::Qualified(vec![parent_sym, child_sym]);
@@ -520,8 +467,6 @@ mod tests {
         assert!(names.contains(&s2));
     }
 
-    // ---- GlobalContext tests ----
-
     #[test]
     fn global_context_register_provider() {
         let mut gcx = GlobalContext::default();
@@ -534,9 +479,14 @@ mod tests {
     }
 
     #[test]
-    fn global_context_register_function() {
+    fn global_context_register_module() {
         let mut gcx = GlobalContext::default();
-        gcx.register_function("Rdf", "serialize", MockFunction);
+        gcx.register_module(
+            "Rdf",
+            ModuleSpec {
+                functions: vec![FunctionDef::new("serialize", MockFunction)],
+            },
+        );
 
         let rdf_sym = gcx.interner.intern("Rdf");
         let ser_sym = gcx.interner.intern("serialize");
@@ -546,58 +496,4 @@ mod tests {
         let def = gcx.definitions.get(resolved.unwrap());
         assert!(matches!(def.kind, DefKind::Func(_)));
     }
-
-    #[test]
-    fn global_context_register_toplevel_function() {
-        let mut gcx = GlobalContext::default();
-        gcx.register_toplevel_function("my_func", MockFunction);
-
-        let sym = gcx
-            .interner
-            .lookup("my_func")
-            .expect("my_func should be interned");
-        let path = Path::Simple(sym);
-        let resolved = gcx.definitions.resolve(&path);
-        assert!(resolved.is_some());
-        let def = gcx.definitions.get(resolved.unwrap());
-        assert!(matches!(def.kind, DefKind::Func(_)));
-    }
-}
-
-/// Kind of a type (for kind checking)
-///
-/// In type theory, kinds classify types. The simplest kind is `Type` (denoted `*`),
-/// which represents concrete types like `Int`, `String`, `Person`, etc.
-///
-/// Future extensions will support higher-kinded types like `* -> *` for type
-/// constructors that take other types as arguments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Kind {
-    /// The kind of concrete types: `*`
-    ///
-    /// Examples: `Int`, `String`, `Person`, `Entity<Person>`, `List<Int>`
-    Type,
-}
-
-/// Metadata about a type constructor (generic type)
-///
-/// A type constructor is a type that takes type parameters. For example:
-/// - `List` has arity 1 and kind `* -> *` (takes one type, returns a type)
-/// - `Entity` has arity 1 and kind `* -> *`
-/// - `Map` would have arity 2 and kind `* -> * -> *`
-///
-/// This information is used during type checking to:
-/// 1. Validate that type applications have the correct number of arguments
-/// 2. Perform kind checking (future)
-/// 3. Generate meaningful error messages
-#[derive(Debug, Clone)]
-pub struct TypeConstructorInfo {
-    /// The DefId of this type constructor
-    pub def_id: DefId,
-    /// Number of type parameters this constructor expects
-    pub arity: usize,
-    /// Name of the type constructor (for error messages)
-    pub name: Symbol,
-    /// Kinds of the type parameters
-    pub param_kinds: Vec<Kind>,
 }

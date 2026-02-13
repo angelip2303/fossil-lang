@@ -1,29 +1,34 @@
 pub mod rdf;
+pub mod report;
+pub mod validate;
 
-// RDF serialization
 pub use rdf::{RdfMetadata, RdfSerializeFunction};
+pub use report::ReportCsvFunction;
 
+use fossil_lang::context::global::BuiltInFieldType;
+use fossil_lang::common::PrimitiveType;
 use fossil_lang::passes::GlobalContext;
+use fossil_lang::traits::provider::{FunctionDef, ModuleSpec};
 
-/// Initialize the fossil-stdlib by registering all types and functions
-///
-/// This function should be called before using any stdlib functionality
-/// to ensure that all stdlib types and functions are properly registered.
-///
-/// # Arguments
-///
-/// * `gcx` - Mutable reference to the GlobalContext
-///
-/// # Example
-///
-/// ```rust
-/// use fossil_lang::passes::GlobalContext;
-/// use fossil_stdlib;
-///
-/// let mut gcx = GlobalContext::default();
-/// fossil_stdlib::init(&mut gcx);
-/// ```
 pub fn init(gcx: &mut GlobalContext) {
-    // Register RDF serialization functions
-    gcx.register_function("Rdf", "serialize", RdfSerializeFunction);
+    gcx.register_module("Rdf", ModuleSpec {
+        functions: vec![FunctionDef::new("serialize", RdfSerializeFunction)],
+    });
+    gcx.register_module("Report", ModuleSpec {
+        functions: vec![FunctionDef::new("csv", ReportCsvFunction)],
+    });
+
+    let validation_error_def_id = gcx.register_record_type_with_optionality(
+        "ValidationError",
+        vec![
+            ("source_type", BuiltInFieldType::Required(PrimitiveType::String)),
+            ("field", BuiltInFieldType::Required(PrimitiveType::String)),
+            ("constraint", BuiltInFieldType::Required(PrimitiveType::String)),
+            ("expected", BuiltInFieldType::Required(PrimitiveType::String)),
+            ("actual", BuiltInFieldType::Required(PrimitiveType::String)),
+        ],
+    );
+
+    gcx.module_generators
+        .push(validate::validate_module_generator(validation_error_def_id));
 }

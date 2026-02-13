@@ -1,26 +1,20 @@
-//! Module containing the grammar for the Fossil language.
-//!
-//! This provides several functions for parsing Fossil code. Each of these is
-//! designed to handle specific aspects of the language's syntax and semantics.
-//! All the functions are named in a consistent manner; namely, they all start with `parse_`.
-
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use chumsky::pratt::{infix, left, postfix};
+use chumsky::pratt::postfix;
 use chumsky::prelude::*;
 
-use crate::ast::ast::{
-    Argument, Ast, Attribute, AttributeArg, CtorParam, Expr, ExprId, ExprKind,
-    Literal, Param, Path, PrimitiveType, ProviderArgument, RecordField, Stmt, StmtId, StmtKind,
-    Type, TypeId, TypeKind,
+use crate::ast::{
+    Argument, Ast, Attribute, AttributeArg, ConstructorParam, Expr, ExprId, ExprKind, Literal,
+    Path, PrimitiveType, ProviderArgument, RecordField, Stmt, StmtId, StmtKind, Type,
+    TypeId, TypeKind,
 };
-use crate::ast::{Loc, SourceId};
+use crate::ast::Loc;
+use crate::ast::SourceId;
 use crate::context::{Interner, Symbol};
 use crate::parser::lexer::Token;
 
 type ParserError<'a> = extra::Err<Rich<'a, Token<'a>, SimpleSpan>>;
-
 
 #[derive(Clone)]
 pub struct AstCtx {
@@ -79,15 +73,6 @@ where
             ctx.alloc_stmt(StmtKind::Let { name, value }, ctx.to_loc(e.span()))
         });
 
-    // Const statement: const name = expr
-    let const_stmt = just(Token::Const)
-        .then(parse_symbol(ctx))
-        .then_ignore(just(Token::Eq))
-        .then(expr.clone())
-        .map_with(|((_, name), value), e| {
-            ctx.alloc_stmt(StmtKind::Const { name, value }, ctx.to_loc(e.span()))
-        });
-
     // Type statement with optional leading attributes and constructor params:
     // #[rdf(type = "...", base = "...")]
     // type Name(id: string, graph: string) = Type
@@ -98,7 +83,7 @@ where
     let ctor_param = parse_symbol(ctx)
         .then_ignore(just(Token::Colon))
         .then(parse_type(ctx))
-        .map(|(name, ty)| CtorParam { name, ty });
+        .map(|(name, ty)| ConstructorParam { name, ty });
 
     // Parse optional constructor params list: (id: string, graph: string)
     let ctor_params = ctor_param
@@ -109,14 +94,36 @@ where
         .or_not()
         .map(|opt| opt.unwrap_or_default());
 
+    // do...end record syntax: type Name(params) do @attr Field: Type ... end
+    let do_end_field = parse_attribute(ctx)
+        .repeated()
+        .collect::<Vec<_>>()
+        .then(parse_symbol(ctx))
+        .then_ignore(just(Token::Colon))
+        .then(parse_type(ctx))
+        .map(|((attrs, name), ty)| RecordField { name, ty, attrs });
+
+    let do_end_body = just(Token::Do)
+        .ignore_then(
+            do_end_field
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(just(Token::End))
+        .map_with(|fields, e| {
+            ctx.alloc_type(TypeKind::Record(fields), ctx.to_loc(e.span()))
+        });
+
+    // = Type syntax (for providers and named types, NOT records)
+    let eq_body = just(Token::Eq).ignore_then(parse_type(ctx));
+
     let type_stmt = parse_attribute(ctx)
         .repeated()
         .collect::<Vec<_>>()
         .then(just(Token::Type))
         .then(parse_symbol(ctx))
         .then(ctor_params)
-        .then_ignore(just(Token::Eq))
-        .then(parse_type(ctx))
+        .then(do_end_body.or(eq_body))
         .map_with(|((((attrs, _), name), ctor_params), ty), e| {
             ctx.alloc_stmt(
                 StmtKind::Type {
@@ -132,7 +139,7 @@ where
     let expr_stmt =
         expr.map_with(|expr, e| ctx.alloc_stmt(StmtKind::Expr(expr), ctx.to_loc(e.span())));
 
-    choice((let_stmt, const_stmt, type_stmt, expr_stmt))
+    choice((let_stmt, type_stmt, expr_stmt))
 }
 
 fn parse_symbol<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
@@ -157,7 +164,7 @@ where
     // Parse first symbol, then optionally parse :: and more symbols
     parse_symbol(ctx)
         .then(
-            just(Token::ModuleSep)
+            just(Token::Dot)
                 .ignore_then(parse_symbol(ctx))
                 .repeated()
                 .collect::<Vec<_>>(),
@@ -183,20 +190,6 @@ where
     }
 }
 
-/// Parse a parameter with optional default value:
-/// `name` or `name = default`
-fn parse_param<'a, I>(
-    ctx: &'a AstCtx,
-    expr: impl Parser<'a, I, ExprId, ParserError<'a>> + Clone + 'a,
-) -> impl Parser<'a, I, Param, ParserError<'a>> + Clone
-where
-    I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
-{
-    parse_param_name(ctx)
-        .then(just(Token::Eq).ignore_then(expr).or_not())
-        .map(|(name, default)| Param { name, default })
-}
-
 fn parse_primitive_type<'a, I>() -> impl Parser<'a, I, PrimitiveType, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
@@ -206,6 +199,17 @@ where
         Token::BoolType => PrimitiveType::Bool,
         Token::StringType => PrimitiveType::String,
     }
+}
+
+#[derive(Clone, Copy)]
+enum ChainOp {
+    Pipe,
+    AddOutput,
+}
+
+enum PipeRhs {
+    Projection(Symbol, ExprId),
+    Call(ExprId),
 }
 
 fn parse_expr<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, ExprId, ParserError<'a>> + Clone
@@ -247,7 +251,10 @@ where
                         for field in &path_segments[1..] {
                             let field_sym = ctx.intern(field);
                             expr = ctx.alloc_expr(
-                                ExprKind::FieldAccess { expr, field: field_sym },
+                                ExprKind::FieldAccess {
+                                    expr,
+                                    field: field_sym,
+                                },
                                 loc,
                             );
                         }
@@ -267,36 +274,66 @@ where
             }
         });
 
-        // Combine all literal types
         let literal = non_string_literal.or(string_expr);
 
-        let list = expr
-            .clone()
-            .separated_by(just(Token::Comma))
-            .allow_trailing()
-            .collect()
-            .delimited_by(just(Token::LBracket), just(Token::RBracket))
-            .map_with(|items, e| ctx.alloc_expr(ExprKind::List(items), ctx.to_loc(e.span())));
-
-        // Block expression as general expression (not just in functions)
-        // Uses parse_stmt_impl to avoid unbounded mutual recursion
-        let block = just(Token::LBrace)
-            .then(
-                parse_stmt_impl(ctx, expr.clone())
-                    .repeated()
-                    .collect::<Vec<_>>(),
-            )
-            .then_ignore(just(Token::RBrace))
-            .map_with(|(_lbrace, stmts), e| {
-                ctx.alloc_expr(ExprKind::Block { stmts }, ctx.to_loc(e.span()))
-            });
-
-        // Named record construction: TypeName { field = value, ... }
-        // Uses = for field assignment (consistent with let syntax)
         let record_field = parse_symbol(ctx)
             .then_ignore(just(Token::Eq))
             .then(expr.clone());
 
+        let named_arg = parse_symbol(ctx)
+            .then_ignore(just(Token::Colon))
+            .then(expr.clone())
+            .map(|(name, value)| Argument::Named { name, value });
+
+        let positional_arg = expr.clone().map(Argument::Positional);
+
+        let argument = named_arg.or(positional_arg);
+
+        // Provider invocation in expression position: provider!(args)
+        let provider_invocation = parse_path(ctx)
+            .then_ignore(just(Token::Bang))
+            .then(
+                parse_provider_argument(ctx)
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .map_with(|(provider, args), e| {
+                ctx.alloc_expr(
+                    ExprKind::ProviderInvocation { provider, args },
+                    ctx.to_loc(e.span()),
+                )
+            });
+
+        // Record with constructor args: Path(args) { fields }
+        let record_with_ctor = parse_path(ctx)
+            .then(
+                argument.clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .then(
+                record_field.clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+            )
+            .map_with(|((type_path, ctor_args), fields), e| {
+                ctx.alloc_expr(
+                    ExprKind::RecordInstance {
+                        type_path,
+                        ctor_args,
+                        fields,
+                    },
+                    ctx.to_loc(e.span()),
+                )
+            });
+
+        // Named record without ctor args: Path { fields }
         let named_record = parse_path(ctx)
             .then(
                 record_field
@@ -307,62 +344,14 @@ where
             )
             .map_with(|(type_path, fields), e| {
                 ctx.alloc_expr(
-                    ExprKind::NamedRecordConstruction { type_path, fields },
-                    ctx.to_loc(e.span()),
-                )
-            });
-
-        // Function with optional leading attributes: #[rdf(...)] fn(r) -> ...
-        // Validates that there is no space between 'fn' and '('
-        let function = parse_attribute(ctx)
-            .repeated()
-            .collect::<Vec<_>>()
-            .then(just(Token::Func).map_with(|_, e| e.span()))
-            .then(just(Token::LParen).map_with(|_, e| e.span()))
-            .validate(
-                |((attrs, fn_span), paren_span): ((Vec<Attribute>, SimpleSpan), SimpleSpan),
-                 _,
-                 emitter| {
-                    if fn_span.end != paren_span.start {
-                        emitter.emit(Rich::custom(
-                            paren_span,
-                            "space between 'fn' and '(' is not allowed",
-                        ));
-                    }
-                    (attrs, ())
-                },
-            )
-            .then(
-                parse_param(ctx, expr.clone())
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .collect(),
-            )
-            .then_ignore(just(Token::RParen))
-            .then_ignore(just(Token::Arrow))
-            .then(expr.clone()) // Body is just any expression (including blocks!)
-            .map_with(|(((attrs, _), params), body), e| {
-                ctx.alloc_expr(
-                    ExprKind::Function {
-                        params,
-                        body,
-                        attrs,
+                    ExprKind::RecordInstance {
+                        type_path,
+                        ctor_args: vec![],
+                        fields,
                     },
                     ctx.to_loc(e.span()),
                 )
             });
-
-        // Parse named argument: `name: expr`
-        let named_arg = parse_symbol(ctx)
-            .then_ignore(just(Token::Colon))
-            .then(expr.clone())
-            .map(|(name, value)| Argument::Named { name, value });
-
-        // Parse positional argument: just `expr`
-        let positional_arg = expr.clone().map(Argument::Positional);
-
-        // Try named first (since it's more specific), fall back to positional
-        let argument = named_arg.or(positional_arg);
 
         let application = path
             .clone()
@@ -378,23 +367,24 @@ where
             });
 
         // Ordering matters:
-        // - Function must come before application/path to avoid parsing 'fn' as identifier
-        // - named_record must come before path (TypeName { ... } vs TypeName)
-        // - block must be after named_record since both involve { }
+        // - provider_invocation before record_with_ctor (Path!(args) vs Path(args){fields})
+        // - record_with_ctor before application (Path(args){fields} vs Path(args))
+        // - application before path (Path(args) vs Path)
+        // - named_record before path (Path { ... } vs Path)
         let atom = choice((
-            function,
+            provider_invocation,
+            record_with_ctor,
             application,
             unit,
             literal,
-            list,
             named_record,
-            block,
             path,
         ))
         .map_with(|expr, e| (expr, e.span()))
         .boxed();
 
-        atom.pratt((
+        // Dot field access via pratt parser
+        let base = atom.pratt((
             postfix(
                 10, // Highest precedence
                 just(Token::Dot)
@@ -412,24 +402,61 @@ where
                     )
                 },
             ),
-            infix(
-                left(1),
-                just(Token::Pipe),
-                |(lhs, lhs_span): (ExprId, SimpleSpan),
-                 _,
-                 (rhs, rhs_span): (ExprId, SimpleSpan),
-                 _| {
-                    // Merge spans: create a span from start of lhs to end of rhs
-                    let merged_span = lhs_span.start()..rhs_span.end();
-                    let merged_loc = ctx.to_loc(SimpleSpan::from(merged_span.clone()));
-                    (
-                        ctx.alloc_expr(ExprKind::Pipe { lhs, rhs }, merged_loc),
-                        SimpleSpan::from(merged_span),
-                    )
-                },
-            ),
         ))
         .map(|expr| expr.0)
+        .boxed();
+
+        // Pipe/AddOutput chain: base (|> | +>) (fn param -> expr end | call_expr)
+        let projection_rhs = just(Token::Func)
+            .ignore_then(parse_param_name(ctx))
+            .then_ignore(just(Token::Arrow))
+            .then(base.clone())
+            .then_ignore(just(Token::End));
+
+        let chain_op = just(Token::Pipe).to(ChainOp::Pipe)
+            .or(just(Token::PlusGt).to(ChainOp::AddOutput));
+
+        let pipe_rhs = chain_op.then(choice((
+            projection_rhs.map(|(param, output)| PipeRhs::Projection(param, output)),
+            base.clone().map(PipeRhs::Call),
+        )));
+
+        base.foldl(pipe_rhs.repeated(), |lhs, (op, rhs)| match (op, rhs) {
+            // |> fn param -> expr end  →  Projection (single output)
+            (ChainOp::Pipe, PipeRhs::Projection(param, output)) => {
+                let loc = Loc::generated();
+                ctx.alloc_expr(
+                    ExprKind::Projection {
+                        source: lhs,
+                        param,
+                        output,
+                    },
+                    loc,
+                )
+            }
+            // +> fn param -> expr end  →  AddOutput (adds output to previous projection)
+            (ChainOp::AddOutput, PipeRhs::Projection(param, output)) => {
+                let loc = Loc::generated();
+                ctx.alloc_expr(
+                    ExprKind::AddOutput {
+                        source: lhs,
+                        param,
+                        output,
+                    },
+                    loc,
+                )
+            }
+            // |> expr  →  Pipe (function application)
+            (ChainOp::Pipe, PipeRhs::Call(rhs)) => {
+                let loc = Loc::generated();
+                ctx.alloc_expr(ExprKind::Pipe { lhs, rhs }, loc)
+            }
+            // +> expr  →  Not supported (only lambdas with +>)
+            (ChainOp::AddOutput, PipeRhs::Call(rhs)) => {
+                let loc = Loc::generated();
+                ctx.alloc_expr(ExprKind::Pipe { lhs, rhs }, loc)
+            }
+        })
     })
 }
 
@@ -506,10 +533,6 @@ fn is_valid_identifier(s: &str) -> bool {
     chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-/// Parse attribute key - accepts identifiers AND reserved keywords like 'type'
-///
-/// Inside attributes, we allow keywords to be used as keys:
-/// `#[rdf(type = "...", id = "...")]`
 fn parse_attr_key<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
@@ -518,38 +541,33 @@ where
         Token::Identifier(ident) => ctx.intern(ident),
         Token::Type => ctx.intern("type"),
         Token::Let => ctx.intern("let"),
-        Token::Const => ctx.intern("const"),
     }
 }
 
-/// Parse attribute: #[name(key = value, key2 = value2)]
-///
-/// Examples:
-/// - `#[rdf(uri = "http://example.com")]`
-/// - `#[rdf(type = "http://schema.org/Person", id = "...")]`
+/// Parse attribute: @name(key = value, ...) or @name("positional")
 fn parse_attribute<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Attribute, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
-    // Parse a single named argument: key = value
-    // Use parse_attr_key to allow keywords like 'type' as keys
     let named_arg = parse_attr_key(ctx)
         .then_ignore(just(Token::Eq))
         .then(parse_literal(ctx))
-        .map(|(key, value)| AttributeArg { key, value });
+        .map(|(key, value)| AttributeArg::Named { key, value });
 
-    just(Token::Hash)
-        .ignore_then(just(Token::LBracket))
+    let positional_arg = parse_literal(ctx).map(AttributeArg::Positional);
+
+    let attr_arg = named_arg.or(positional_arg);
+
+    just(Token::At)
         .ignore_then(parse_symbol(ctx))
         .then(
-            named_arg
+            attr_arg
                 .separated_by(just(Token::Comma))
                 .allow_trailing()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LParen), just(Token::RParen))
                 .or_not(),
         )
-        .then_ignore(just(Token::RBracket))
         .map_with(|(name, args), e| Attribute {
             name,
             args: args.unwrap_or_default(),
@@ -557,120 +575,67 @@ where
         })
 }
 
+fn parse_provider_argument<'a, I>(
+    ctx: &'a AstCtx,
+) -> impl Parser<'a, I, ProviderArgument, ParserError<'a>> + Clone
+where
+    I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
+{
+    let named = parse_symbol(ctx)
+        .then_ignore(just(Token::Colon))
+        .then(parse_literal(ctx))
+        .map(|(name, value)| ProviderArgument::Named { name, value });
+
+    let positional = parse_literal(ctx).map(ProviderArgument::Positional);
+
+    named.or(positional)
+}
+
 fn parse_type<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, TypeId, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
-    recursive(|ty| {
-        let primitive = parse_primitive_type()
-            .map_with(|ty, e| ctx.alloc_type(TypeKind::Primitive(ty), ctx.to_loc(e.span())));
+    let primitive = parse_primitive_type()
+        .map_with(|ty, e| ctx.alloc_type(TypeKind::Primitive(ty), ctx.to_loc(e.span())));
 
-        let unit = just(Token::LParen)
-            .then(just(Token::RParen))
-            .map_with(|_, e| ctx.alloc_type(TypeKind::Unit, ctx.to_loc(e.span())));
+    let unit = just(Token::LParen)
+        .then(just(Token::RParen))
+        .map_with(|_, e| ctx.alloc_type(TypeKind::Unit, ctx.to_loc(e.span())));
 
-        let function = ty
-            .clone()
-            .separated_by(just(Token::Comma))
-            .collect()
-            .delimited_by(just(Token::LParen), just(Token::RParen))
-            .then_ignore(just(Token::Arrow))
-            .then(ty.clone())
-            .map_with(|(params, ret), e| {
-                ctx.alloc_type(TypeKind::Function(params, ret), ctx.to_loc(e.span()))
-            });
-
-        let list = ty
-            .clone()
-            .delimited_by(just(Token::LBracket), just(Token::RBracket))
-            .map_with(|ty, e| ctx.alloc_type(TypeKind::List(ty), ctx.to_loc(e.span())));
-
-        // Parse record type: { #[attr] field: Type, ... }
-        let record = {
-            // Parse single field with optional attributes
-            let field = parse_attribute(ctx)
-                .repeated()
-                .collect::<Vec<_>>()
-                .then(parse_symbol(ctx))
-                .then_ignore(just(Token::Colon))
-                .then(ty.clone())
-                .map(|((attrs, name), ty)| RecordField { name, ty, attrs });
-
-            field
+    let provider = parse_path(ctx)
+        .then_ignore(just(Token::Bang))
+        .then(
+            parse_provider_argument(ctx)
                 .separated_by(just(Token::Comma))
                 .allow_trailing()
                 .collect()
-                .delimited_by(just(Token::LBrace), just(Token::RBrace))
-                .map_with(|fields, e| {
-                    ctx.alloc_type(TypeKind::Record(fields), ctx.to_loc(e.span()))
-                })
-        };
-
-        // Parse named provider argument: `name: literal`
-        let named_provider_arg = parse_symbol(ctx)
-            .then_ignore(just(Token::Colon))
-            .then(parse_literal(ctx))
-            .map(|(name, value)| ProviderArgument::Named { name, value });
-
-        // Parse positional provider argument: just `literal`
-        let positional_provider_arg = parse_literal(ctx).map(ProviderArgument::Positional);
-
-        // Try named first (has `name: value`), then literal, then bare identifier
-        let provider_argument = named_provider_arg.or(positional_provider_arg);
-
-        // Parse type provider invocation: csv!("file.csv") or csv!(path: "file.csv", delimiter: ";")
-        let provider = parse_path(ctx)
-            .then_ignore(just(Token::Bang))
-            .then(
-                provider_argument
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .collect()
-                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+                .delimited_by(just(Token::LParen), just(Token::RParen)),
+        )
+        .map_with(|(path, args), e| {
+            ctx.alloc_type(
+                TypeKind::Provider {
+                    provider: path,
+                    args,
+                },
+                ctx.to_loc(e.span()),
             )
-            .map_with(|(path, args), e| {
-                ctx.alloc_type(
-                    TypeKind::Provider {
-                        provider: path,
-                        args,
-                    },
-                    ctx.to_loc(e.span()),
-                )
-            });
+        });
 
-        // Parse Name or Name<Type, Type, ...>
-        let named_or_app = parse_path(ctx)
-            .then(
-                ty.clone()
-                    .separated_by(just(Token::Comma))
-                    .at_least(1)
-                    .collect()
-                    .delimited_by(just(Token::LAngle), just(Token::RAngle))
-                    .or_not(),
-            )
-            .map_with(|(path, opt_args), e| match opt_args {
-                Some(args) => {
-                    ctx.alloc_type(TypeKind::App { ctor: path, args }, ctx.to_loc(e.span()))
-                }
-                None => ctx.alloc_type(TypeKind::Named(path), ctx.to_loc(e.span())),
-            });
+    let named = parse_path(ctx)
+        .map_with(|path, e| ctx.alloc_type(TypeKind::Named(path), ctx.to_loc(e.span())));
 
-        choice((
-            primitive,
-            unit,
-            function,
-            list,
-            record,
-            provider,
-            named_or_app,
-        ))
-        .then(just(Token::Question).or_not())
-        .map_with(|(inner, opt_q), e| {
-            if opt_q.is_some() {
-                ctx.alloc_type(TypeKind::Optional(inner), ctx.to_loc(e.span()))
-            } else {
-                inner
-            }
-        })
+    choice((
+        primitive,
+        unit,
+        provider,
+        named,
+    ))
+    .then(just(Token::Question).or_not())
+    .map_with(|(inner, opt_q), e| {
+        if opt_q.is_some() {
+            ctx.alloc_type(TypeKind::Optional(inner), ctx.to_loc(e.span()))
+        } else {
+            inner
+        }
     })
 }

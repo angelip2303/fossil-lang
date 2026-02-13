@@ -18,15 +18,30 @@ pub struct IfcFieldDef {
 
 impl IfcFieldDef {
     const fn required_string(name: &'static str, position: usize) -> Self {
-        Self { name, position, data_type: DataType::String, optional: Optionality::Required }
+        Self {
+            name,
+            position,
+            data_type: DataType::String,
+            optional: Optionality::Required,
+        }
     }
 
     const fn optional_string(name: &'static str, position: usize) -> Self {
-        Self { name, position, data_type: DataType::String, optional: Optionality::Optional }
+        Self {
+            name,
+            position,
+            data_type: DataType::String,
+            optional: Optionality::Optional,
+        }
     }
 
     const fn optional_float(name: &'static str, position: usize) -> Self {
-        Self { name, position, data_type: DataType::Float64, optional: Optionality::Optional }
+        Self {
+            name,
+            position,
+            data_type: DataType::Float64,
+            optional: Optionality::Optional,
+        }
     }
 
     pub fn to_builtin_field_type(&self) -> BuiltInFieldType {
@@ -38,7 +53,7 @@ impl IfcFieldDef {
     }
 }
 
-fn datatype_to_primitive(dt: &DataType) -> PrimitiveType {
+pub(crate) fn datatype_to_primitive(dt: &DataType) -> PrimitiveType {
     match dt {
         DataType::String => PrimitiveType::String,
         DataType::Float32 | DataType::Float64 => PrimitiveType::Float,
@@ -70,12 +85,30 @@ pub struct IfcEntityDef {
 }
 
 impl IfcEntityDef {
-    const fn element(fossil_name: &'static str, step_name: &'static str, custom_fields: &'static [IfcFieldDef]) -> Self {
-        Self { fossil_name, step_name, kind: EntityKind::Element, custom_fields }
+    const fn element(
+        fossil_name: &'static str,
+        step_name: &'static str,
+        custom_fields: &'static [IfcFieldDef],
+    ) -> Self {
+        Self {
+            fossil_name,
+            step_name,
+            kind: EntityKind::Element,
+            custom_fields,
+        }
     }
 
-    const fn spatial(fossil_name: &'static str, step_name: &'static str, custom_fields: &'static [IfcFieldDef]) -> Self {
-        Self { fossil_name, step_name, kind: EntityKind::Spatial, custom_fields }
+    const fn spatial(
+        fossil_name: &'static str,
+        step_name: &'static str,
+        custom_fields: &'static [IfcFieldDef],
+    ) -> Self {
+        Self {
+            fossil_name,
+            step_name,
+            kind: EntityKind::Spatial,
+            custom_fields,
+        }
     }
 
     pub fn base_fields(&self) -> &'static [IfcFieldDef] {
@@ -91,8 +124,6 @@ impl IfcEntityDef {
         fields
     }
 }
-
-// --- Base fields by entity kind ---
 
 static ELEMENT_BASE_FIELDS: &[IfcFieldDef] = &[
     IfcFieldDef::required_string("GlobalId", 0),
@@ -110,11 +141,7 @@ static SPATIAL_BASE_FIELDS: &[IfcFieldDef] = &[
     IfcFieldDef::optional_string("LongName", 7),
 ];
 
-// --- Custom fields per entity ---
-
-static IFC_WALL_FIELDS: &[IfcFieldDef] = &[
-    IfcFieldDef::optional_string("PredefinedType", 8),
-];
+static IFC_WALL_FIELDS: &[IfcFieldDef] = &[IfcFieldDef::optional_string("PredefinedType", 8)];
 
 static IFC_DOOR_FIELDS: &[IfcFieldDef] = &[
     IfcFieldDef::optional_float("OverallHeight", 8),
@@ -129,13 +156,9 @@ static IFC_WINDOW_FIELDS: &[IfcFieldDef] = &[
     IfcFieldDef::optional_string("PredefinedType", 10),
 ];
 
-static IFC_SLAB_FIELDS: &[IfcFieldDef] = &[
-    IfcFieldDef::optional_string("PredefinedType", 8),
-];
+static IFC_SLAB_FIELDS: &[IfcFieldDef] = &[IfcFieldDef::optional_string("PredefinedType", 8)];
 
-static IFC_ROOF_FIELDS: &[IfcFieldDef] = &[
-    IfcFieldDef::optional_string("PredefinedType", 8),
-];
+static IFC_ROOF_FIELDS: &[IfcFieldDef] = &[IfcFieldDef::optional_string("PredefinedType", 8)];
 
 static IFC_SPACE_FIELDS: &[IfcFieldDef] = &[
     IfcFieldDef::optional_string("PredefinedType", 9),
@@ -147,19 +170,15 @@ static IFC_BUILDING_FIELDS: &[IfcFieldDef] = &[
     IfcFieldDef::optional_float("ElevationOfTerrain", 10),
 ];
 
-static IFC_STOREY_FIELDS: &[IfcFieldDef] = &[
-    IfcFieldDef::optional_float("Elevation", 9),
-];
-
-// --- Entity registry ---
+static IFC_STOREY_FIELDS: &[IfcFieldDef] = &[IfcFieldDef::optional_float("Elevation", 9)];
 
 pub static ALL_ENTITIES: &[IfcEntityDef] = &[
-    IfcEntityDef::element("IfcWall",     "IFCWALL",           IFC_WALL_FIELDS),
-    IfcEntityDef::element("IfcDoor",     "IFCDOOR",           IFC_DOOR_FIELDS),
-    IfcEntityDef::element("IfcWindow",   "IFCWINDOW",         IFC_WINDOW_FIELDS),
-    IfcEntityDef::element("IfcSlab",     "IFCSLAB",           IFC_SLAB_FIELDS),
-    IfcEntityDef::element("IfcRoof",     "IFCROOF",           IFC_ROOF_FIELDS),
-    IfcEntityDef::spatial("IfcSpace",    "IFCSPACE",          IFC_SPACE_FIELDS),
-    IfcEntityDef::spatial("IfcBuilding", "IFCBUILDING",       IFC_BUILDING_FIELDS),
-    IfcEntityDef::spatial("IfcStorey",   "IFCBUILDINGSTOREY", IFC_STOREY_FIELDS),
+    IfcEntityDef::element("IfcWall", "IFCWALL", IFC_WALL_FIELDS),
+    IfcEntityDef::element("IfcDoor", "IFCDOOR", IFC_DOOR_FIELDS),
+    IfcEntityDef::element("IfcWindow", "IFCWINDOW", IFC_WINDOW_FIELDS),
+    IfcEntityDef::element("IfcSlab", "IFCSLAB", IFC_SLAB_FIELDS),
+    IfcEntityDef::element("IfcRoof", "IFCROOF", IFC_ROOF_FIELDS),
+    IfcEntityDef::spatial("IfcSpace", "IFCSPACE", IFC_SPACE_FIELDS),
+    IfcEntityDef::spatial("IfcBuilding", "IFCBUILDING", IFC_BUILDING_FIELDS),
+    IfcEntityDef::spatial("IfcStorey", "IFCBUILDINGSTOREY", IFC_STOREY_FIELDS),
 ];

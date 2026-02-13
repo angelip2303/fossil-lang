@@ -1,18 +1,3 @@
-//! RDF metadata extraction from type attributes
-//!
-//! # Example
-//!
-//! ```fossil
-//! #[rdf(type = "http://schema.org/Person")]
-//! type Person = {
-//!     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
-//!     name: string,
-//!
-//!     #[rdf(uri = "http://xmlns.com/foaf/0.1/age")]
-//!     age: int,
-//! }
-//! ```
-
 use std::collections::HashMap;
 
 use fossil_lang::ast::Loc;
@@ -148,10 +133,8 @@ impl RdfMetadata {
                         let field_name_str = interner.resolve(*field_name);
                         let type_name_str = type_name.unwrap_or("<anonymous>");
 
-                        warnings.push(FossilWarning::rdf_type_conflict(
-                            type_name_str,
-                            attr_type,
-                            field_name_str,
+                        warnings.push(FossilWarning::generic(
+                            format!("type '{}': @rdf(type) attribute '{}' conflicts with rdf:type field '{}'", type_name_str, attr_type, field_name_str),
                             Loc::generated(),
                         ));
                     }

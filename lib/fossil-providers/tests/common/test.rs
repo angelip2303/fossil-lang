@@ -11,7 +11,7 @@ use crate::TestSuiteError;
 
 fn test(test_case: &str) -> Result<bool, TestSuiteError> {
     let mut gcx = GlobalContext::default();
-    gcx.register_provider("csv", fossil_providers::csv::CsvProvider);
+    fossil_providers::init(&mut gcx);
     fossil_stdlib::init(&mut gcx);
 
     let compiler = Compiler::with_context(gcx);
