@@ -15,26 +15,19 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{AttributeArg, Attribute, Literal, StmtKind, TypeKind};
-use crate::context::{DefId, Interner, Symbol};
+use crate::ast::{Attribute, AttributeArg, Literal, StmtKind, TypeKind};
+use crate::context::{Interner, Symbol};
 
 /// Type metadata (type-level + field-level attributes) extracted from AST
 #[derive(Debug, Clone)]
 pub struct TypeMetadata {
-    /// DefId of the type this metadata belongs to
-    pub def_id: DefId,
-
-    /// Type-level attributes (e.g., #[rdf(type = "...", id = "...")])
     pub type_attributes: Vec<AttributeData>,
-
-    /// Metadata for each field in the type (if it's a record)
     pub field_metadata: HashMap<Symbol, FieldMetadata>,
 }
 
 impl TypeMetadata {
-    pub fn new(def_id: DefId) -> Self {
+    pub fn new() -> Self {
         Self {
-            def_id,
             type_attributes: Vec::new(),
             field_metadata: HashMap::new(),
         }
@@ -137,25 +130,24 @@ impl AttributeData {
     }
 }
 
-/// Extract type metadata from AST
-///
-/// Returns a map from type name (Symbol) to its metadata.
-/// The metadata includes type-level and field-level attributes.
-/// The caller should use this during resolution to populate type_metadata.
 pub fn extract_type_metadata(ast: &crate::ast::Ast) -> HashMap<Symbol, TypeMetadata> {
     let mut result = HashMap::new();
 
     for &stmt_id in &ast.root {
         let stmt = ast.stmts.get(stmt_id);
 
-        if let StmtKind::Type { name, ty, attrs, .. } = &stmt.kind {
+        if let StmtKind::Type {
+            name, ty, attrs, ..
+        } = &stmt.kind
+        {
             let ty_node = ast.types.get(*ty);
 
-            // Create metadata (DefId will be set during resolution)
-            let mut metadata = TypeMetadata::new(DefId::new(0));
+            let mut metadata = TypeMetadata::new();
 
             for attr in attrs {
-                metadata.type_attributes.push(AttributeData::from_attribute(attr));
+                metadata
+                    .type_attributes
+                    .push(AttributeData::from_attribute(attr));
             }
 
             if let TypeKind::Record(fields) = &ty_node.kind {
@@ -163,7 +155,9 @@ pub fn extract_type_metadata(ast: &crate::ast::Ast) -> HashMap<Symbol, TypeMetad
                     if !field.attrs.is_empty() {
                         let mut field_meta = FieldMetadata::new();
                         for attr in &field.attrs {
-                            field_meta.attributes.push(AttributeData::from_attribute(attr));
+                            field_meta
+                                .attributes
+                                .push(AttributeData::from_attribute(attr));
                         }
                         metadata.field_metadata.insert(field.name, field_meta);
                     }
@@ -179,7 +173,6 @@ pub fn extract_type_metadata(ast: &crate::ast::Ast) -> HashMap<Symbol, TypeMetad
     result
 }
 
-/// Ergonomic wrapper for attribute access with string-based key lookups
 pub struct TypedAttribute<'a> {
     attr: &'a AttributeData,
     interner: &'a Interner,

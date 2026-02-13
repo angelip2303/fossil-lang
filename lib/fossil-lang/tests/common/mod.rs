@@ -12,9 +12,9 @@ pub fn compile(src: &str) -> Result<IrProgram, FossilErrors> {
     let expand = ProviderExpander::new((parsed.ast, parsed.gcx)).expand()?;
     let ty = extract_type_metadata(&expand.ast);
     let ir = ast_to_ir(expand.ast);
-    let (ir, gcx) = IrResolver::new(ir, expand.gcx)
+    let (ir, gcx, resolutions) = IrResolver::new(ir, expand.gcx)
         .with_type_metadata(ty)
         .resolve()?;
-    let program = TypeChecker::new(ir, gcx).check()?;
+    let program = TypeChecker::new(ir, gcx, resolutions).check()?;
     Ok(program)
 }

@@ -1,13 +1,3 @@
-//! SafeLazyFrame wrapper for protected lazy evaluation
-//!
-//! This module provides a wrapper around Polars LazyFrame that prevents
-//! accidental materialization. The `.collect()` method is NOT exposed -
-//! only ChunkedExecutor can materialize data through `into_inner()`.
-//!
-//! This design guarantees streaming/lazy evaluation throughout the pipeline,
-//! making it impossible to accidentally call `.collect()` outside of the
-//! designated execution point.
-
 use polars::prelude::*;
 
 /// Wrapper around Polars LazyFrame that prevents accidental materialization.
@@ -16,19 +6,6 @@ use polars::prelude::*;
 /// through the `into_inner()` method which is `pub(crate)`.
 ///
 /// This guarantees streaming/lazy evaluation throughout the pipeline.
-///
-/// # Example
-/// ```ignore
-/// // This compiles - lazy transformations are allowed
-/// let safe_lf = SafeLazyFrame::new(lf);
-/// let filtered = safe_lf.filter(col("age").gt(lit(18)));
-///
-/// // This does NOT compile - .collect() is not exposed
-/// // let df = filtered.collect(); // ERROR!
-///
-/// // Only ChunkedExecutor can materialize through into_inner()
-/// // let lf = filtered.into_inner(); // Only works within crate
-/// ```
 pub struct SafeLazyFrame(LazyFrame);
 
 impl SafeLazyFrame {
@@ -60,10 +37,6 @@ impl SafeLazyFrame {
         Self(self.0.inner_join(other.0, left_on, right_on))
     }
 
-    /// ONLY for ChunkedExecutor - converts to inner LazyFrame for batched collection.
-    ///
-    /// This is the ONLY way to get access to `.collect()`, and it's restricted
-    /// to within this crate. External code cannot call this method.
     pub(crate) fn into_inner(self) -> LazyFrame {
         self.0
     }

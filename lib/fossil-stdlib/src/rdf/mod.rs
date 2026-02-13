@@ -3,9 +3,7 @@ pub mod serializer;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::str::FromStr;
-
-pub use metadata::{RdfFieldInfo, RdfMetadata, RdfMetadataResult, RdfTermType};
+pub use metadata::{RdfFieldInfo, RdfMetadata, RdfMetadataResult};
 pub use serializer::RdfBatchWriter;
 
 use fossil_lang::error::FossilError;
@@ -15,7 +13,6 @@ use fossil_lang::runtime::chunked_executor::{ChunkedExecutor, estimate_batch_siz
 use fossil_lang::runtime::value::{Plan, Value};
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 
-use oxrdf::{NamedNode, Term, TermParseError};
 use oxrdfio::RdfFormat;
 use polars::prelude::*;
 use thiserror::Error;
@@ -23,14 +20,6 @@ use thiserror::Error;
 /// RDF-specific errors
 #[derive(Debug, Error)]
 pub enum RdfError {
-    // Validation errors
-    #[error("'{0}' is not a valid subject")]
-    InvalidSubject(String),
-    #[error("Invalid predicate '{0}'")]
-    InvalidPredicate(String),
-    #[error(transparent)]
-    TermParse(#[from] TermParseError),
-
     // Serialize errors
     #[error("Rdf::serialize requires input and filename")]
     SerializeMissingArgs,
@@ -54,18 +43,6 @@ impl From<RdfError> for FossilError {
     fn from(err: RdfError) -> Self {
         FossilError::evaluation(err.to_string(), fossil_lang::ast::Loc::generated())
     }
-}
-
-pub fn is_subject(s: &str) -> Result<(), RdfError> {
-    match Term::from_str(s)? {
-        Term::BlankNode(_) | Term::NamedNode(_) | Term::Triple(_) => Ok(()),
-        Term::Literal(_) => Err(RdfError::InvalidSubject(s.into())),
-    }
-}
-
-pub fn is_predicate(s: &str) -> Result<(), RdfError> {
-    NamedNode::from_str(s).map_err(|_| RdfError::InvalidPredicate(s.into()))?;
-    Ok(())
 }
 
 pub struct RdfSerializeFunction;

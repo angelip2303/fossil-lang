@@ -80,7 +80,7 @@ fn field_not_found_in_projection() {
     let err = first_error(
         "type Data do Name: string end\n\
          let d = Data { Name = \"hi\" }\n\
-         let result = d |> fn row -> row.NonExistent end",
+         let result = d |> each row -> row.NonExistent",
     );
     match &err {
         FossilError::FieldNotFound { field, .. } => {

@@ -6,16 +6,24 @@ It includes functions for writing RDF data.
 ## Writing RDF knowledge graphs
 
 ```
-open Data.Csv as Csv
-open Data.Rdf as Rdf
+let input = csv!("path/to/input.csv")
 
-type Person = ShEx<"path/to/shape.shex">
+type Person(id: string) do
+    @rdf(uri = "http://example.com/person/name")
+    name: string
 
-Csv.read "path/to/input.csv"
-  |> map (fn person -> {
-        name = person.name;
-        age = person.age;
-        email = person.email;
-      } :> Person)
-  |> Rdf.write "path/to/output.ttl"
+    @rdf(uri = "http://example.com/person/age")
+    age: int
+
+    @rdf(uri = "http://example.com/person/email")
+    email: string
+end
+
+input
+|> each person -> Person("http://example.com/person/${person.name}") {
+    name = person.name,
+    age = person.age,
+    email = person.email
+}
+|> Rdf.serialize("path/to/output.ttl")
 ```

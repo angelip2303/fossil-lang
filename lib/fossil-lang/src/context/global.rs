@@ -13,7 +13,6 @@ pub enum BuiltInFieldType {
     Optional(PrimitiveType),
 }
 
-/// Info passed to module generators during expansion
 pub struct TypeInfo<'a> {
     pub name: Symbol,
     pub def_id: DefId,
@@ -21,7 +20,6 @@ pub struct TypeInfo<'a> {
     pub interner: &'a Interner,
 }
 
-/// A callback that inspects a record type and optionally generates a module for it
 pub type ModuleGeneratorFn = Arc<dyn Fn(&TypeInfo) -> Option<ModuleSpec> + Send + Sync>;
 
 #[derive(Clone)]
@@ -54,8 +52,11 @@ impl GlobalContext {
             .unwrap_or_else(|| self.definitions.insert(None, name, DefKind::Mod));
         for func_def in spec.functions {
             let func_sym = self.interner.intern(&func_def.name);
-            self.definitions
-                .insert(Some(module_id), func_sym, DefKind::Func(func_def.implementation));
+            self.definitions.insert(
+                Some(module_id),
+                func_sym,
+                DefKind::Func(func_def.implementation),
+            );
         }
     }
 

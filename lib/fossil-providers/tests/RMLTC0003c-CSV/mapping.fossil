@@ -6,5 +6,5 @@ type Output(subject: string) do
 end
 
 input
-|> fn row -> Output("http://example.com/Student${row.ID}") { FullName = "${row.FirstName} ${row.LastName}" } end
+|> each row -> Output("http://example.com/Student${row.ID}") { FullName = "${row.FirstName} ${row.LastName}" }
 |> Rdf.serialize("tests/RMLTC0003c-CSV/actual.nq")

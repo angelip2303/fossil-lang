@@ -61,19 +61,10 @@ pub enum ExprKind {
         callee: ExprId,
         args: Vec<Argument>,
     },
-    Pipe {
-        lhs: ExprId,
-        rhs: ExprId,
-    },
     Projection {
         source: ExprId,
         param: Symbol,
-        output: ExprId,
-    },
-    AddOutput {
-        source: ExprId,
-        param: Symbol,
-        output: ExprId,
+        outputs: Vec<ExprId>,
     },
     FieldAccess {
         expr: ExprId,

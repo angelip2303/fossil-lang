@@ -7,38 +7,9 @@ use fossil_macros::FromAttrs;
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
-#[derive(Debug, Clone, Default)]
-pub enum RdfTermType {
-    Uri,
-    #[default]
-    String,
-    Integer,
-    Boolean,
-    Decimal,
-    Double,
-    Date,
-    DateTime,
-}
-
-impl RdfTermType {
-    pub fn xsd_suffix(&self) -> Option<&'static str> {
-        match self {
-            RdfTermType::Uri => None,
-            RdfTermType::String => None,
-            RdfTermType::Integer => Some("^^<http://www.w3.org/2001/XMLSchema#integer>"),
-            RdfTermType::Boolean => Some("^^<http://www.w3.org/2001/XMLSchema#boolean>"),
-            RdfTermType::Decimal => Some("^^<http://www.w3.org/2001/XMLSchema#decimal>"),
-            RdfTermType::Double => Some("^^<http://www.w3.org/2001/XMLSchema#double>"),
-            RdfTermType::Date => Some("^^<http://www.w3.org/2001/XMLSchema#date>"),
-            RdfTermType::DateTime => Some("^^<http://www.w3.org/2001/XMLSchema#dateTime>"),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct RdfFieldInfo {
     pub uri: String,
-    pub term_type: RdfTermType,
 }
 
 #[derive(Debug, Clone, FromAttrs)]
@@ -83,14 +54,7 @@ pub struct RdfMetadata {
 }
 
 impl RdfMetadata {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Extract from TypeMetadata
-    ///
-    /// Note: Field types default to String. Use `set_field_type` to override
-    /// based on schema info, or let the serializer infer from Polars dtypes.
     pub fn from_type_metadata(type_metadata: &TypeMetadata, interner: &Interner) -> Option<Self> {
         let result = Self::from_type_metadata_with_warnings(type_metadata, interner, None);
         if result.metadata.has_metadata() {
@@ -143,25 +107,12 @@ impl RdfMetadata {
                 // Default to String, can be overridden or inferred later
                 metadata.fields.insert(
                     *field_name,
-                    RdfFieldInfo {
-                        uri,
-                        term_type: RdfTermType::String,
-                    },
+                    RdfFieldInfo { uri },
                 );
             }
         }
 
         RdfMetadataResult { metadata, warnings }
-    }
-
-    pub fn set_field_type(&mut self, field: Symbol, term_type: RdfTermType) {
-        if let Some(info) = self.fields.get_mut(&field) {
-            info.term_type = term_type;
-        }
-    }
-
-    pub fn get_field(&self, field: Symbol) -> Option<&RdfFieldInfo> {
-        self.fields.get(&field)
     }
 
     pub fn has_metadata(&self) -> bool {

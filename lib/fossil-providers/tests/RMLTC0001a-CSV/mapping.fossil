@@ -7,5 +7,5 @@ type Output(subject: string) do
 end
 
 input
-|> fn row -> Output(row.Name) { Name = row.Name } end
+|> each row -> Output(row.Name) { Name = row.Name }
 |> Rdf.serialize("tests/RMLTC0001a-CSV/actual.nq")

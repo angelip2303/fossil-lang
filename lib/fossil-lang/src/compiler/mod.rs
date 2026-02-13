@@ -40,15 +40,6 @@ impl Compiler {
         Self::default()
     }
 
-    /// Create a compiler with a custom GlobalContext
-    ///
-    /// ```ignore
-    /// let mut gcx = GlobalContext::default();
-    /// fossil_providers::init(&mut gcx);
-    /// fossil_stdlib::init(&mut gcx);
-    /// let compiler = Compiler::with_context(gcx);
-    /// let program = compiler.compile(CompilerInput::File(path))?;
-    /// ```
     pub fn with_context(gcx: GlobalContext) -> Self {
         Self {
             source_id: 0,
@@ -73,10 +64,10 @@ impl Compiler {
         let expand_result = ProviderExpander::new((parsed.ast, parsed.gcx)).expand()?;
         let ty = extract_type_metadata(&expand_result.ast);
         let ir = passes::convert::ast_to_ir(expand_result.ast);
-        let (ir, gcx) = IrResolver::new(ir, expand_result.gcx)
+        let (ir, gcx, resolutions) = IrResolver::new(ir, expand_result.gcx)
             .with_type_metadata(ty)
             .resolve()?;
-        let program = TypeChecker::new(ir, gcx).check()?;
+        let program = TypeChecker::new(ir, gcx, resolutions).check()?;
 
         Ok(CompileResult {
             program,

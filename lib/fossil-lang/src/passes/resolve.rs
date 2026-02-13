@@ -1,26 +1,18 @@
-//! IR Name Resolution
-//!
-//! Resolves identifiers in the IR from Ident::Unresolved to Ident::Resolved.
-//! Also desugars Pipe expressions.
-
 use std::collections::HashMap;
-
 use std::sync::Arc;
 
 use crate::ast::Loc;
 use crate::context::{DefId, DefKind, Symbol, TypeMetadata};
 use crate::error::{FossilError, FossilErrors};
-use crate::ir::{ExprId, ExprKind, Ident, Ir, Path, StmtId, StmtKind, TypeId, TypeKind};
+use crate::ir::{ExprId, ExprKind, Ir, Path, Resolutions, StmtId, StmtKind, TypeId, TypeKind};
 use crate::passes::GlobalContext;
 
-/// Scope for name resolution
 #[derive(Default, Clone)]
 struct Scope {
     values: HashMap<Symbol, DefId>,
     types: HashMap<Symbol, DefId>,
 }
 
-/// Stack of scopes for nested resolution
 struct ScopeStack {
     scopes: Vec<Scope>,
 }
@@ -63,12 +55,11 @@ impl ScopeStack {
     }
 }
 
-/// IR Name Resolver
 pub struct IrResolver {
     gcx: GlobalContext,
     ir: Ir,
     scopes: ScopeStack,
-    /// Type metadata extracted from AST, keyed by type name
+    resolutions: Resolutions,
     pending_metadata: HashMap<Symbol, TypeMetadata>,
 }
 
@@ -78,28 +69,25 @@ impl IrResolver {
             gcx,
             ir,
             scopes: ScopeStack::new(),
+            resolutions: Resolutions::default(),
             pending_metadata: HashMap::new(),
         }
     }
 
-    /// Add type metadata to be transferred during resolution
     pub fn with_type_metadata(mut self, metadata: HashMap<Symbol, TypeMetadata>) -> Self {
         self.pending_metadata = metadata;
         self
     }
 
-    pub fn resolve(mut self) -> Result<(Ir, GlobalContext), FossilErrors> {
+    pub fn resolve(mut self) -> Result<(Ir, GlobalContext, Resolutions), FossilErrors> {
         let mut errors = FossilErrors::new();
 
-        // Phase 1: Collect declarations
         self.collect_declarations(&mut errors);
 
-        // Return early if there were declaration errors
         if !errors.is_empty() {
             return Err(errors);
         }
 
-        // Phase 2: Resolve all statements
         let root = self.ir.root.clone();
         for stmt_id in root {
             self.resolve_stmt(stmt_id, &mut errors);
@@ -109,7 +97,7 @@ impl IrResolver {
             return Err(errors);
         }
 
-        Ok((self.ir, self.gcx))
+        Ok((self.ir, self.gcx, self.resolutions))
     }
 
     fn collect_declarations(&mut self, errors: &mut FossilErrors) {
@@ -128,16 +116,9 @@ impl IrResolver {
                     } else {
                         let def_id = self.gcx.definitions.insert(None, *name, DefKind::Type);
                         self.scopes.current_mut().types.insert(*name, def_id);
+                        self.resolutions.stmt_defs.insert(stmt_id, def_id);
 
-                        // Store def_id on the IR statement
-                        let stmt_mut = self.ir.stmts.get_mut(stmt_id);
-                        if let StmtKind::Type { def_id: d, .. } = &mut stmt_mut.kind {
-                            *d = Some(def_id);
-                        }
-
-                        // Transfer type metadata from pending to final storage
-                        if let Some(mut metadata) = self.pending_metadata.remove(name) {
-                            metadata.def_id = def_id;
+                        if let Some(metadata) = self.pending_metadata.remove(name) {
                             self.gcx.type_metadata.insert(def_id, Arc::new(metadata));
                         }
                     }
@@ -152,29 +133,21 @@ impl IrResolver {
         let stmt = self.ir.stmts.get(stmt_id).clone();
 
         match &stmt.kind {
-            StmtKind::Let { name, value, .. } => {
-                // Resolve value
+            StmtKind::Let { name, value } => {
                 self.resolve_expr(*value, errors);
 
-                // Get or create DefId
                 let def_id = self.scopes.lookup_value(*name).unwrap_or_else(|| {
                     let def_id = self.gcx.definitions.insert(None, *name, DefKind::Let);
                     self.scopes.current_mut().values.insert(*name, def_id);
                     def_id
                 });
 
-                // Update statement with DefId
-                let stmt_mut = self.ir.stmts.get_mut(stmt_id);
-                if let StmtKind::Let { def_id: d, .. } = &mut stmt_mut.kind {
-                    *d = Some(def_id);
-                }
+                self.resolutions.stmt_defs.insert(stmt_id, def_id);
             }
 
             StmtKind::Type { name, ty, .. } => {
                 self.resolve_type(*ty, errors);
 
-                // Generate constructor for record types
-                // Look up the type's DefId to use as the constructor's parent
                 let type_def_id = self.scopes.lookup_type(*name);
                 self.generate_record_constructor(*name, *ty, type_def_id);
             }
@@ -189,92 +162,67 @@ impl IrResolver {
         let expr = self.ir.exprs.get(expr_id).clone();
 
         match &expr.kind {
-            ExprKind::Identifier(ident) => {
-                if let Ident::Unresolved(path) = ident {
-                    match path {
-                        Path::Simple(_) => {
-                            if let Some(def_id) = self.resolve_value_path(path, expr.loc, errors) {
-                                let expr_mut = self.ir.exprs.get_mut(expr_id);
-                                expr_mut.kind = ExprKind::Identifier(Ident::Resolved(def_id));
-                            }
+            ExprKind::Identifier(path) => {
+                match path {
+                    Path::Simple(_) => {
+                        if let Some(def_id) = self.resolve_value_path(path, expr.loc, errors) {
+                            self.resolutions.expr_defs.insert(expr_id, def_id);
                         }
-                        Path::Qualified(parts) => {
-                            let ast_path = Path::Qualified(parts.clone());
-                            if let Some(def_id) = self.gcx.definitions.resolve(&ast_path) {
-                                let expr_mut = self.ir.exprs.get_mut(expr_id);
-                                expr_mut.kind = ExprKind::Identifier(Ident::Resolved(def_id));
-                            } else if parts.len() >= 2
-                                && self.scopes.lookup_value(parts[0]).is_some()
-                            {
-                                // Rewrite A.b.c as FieldAccess chain when A is a local binding
-                                let base_def_id = self.scopes.lookup_value(parts[0]).unwrap();
-                                let base = self.ir.exprs.alloc(crate::ir::Expr {
-                                    kind: ExprKind::Identifier(Ident::Resolved(base_def_id)),
-                                    ty: crate::ir::TypeRef::Unknown,
+                    }
+                    Path::Qualified(parts) => {
+                        let ast_path = Path::Qualified(parts.clone());
+                        if let Some(def_id) = self.gcx.definitions.resolve(&ast_path) {
+                            self.resolutions.expr_defs.insert(expr_id, def_id);
+                        } else if parts.len() >= 2
+                            && self.scopes.lookup_value(parts[0]).is_some()
+                        {
+                            let base_def_id = self.scopes.lookup_value(parts[0]).unwrap();
+                            let base = self.ir.exprs.alloc(crate::ir::Expr {
+                                kind: ExprKind::Identifier(Path::Simple(parts[0])),
+                                loc: expr.loc,
+                            });
+                            self.resolutions.expr_defs.insert(base, base_def_id);
+                            let mut current = base;
+                            for &field_sym in &parts[1..] {
+                                current = self.ir.exprs.alloc(crate::ir::Expr {
+                                    kind: ExprKind::FieldAccess {
+                                        expr: current,
+                                        field: field_sym,
+                                    },
                                     loc: expr.loc,
                                 });
-                                let mut current = base;
-                                for &field_sym in &parts[1..] {
-                                    current = self.ir.exprs.alloc(crate::ir::Expr {
-                                        kind: ExprKind::FieldAccess {
-                                            expr: current,
-                                            field: field_sym,
-                                        },
-                                        ty: crate::ir::TypeRef::Unknown,
-                                        loc: expr.loc,
-                                    });
-                                }
-                                // Replace original expression with the outermost FieldAccess
-                                let final_expr = self.ir.exprs.get(current).clone();
-                                let expr_mut = self.ir.exprs.get_mut(expr_id);
-                                expr_mut.kind = final_expr.kind;
-                            } else {
-                                let path_str = ast_path.display(&self.gcx.interner);
-                                errors.push(FossilError::undefined_path(path_str, expr.loc));
                             }
+                            self.resolutions.expr_rewrites.insert(expr_id, current);
+                        } else {
+                            let path_str = ast_path.display(&self.gcx.interner);
+                            errors.push(FossilError::undefined_path(path_str, expr.loc));
                         }
                     }
                 }
             }
 
-            ExprKind::RecordInstance { type_ident, ctor_args, fields } => {
-                // Resolve the type identifier
-                if let Ident::Unresolved(path) = type_ident
-                    && let Some(def_id) = self.resolve_type_path(path, expr.loc, errors)
-                {
-                    let expr_mut = self.ir.exprs.get_mut(expr_id);
-                    if let ExprKind::RecordInstance { type_ident: ti, .. } = &mut expr_mut.kind {
-                        *ti = Ident::Resolved(def_id);
-                    }
+            ExprKind::RecordInstance { type_name, ctor_args, fields } => {
+                if let Some(def_id) = self.resolve_type_path(type_name, expr.loc, errors) {
+                    self.resolutions.expr_defs.insert(expr_id, def_id);
                 }
 
-                // Resolve constructor arguments
                 for arg in ctor_args {
                     self.resolve_expr(arg.value(), errors);
                 }
 
-                // Resolve field expressions
                 for (_, field_expr) in fields {
                     self.resolve_expr(*field_expr, errors);
                 }
             }
 
             ExprKind::Projection { source, binding, outputs, .. } => {
-                // Resolve source first
                 self.resolve_expr(*source, errors);
 
-                // Create a new scope for the projection body
                 self.scopes.push();
                 let def_id = self.gcx.definitions.insert(None, *binding, DefKind::Let);
                 self.scopes.current_mut().values.insert(*binding, def_id);
+                self.resolutions.expr_defs.insert(expr_id, def_id);
 
-                // Update binding_def in the IR
-                let expr_mut = self.ir.exprs.get_mut(expr_id);
-                if let ExprKind::Projection { binding_def, .. } = &mut expr_mut.kind {
-                    *binding_def = Some(def_id);
-                }
-
-                // Resolve output expressions
                 let outputs = outputs.clone();
                 for output in &outputs {
                     self.resolve_expr(*output, errors);
@@ -307,12 +255,9 @@ impl IrResolver {
         let ty = self.ir.types.get(type_id).clone();
 
         match &ty.kind {
-            TypeKind::Named(ident) => {
-                if let Ident::Unresolved(path) = ident
-                    && let Some(def_id) = self.resolve_type_path(path, ty.loc, errors)
-                {
-                    let ty_mut = self.ir.types.get_mut(type_id);
-                    ty_mut.kind = TypeKind::Named(Ident::Resolved(def_id));
+            TypeKind::Unresolved(path) => {
+                if let Some(def_id) = self.resolve_type_path(path, ty.loc, errors) {
+                    self.resolutions.type_defs.insert(type_id, def_id);
                 }
             }
 
@@ -328,20 +273,12 @@ impl IrResolver {
             }
 
             TypeKind::Record(fields) => {
-                self.resolve_record_fields(fields, errors);
+                for (_, ty) in &fields.fields {
+                    self.resolve_type(*ty, errors);
+                }
             }
 
-            TypeKind::Unit | TypeKind::Primitive(_) | TypeKind::Var(_) => {}
-        }
-    }
-
-    fn resolve_record_fields(
-        &mut self,
-        fields: &crate::ir::RecordFields,
-        errors: &mut FossilErrors,
-    ) {
-        for (_, ty) in &fields.fields {
-            self.resolve_type(*ty, errors);
+            TypeKind::Unit | TypeKind::Primitive(_) | TypeKind::Var(_) | TypeKind::Named(_) => {}
         }
     }
 
@@ -400,12 +337,10 @@ impl IrResolver {
     ) {
         let ty = self.ir.types.get(type_id);
         if let TypeKind::Record(_) = &ty.kind {
-            // Check if constructor name already exists
             if self.scopes.current_mut().values.contains_key(&type_name) {
                 return;
             }
 
-            // Register constructor with type's DefId as parent (for metadata lookup)
             let ctor_def_id =
                 self.gcx
                     .definitions
@@ -423,12 +358,12 @@ mod tests {
     use super::*;
     use crate::context::extract_type_metadata;
     use crate::error::FossilError;
-    use crate::ir::{ExprKind, Ident, StmtKind};
+    use crate::ir::StmtKind;
     use crate::passes::convert::ast_to_ir;
     use crate::passes::expand::ProviderExpander;
     use crate::passes::parse::Parser;
 
-    fn resolve_ok(src: &str) -> (Ir, GlobalContext) {
+    fn resolve_ok(src: &str) -> (Ir, GlobalContext, Resolutions) {
         let parsed = Parser::parse(src, 0).expect("parse failed");
         let expand_result = ProviderExpander::new((parsed.ast, parsed.gcx))
             .expand()
@@ -457,23 +392,19 @@ mod tests {
         }
     }
 
-    // ── Success tests ────────────────────────────────────────────
-
     #[test]
     fn let_gets_def_id() {
-        let (ir, _gcx) = resolve_ok("let x = 42");
-        let stmt = ir.stmts.get(ir.root[0]);
-        match &stmt.kind {
-            StmtKind::Let { def_id, .. } => {
-                assert!(def_id.is_some(), "let binding should have a DefId assigned");
-            }
-            other => panic!("expected Let statement, got {:?}", other),
-        }
+        let (ir, _, resolutions) = resolve_ok("let x = 42");
+        let stmt_id = ir.root[0];
+        assert!(
+            resolutions.stmt_defs.contains_key(&stmt_id),
+            "let binding should have a DefId in resolutions"
+        );
     }
 
     #[test]
     fn type_gets_def_id() {
-        let (_ir, gcx) = resolve_ok("type T do Name: string end");
+        let (_, gcx, _) = resolve_ok("type T do Name: string end");
         let name_sym = gcx.interner.lookup("T").expect("T should be interned");
         let def = gcx
             .definitions
@@ -484,76 +415,59 @@ mod tests {
 
     #[test]
     fn variable_reference_resolves() {
-        let (ir, _gcx) = resolve_ok("let x = 42\nlet y = x");
+        let (ir, _, resolutions) = resolve_ok("let x = 42\nlet y = x");
         let y_stmt = ir.stmts.get(ir.root[1]);
         let value_id = match &y_stmt.kind {
             StmtKind::Let { value, .. } => *value,
             other => panic!("expected Let statement, got {:?}", other),
         };
-        let value_expr = ir.exprs.get(value_id);
         assert!(
-            matches!(&value_expr.kind, ExprKind::Identifier(Ident::Resolved(_))),
-            "expected Ident::Resolved, got {:?}",
-            value_expr.kind
+            resolutions.expr_defs.contains_key(&value_id),
+            "x reference should be resolved"
         );
     }
 
     #[test]
     fn record_constructor_generated() {
         let src = "type T do Name: string end\nT { Name = \"hi\" }";
-        let (ir, _gcx) = resolve_ok(src);
+        let (ir, _, resolutions) = resolve_ok(src);
         let expr_stmt = ir.stmts.get(ir.root[1]);
         let expr_id = match &expr_stmt.kind {
             StmtKind::Expr(id) => *id,
             other => panic!("expected Expr statement, got {:?}", other),
         };
-        let expr = ir.exprs.get(expr_id);
-        match &expr.kind {
-            ExprKind::RecordInstance { type_ident, .. } => {
-                assert!(
-                    matches!(type_ident, Ident::Resolved(_)),
-                    "expected Ident::Resolved for record type, got {:?}",
-                    type_ident
-                );
-            }
-            other => panic!("expected RecordInstance, got {:?}", other),
-        }
+        assert!(
+            resolutions.expr_defs.contains_key(&expr_id),
+            "record instance type should be resolved"
+        );
     }
 
     #[test]
     fn projection_param_gets_def_id() {
-        let (ir, _gcx) = resolve_ok("let x = 42\nx |> fn row -> row end");
+        let (ir, _, resolutions) = resolve_ok("let x = 42\nx |> each row -> row");
         let expr_stmt = ir.stmts.get(ir.root[1]);
         let expr_id = match &expr_stmt.kind {
             StmtKind::Expr(id) => *id,
             other => panic!("expected Expr statement, got {:?}", other),
         };
-        let proj_expr = ir.exprs.get(expr_id);
-        match &proj_expr.kind {
-            ExprKind::Projection { binding_def, .. } => {
-                assert!(
-                    binding_def.is_some(),
-                    "projection binding should have a DefId assigned"
-                );
-            }
-            other => panic!("expected Projection, got {:?}", other),
-        }
+        assert!(
+            resolutions.expr_defs.contains_key(&expr_id),
+            "projection binding should have a DefId in resolutions"
+        );
     }
 
     #[test]
     fn multiple_let_bindings_resolve() {
         let src = "let a = 1\nlet b = 2\nlet c = a";
-        let (ir, _gcx) = resolve_ok(src);
+        let (ir, _, resolutions) = resolve_ok(src);
         let c_stmt = ir.stmts.get(ir.root[2]);
         let c_value = match &c_stmt.kind {
             StmtKind::Let { value, .. } => *value,
             other => panic!("expected Let, got {:?}", other),
         };
-        let c_expr = ir.exprs.get(c_value);
         assert!(
-            matches!(&c_expr.kind, ExprKind::Identifier(Ident::Resolved(_))),
-            "c should resolve reference to a, got {:?}",
-            c_expr.kind
+            resolutions.expr_defs.contains_key(&c_value),
+            "c should resolve reference to a"
         );
     }
 

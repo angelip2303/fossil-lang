@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::context::DefId;
 use crate::context::global::BuiltInFieldType;
 use crate::error::{FossilError, FossilErrors};
-use crate::ir::{ExprId, Ir, Polytype, RecordFields, StmtId, StmtKind, Type, TypeId, TypeKind, TypeRef, TypeVar, Ident};
+use crate::ir::{ExprId, Ir, Polytype, RecordFields, Resolutions, StmtId, StmtKind, Type, TypeDeclInfo, TypeId, TypeIndex, TypeKind, TypeVar, TypeckResults};
 use crate::passes::{GlobalContext, IrProgram};
 
 pub mod typeutil;
@@ -25,30 +25,29 @@ impl TypeVarGen {
     }
 }
 
-pub(crate) struct TypeDeclInfo {
-    pub ty: TypeId,
-    pub ctor_param_count: usize,
-}
-
 pub struct TypeChecker {
     pub(crate) ir: Ir,
     pub(crate) gcx: GlobalContext,
+    pub(crate) resolutions: Resolutions,
     pub(crate) tvg: TypeVarGen,
     pub(crate) env: TypeEnv,
-    pub(crate) type_index: HashMap<DefId, TypeDeclInfo>,
+    pub(crate) type_index: TypeIndex,
+    pub(crate) typeck_results: TypeckResults,
     infer_cache: HashMap<ExprId, TypeId>,
     global_subst: Subst,
     local_subst: Subst,
 }
 
 impl TypeChecker {
-    pub fn new(ir: Ir, gcx: GlobalContext) -> Self {
+    pub fn new(ir: Ir, gcx: GlobalContext, resolutions: Resolutions) -> Self {
         let mut checker = Self {
             ir,
             gcx,
+            resolutions,
             tvg: TypeVarGen::default(),
             env: TypeEnv::default(),
-            type_index: HashMap::new(),
+            type_index: TypeIndex::default(),
+            typeck_results: TypeckResults::default(),
             infer_cache: HashMap::new(),
             global_subst: Subst::default(),
             local_subst: Subst::default(),
@@ -62,11 +61,19 @@ impl TypeChecker {
     fn build_type_index(&mut self) {
         for &stmt_id in &self.ir.root {
             let stmt = self.ir.stmts.get(stmt_id);
-            if let StmtKind::Type { def_id: Some(def_id), ty, ctor_params, .. } = &stmt.kind {
-                self.type_index.insert(*def_id, TypeDeclInfo {
-                    ty: *ty,
-                    ctor_param_count: ctor_params.len(),
-                });
+            if let StmtKind::Type { ty, ctor_params, .. } = &stmt.kind {
+                if let Some(&def_id) = self.resolutions.stmt_defs.get(&stmt_id) {
+                    let field_names = match &self.ir.types.get(*ty).kind {
+                        TypeKind::Record(fields) => fields.field_names(),
+                        _ => vec![],
+                    };
+                    self.type_index.insert(def_id, TypeDeclInfo {
+                        ty: *ty,
+                        ctor_param_count: ctor_params.len(),
+                        ctor_param_names: ctor_params.iter().map(|p| p.name).collect(),
+                        field_names,
+                    });
+                }
             }
         }
 
@@ -75,10 +82,16 @@ impl TypeChecker {
             .collect();
 
         for (def_id, fields) in registered {
-            if self.type_index.contains_key(&def_id) { continue; }
+            if self.type_index.contains(def_id) { continue; }
             let ir_fields = materialize_registered_fields(&fields, &mut self.ir);
+            let field_names: Vec<_> = ir_fields.iter().map(|(name, _)| *name).collect();
             let record_ty = self.ir.alloc_type(TypeKind::Record(RecordFields::from_fields(ir_fields)));
-            self.type_index.insert(def_id, TypeDeclInfo { ty: record_ty, ctor_param_count: 0 });
+            self.type_index.insert(def_id, TypeDeclInfo {
+                ty: record_ty,
+                ctor_param_count: 0,
+                ctor_param_names: vec![],
+                field_names,
+            });
         }
     }
 
@@ -104,14 +117,14 @@ impl TypeChecker {
 
         let pairs: Vec<_> = self.type_index.keys().filter_map(|&type_def_id| {
             let type_def = self.gcx.definitions.get(type_def_id);
-            let ctor_def_id = self.gcx.definitions.iter()
-                .find(|def| def.name == type_def.name && matches!(def.kind, DefKind::RecordConstructor))
+            let ctor_def_id = self.gcx.definitions
+                .find_by_symbol(type_def.name, |k| matches!(k, DefKind::RecordConstructor))
                 .map(|def| def.id())?;
             Some((type_def_id, ctor_def_id))
         }).collect();
 
         for (type_def_id, ctor_def_id) in pairs {
-            let info = &self.type_index[&type_def_id];
+            let info = self.type_index.get(type_def_id).unwrap();
             let ty = self.ir.types.get(info.ty);
             let loc = ty.loc;
 
@@ -120,7 +133,7 @@ impl TypeChecker {
 
                 let return_ty = self.ir.types.alloc(Type {
                     loc,
-                    kind: TypeKind::Named(Ident::Resolved(type_def_id)),
+                    kind: TypeKind::Named(type_def_id),
                 });
 
                 let fn_ty = self.ir.types.alloc(Type {
@@ -134,7 +147,15 @@ impl TypeChecker {
     }
 
     pub(crate) fn lookup_type_info(&self, def_id: DefId) -> Option<&TypeDeclInfo> {
-        self.type_index.get(&def_id)
+        self.type_index.get(def_id)
+    }
+
+    pub(crate) fn named_def_id(&self, ty_id: TypeId) -> Option<DefId> {
+        match &self.ir.types.get(ty_id).kind {
+            TypeKind::Named(def_id) => Some(*def_id),
+            TypeKind::Unresolved(_) => self.resolutions.type_defs.get(&ty_id).copied(),
+            _ => None,
+        }
     }
 
     pub fn check(mut self) -> Result<IrProgram, FossilErrors> {
@@ -154,7 +175,9 @@ impl TypeChecker {
         Ok(IrProgram {
             ir: self.ir,
             gcx: self.gcx,
-            env: self.env,
+            type_index: self.type_index,
+            resolutions: self.resolutions,
+            typeck_results: self.typeck_results,
         })
     }
 
@@ -163,22 +186,18 @@ impl TypeChecker {
         let stmt_kind = stmt.kind.clone();
 
         match stmt_kind {
-            StmtKind::Let {
-                name: _,
-                def_id,
-                value,
-            } => {
+            StmtKind::Let { value, .. } => {
                 let (subst, inferred_ty) = self.infer(value)?;
                 let final_ty = subst.apply(inferred_ty, &mut self.ir);
 
                 self.global_subst = self.global_subst.compose(&subst, &mut self.ir);
 
-                if let Some(def_id) = def_id {
+                if let Some(&def_id) = self.resolutions.stmt_defs.get(&stmt_id) {
                     let poly = self.env.generalize(final_ty, &self.ir);
                     self.env.insert(def_id, poly);
                 }
 
-                self.ir.exprs.get_mut(value).ty = TypeRef::Known(final_ty);
+                self.typeck_results.expr_types.insert(value, final_ty);
             }
 
             StmtKind::Type { .. } => {}
@@ -186,7 +205,7 @@ impl TypeChecker {
             StmtKind::Expr(expr) => {
                 let (subst, ty) = self.infer(expr)?;
                 self.global_subst = self.global_subst.compose(&subst, &mut self.ir);
-                self.ir.exprs.get_mut(expr).ty = TypeRef::Known(ty);
+                self.typeck_results.expr_types.insert(expr, ty);
             }
         }
 

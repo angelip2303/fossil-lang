@@ -8,8 +8,8 @@ end
 // the subject must be an IRI or a blank node
 // {Name} is not a valid IRI (negative test)
 input
-|> map(fn row -> Output {
+|> map(each row -> Output {
     @id = "${row.Name}",
     Name = row.Name
-} end)
+})
 |> Rdf.serialize("tests/RMLTC0004b-CSV/actual.nq")

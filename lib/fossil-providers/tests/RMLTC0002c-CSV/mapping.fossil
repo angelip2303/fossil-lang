@@ -11,9 +11,9 @@ end
 // this mapping intentionally uses an invalid field (IDs instead of ID)
 // This should cause a compilation error (negative test)
 input
-|> map(fn row -> Output {
+|> map(each row -> Output {
     @id = "http://example.com/${row.ID}/${row.Name}",
     ID = row.IDs,
     Name = row.Name
-} end)
+})
 |> Rdf.serialize("tests/RMLTC0002c-CSV/actual.nq")

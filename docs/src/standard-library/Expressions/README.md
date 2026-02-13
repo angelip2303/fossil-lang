@@ -1,13 +1,15 @@
 # Basic operations
 
-To map a dataset, the `map` function is used.
+To iterate over and transform a dataset, the `each` block is used within a pipe.
 
 ```
-open Data.Csv
+let input = csv!("path/to/file.csv")
 
-read "path/to/file.csv"
-    |> map (fn row -> {
-        name = row.name,
-        surname = row.surname
-    })
+type Output do
+    name: string
+    surname: string
+end
+
+input
+|> each row -> Output { name = row.name, surname = row.surname }
 ```

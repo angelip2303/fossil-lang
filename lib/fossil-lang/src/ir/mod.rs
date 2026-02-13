@@ -3,34 +3,57 @@ use crate::ast::Attribute;
 pub use crate::common::{Literal, Path, PrimitiveType};
 use crate::context::{Arena, DefId, NodeId, Symbol};
 
+pub mod resolutions;
+pub mod type_index;
+pub mod typeck_results;
+
+pub use resolutions::Resolutions;
+pub use type_index::{TypeDeclInfo, TypeIndex};
+pub use typeck_results::TypeckResults;
+
 pub type StmtId = NodeId<Stmt>;
 pub type ExprId = NodeId<Expr>;
 pub type TypeId = NodeId<Type>;
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
+pub struct CommonTypes {
+    pub int: TypeId,
+    pub string: TypeId,
+    pub bool: TypeId,
+    pub unit: TypeId,
+}
+
+#[derive(Debug)]
 pub struct Ir {
     pub stmts: Arena<Stmt>,
     pub exprs: Arena<Expr>,
     pub types: Arena<Type>,
     pub root: Vec<StmtId>,
+    pub common: CommonTypes,
+}
+
+impl Default for Ir {
+    fn default() -> Self {
+        let mut types = Arena::default();
+        let int = types.alloc(Type { loc: Loc::generated(), kind: TypeKind::Primitive(PrimitiveType::Int) });
+        let string = types.alloc(Type { loc: Loc::generated(), kind: TypeKind::Primitive(PrimitiveType::String) });
+        let bool = types.alloc(Type { loc: Loc::generated(), kind: TypeKind::Primitive(PrimitiveType::Bool) });
+        let unit = types.alloc(Type { loc: Loc::generated(), kind: TypeKind::Unit });
+        Self {
+            stmts: Arena::default(),
+            exprs: Arena::default(),
+            types,
+            root: Vec::new(),
+            common: CommonTypes { int, string, bool, unit },
+        }
+    }
 }
 
 impl Ir {
-    pub fn string_type(&mut self) -> TypeId {
-        self.alloc_type(TypeKind::Primitive(PrimitiveType::String))
-    }
-
-    pub fn unit_type(&mut self) -> TypeId {
-        self.alloc_type(TypeKind::Unit)
-    }
-
-    pub fn int_type(&mut self) -> TypeId {
-        self.alloc_type(TypeKind::Primitive(PrimitiveType::Int))
-    }
-
-    pub fn bool_type(&mut self) -> TypeId {
-        self.alloc_type(TypeKind::Primitive(PrimitiveType::Bool))
-    }
+    pub fn int_type(&self) -> TypeId { self.common.int }
+    pub fn string_type(&self) -> TypeId { self.common.string }
+    pub fn bool_type(&self) -> TypeId { self.common.bool }
+    pub fn unit_type(&self) -> TypeId { self.common.unit }
 
     pub fn fn_type(&mut self, params: Vec<TypeId>, return_type: TypeId) -> TypeId {
         self.alloc_type(TypeKind::Function(params, return_type))
@@ -45,79 +68,11 @@ impl Ir {
     }
 
     pub fn named_type(&mut self, def_id: DefId) -> TypeId {
-        self.alloc_type(TypeKind::Named(Ident::Resolved(def_id)))
+        self.alloc_type(TypeKind::Named(def_id))
     }
 
     pub(crate) fn alloc_type(&mut self, kind: TypeKind) -> TypeId {
-        self.types.alloc(Type {
-            loc: Loc::generated(),
-            kind,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Ident {
-    Unresolved(Path),
-    Resolved(DefId),
-}
-
-impl Ident {
-    pub fn def_id(&self) -> DefId {
-        match self {
-            Ident::Resolved(id) => *id,
-            Ident::Unresolved(path) => {
-                panic!("Attempted to access DefId of unresolved identifier: {path:?}")
-            }
-        }
-    }
-
-    pub fn try_def_id(&self) -> Option<DefId> {
-        match self {
-            Ident::Resolved(id) => Some(*id),
-            Ident::Unresolved(_) => None,
-        }
-    }
-}
-
-impl From<Path> for Ident {
-    fn from(path: Path) -> Self {
-        Ident::Unresolved(path)
-    }
-}
-
-impl From<DefId> for Ident {
-    fn from(def_id: DefId) -> Self {
-        Ident::Resolved(def_id)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub enum TypeRef {
-    #[default]
-    Unknown,
-    Known(TypeId),
-}
-
-impl TypeRef {
-    pub fn type_id(&self) -> TypeId {
-        match self {
-            TypeRef::Known(id) => *id,
-            TypeRef::Unknown => panic!("Attempted to access TypeId of unknown type"),
-        }
-    }
-
-    pub fn try_type_id(&self) -> Option<TypeId> {
-        match self {
-            TypeRef::Known(id) => Some(*id),
-            TypeRef::Unknown => None,
-        }
-    }
-}
-
-impl From<TypeId> for TypeRef {
-    fn from(type_id: TypeId) -> Self {
-        TypeRef::Known(type_id)
+        self.types.alloc(Type { loc: Loc::generated(), kind })
     }
 }
 
@@ -143,12 +98,10 @@ pub struct CtorParam {
 pub enum StmtKind {
     Let {
         name: Symbol,
-        def_id: Option<DefId>,
         value: ExprId,
     },
     Type {
         name: Symbol,
-        def_id: Option<DefId>,
         ty: TypeId,
         attrs: Vec<Attribute>,
         ctor_params: Vec<CtorParam>,
@@ -160,16 +113,15 @@ pub enum StmtKind {
 pub struct Expr {
     pub loc: Loc,
     pub kind: ExprKind,
-    pub ty: TypeRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExprKind {
-    Identifier(Ident),
+    Identifier(Path),
     Unit,
     Literal(Literal),
     RecordInstance {
-        type_ident: Ident,
+        type_name: Path,
         ctor_args: Vec<Argument>,
         fields: Vec<(Symbol, ExprId)>,
     },
@@ -180,7 +132,6 @@ pub enum ExprKind {
     Projection {
         source: ExprId,
         binding: Symbol,
-        binding_def: Option<DefId>,
         outputs: Vec<ExprId>,
     },
     FieldAccess {
@@ -216,7 +167,8 @@ pub struct Type {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeKind {
-    Named(Ident),
+    Named(DefId),
+    Unresolved(Path),
     Unit,
     Primitive(PrimitiveType),
     Function(Vec<TypeId>, TypeId),

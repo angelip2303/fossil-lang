@@ -17,7 +17,7 @@ type Person(id: string) = shex!(
 )
 
 let mapped = data
-    |> fn row -> Person(row.email) { name = row.name, age = row.age } end
+    |> each row -> Person(row.email) { name = row.name, age = row.age }
 
 mapped |> Person.validate() |> Rdf.serialize("actual.nq")
 mapped |> Person.errors() |> Report.csv("errors.csv")

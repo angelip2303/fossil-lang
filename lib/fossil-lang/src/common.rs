@@ -21,13 +21,6 @@ impl Path {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        match self {
-            Path::Simple(_) => false,
-            Path::Qualified(parts) => parts.is_empty(),
-        }
-    }
-
     pub fn display(&self, interner: &Interner) -> String {
         match self {
             Path::Simple(sym) => interner.resolve(*sym).to_string(),
@@ -70,7 +63,6 @@ pub enum Literal {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrimitiveType {
-    Unit,
     Int,
     Float,
     String,

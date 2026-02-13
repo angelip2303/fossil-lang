@@ -1,7 +1,7 @@
 use crate::ast::Loc;
 use crate::context::DefId;
 use crate::error::FossilError;
-use crate::ir::{Ident, RecordFields, TypeId, TypeKind, TypeVar};
+use crate::ir::{RecordFields, TypeId, TypeKind, TypeVar};
 
 use super::{typeutil::Subst, TypeChecker};
 
@@ -15,41 +15,40 @@ impl TypeChecker {
             return Ok(Subst::default());
         }
 
+        if let Some(def_id) = self.named_def_id(ty1_id) {
+            return if let Some(resolved_ty) = self.resolve_named_type(def_id) {
+                self.unify(resolved_ty, ty2_id, loc)
+            } else {
+                Err(FossilError::type_mismatch(
+                    format!(
+                        "Cannot resolve named type `{}` to unify with `{}`",
+                        self.format_type(ty1_id),
+                        self.format_type(ty2_id),
+                    ),
+                    loc,
+                ))
+            };
+        }
+
+        if let Some(def_id) = self.named_def_id(ty2_id) {
+            return if let Some(resolved_ty) = self.resolve_named_type(def_id) {
+                self.unify(ty1_id, resolved_ty, loc)
+            } else {
+                Err(FossilError::type_mismatch(
+                    format!(
+                        "Cannot resolve named type `{}` to unify with `{}`",
+                        self.format_type(ty2_id),
+                        self.format_type(ty1_id),
+                    ),
+                    loc,
+                ))
+            };
+        }
+
         let ty1 = self.ir.types.get(ty1_id);
         let ty2 = self.ir.types.get(ty2_id);
 
         match (&ty1.kind, &ty2.kind) {
-            (TypeKind::Named(Ident::Resolved(def_id)), _) => {
-                if let Some(resolved_ty) = self.resolve_named_type(*def_id) {
-                    self.unify(resolved_ty, ty2_id, loc)
-                } else {
-                    let expected_str = self.format_type(ty1_id);
-                    let actual_str = self.format_type(ty2_id);
-                    Err(FossilError::type_mismatch(
-                        format!(
-                            "Cannot resolve named type `{}` to unify with `{}`",
-                            expected_str, actual_str
-                        ),
-                        loc,
-                    ))
-                }
-            }
-            (_, TypeKind::Named(Ident::Resolved(def_id))) => {
-                if let Some(resolved_ty) = self.resolve_named_type(*def_id) {
-                    self.unify(ty1_id, resolved_ty, loc)
-                } else {
-                    let expected_str = self.format_type(ty1_id);
-                    let actual_str = self.format_type(ty2_id);
-                    Err(FossilError::type_mismatch(
-                        format!(
-                            "Cannot resolve named type `{}` to unify with `{}`",
-                            actual_str, expected_str
-                        ),
-                        loc,
-                    ))
-                }
-            }
-
             (TypeKind::Var(v1), TypeKind::Var(v2)) if v1 == v2 => Ok(Subst::default()),
             (TypeKind::Var(v), _) => self.bind_var(*v, ty2_id, loc),
             (_, TypeKind::Var(v)) => self.bind_var(*v, ty1_id, loc),
@@ -62,7 +61,6 @@ impl TypeChecker {
                 self.unify(inner1, inner2, loc)
             }
 
-            // Widening: T ~ T? → unify T with inner
             (_, TypeKind::Optional(inner2)) => {
                 let inner2 = *inner2;
                 self.unify(ty1_id, inner2, loc)
@@ -81,13 +79,13 @@ impl TypeChecker {
                     return Err(FossilError::arity_mismatch(params1.len(), params2.len(), loc));
                 }
 
-                let params1_clone = params1.clone();
-                let params2_clone = params2.clone();
+                let params1 = params1.clone();
+                let params2 = params2.clone();
                 let ret1 = *ret1;
                 let ret2 = *ret2;
 
                 let mut subst = Subst::default();
-                for (p1, p2) in params1_clone.iter().zip(params2_clone.iter()) {
+                for (p1, p2) in params1.iter().zip(params2.iter()) {
                     let p1_applied = subst.apply(*p1, &mut self.ir);
                     let p2_applied = subst.apply(*p2, &mut self.ir);
                     let s = self.unify(p1_applied, p2_applied, loc)?;
@@ -102,23 +100,19 @@ impl TypeChecker {
             }
 
             _ => {
-                let expected_str = self.format_type(ty1_id);
-                let actual_str = self.format_type(ty2_id);
-
                 Err(FossilError::type_mismatch(
-                    format!("Expected type `{}`, but found `{}`", expected_str, actual_str),
+                    format!(
+                        "Expected type `{}`, but found `{}`",
+                        self.format_type(ty1_id),
+                        self.format_type(ty2_id),
+                    ),
                     loc,
                 ))
             }
         }
     }
 
-    pub fn bind_var(
-        &mut self,
-        var: TypeVar,
-        ty_id: TypeId,
-        loc: Loc,
-    ) -> Result<Subst, FossilError> {
+    pub fn bind_var(&mut self, var: TypeVar, ty_id: TypeId, loc: Loc) -> Result<Subst, FossilError> {
         let ty = self.ir.types.get(ty_id);
 
         if matches!(ty.kind, TypeKind::Var(v) if v == var) {
@@ -139,14 +133,12 @@ impl TypeChecker {
         let ty = self.ir.types.get(ty_id);
         match &ty.kind {
             TypeKind::Var(v) => *v == var,
-            TypeKind::Record(fields) => self.occurs_in_record(var, fields),
+            TypeKind::Record(fields) => fields.fields.iter().any(|(_, ty)| self.occurs_in(var, *ty)),
             TypeKind::Function(params, ret) => {
                 params.iter().any(|p| self.occurs_in(var, *p)) || self.occurs_in(var, *ret)
             }
             TypeKind::Optional(inner) => self.occurs_in(var, *inner),
-            TypeKind::Primitive(_)
-            | TypeKind::Named(_)
-            | TypeKind::Unit => false,
+            TypeKind::Primitive(_) | TypeKind::Named(_) | TypeKind::Unresolved(_) | TypeKind::Unit => false,
         }
     }
 
@@ -157,15 +149,10 @@ impl TypeChecker {
         loc: Loc,
     ) -> Result<Subst, FossilError> {
         if fields1.len() != fields2.len() {
-            return Err(FossilError::record_size_mismatch(
-                fields2.len(),
-                fields1.len(),
-                loc,
-            ));
+            return Err(FossilError::record_size_mismatch(fields2.len(), fields1.len(), loc));
         }
 
         let mut subst = Subst::default();
-
         for (name1, ty1) in &fields1.fields {
             if let Some(ty2) = fields2.lookup(*name1) {
                 let ty1_applied = subst.apply(*ty1, &mut self.ir);
@@ -179,9 +166,5 @@ impl TypeChecker {
         }
 
         Ok(subst)
-    }
-
-    pub fn occurs_in_record(&self, var: TypeVar, fields: &RecordFields) -> bool {
-        fields.fields.iter().any(|(_, ty)| self.occurs_in(var, *ty))
     }
 }

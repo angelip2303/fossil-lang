@@ -47,12 +47,10 @@ Being a functional language, functions are everywhere.
 Because of that, function calls are a fundamental part of the language.
 They are used to execute code and produce results.
 As most programming languages, `fossil` supports function calls by wrapping the function arguments in parentheses `()` preceded by the function name.
-Another way to call a function is to use the `|>` operator, which allows you to chain multiple functions together.
+Another way to call a function is to use the `|>` operator, which allows you to chain multiple operations together.
 This is called a _pipeline_.
 
 ```
-let identity = fn (x) -> x
-identity(42)
 42 |> identity
 ```
 

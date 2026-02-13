@@ -8,8 +8,8 @@ pub struct IrExecutor;
 
 impl IrExecutor {
     pub fn execute(program: IrProgram) -> Result<Vec<Value>, FossilError> {
-        let IrProgram { ir, gcx, .. } = program;
-        let mut evaluator = IrEvaluator::new(&ir, &gcx, Environment::default());
+        let IrProgram { ir, gcx, type_index, resolutions, typeck_results } = program;
+        let mut evaluator = IrEvaluator::new(&ir, &gcx, &type_index, &resolutions, &typeck_results, Environment::default());
         let mut results = Vec::new();
 
         for &stmt_id in &ir.root {

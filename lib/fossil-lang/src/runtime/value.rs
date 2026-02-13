@@ -4,6 +4,7 @@ use std::sync::Arc;
 use polars::prelude::*;
 
 use crate::context::{DefId, Symbol};
+use crate::traits::function::FunctionImpl;
 use crate::traits::source::Source;
 
 #[derive(Debug, Clone)]
@@ -96,12 +97,9 @@ pub struct OutputSpec {
 #[derive(Clone)]
 pub enum Value {
     Unit,
-    Expr(polars::prelude::Expr),
+    Expr(Expr),
     Plan(Plan),
-    BuiltinFunction(
-        DefId,
-        std::sync::Arc<dyn crate::traits::function::FunctionImpl>,
-    ),
+    Function(DefId, Arc<dyn FunctionImpl>),
     RecordConstructor(DefId),
 }
 
@@ -115,20 +113,16 @@ impl Value {
 }
 
 fn extract_literal<T>(
-    expr: &polars::prelude::Expr,
-    extract_from_any: impl Fn(&polars::prelude::AnyValue<'_>) -> Option<T>,
+    expr: &Expr,
+    extract_from_any: impl Fn(&AnyValue<'_>) -> Option<T>,
 ) -> Option<T> {
-    use polars::prelude::{Expr, LiteralValue};
-
     match expr {
         Expr::Literal(lv) => {
-            // Try to convert to AnyValue first
             if let Some(av) = lv.to_any_value()
                 && let Some(val) = extract_from_any(&av)
             {
                 return Some(val);
             }
-            // Also handle Scalar directly
             if let LiteralValue::Scalar(scalar) = lv {
                 return extract_from_any(scalar.value());
             }
@@ -138,9 +132,7 @@ fn extract_literal<T>(
     }
 }
 
-fn extract_literal_string(expr: &polars::prelude::Expr) -> Option<String> {
-    use polars::prelude::AnyValue;
-
+fn extract_literal_string(expr: &Expr) -> Option<String> {
     extract_literal(expr, |av| match av {
         AnyValue::String(s) => Some(s.to_string()),
         AnyValue::StringOwned(s) => Some(s.to_string()),
@@ -193,5 +185,4 @@ mod tests {
         let env = Environment::default();
         assert!(env.lookup(sym_x).is_none());
     }
-
 }

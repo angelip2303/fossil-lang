@@ -9,8 +9,8 @@ pub enum Token<'a> {
     Let,
     #[token("type")]
     Type,
-    #[token("fn")]
-    Func,
+    #[token("each")]
+    Each,
     #[token("do")]
     Do,
     #[token("end")]

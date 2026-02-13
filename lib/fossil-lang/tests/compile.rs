@@ -10,9 +10,9 @@ fn let_value_type<'a>(prog: &'a IrProgram, idx: usize) -> &'a TypeKind {
     let stmt = prog.ir.stmts.get(prog.ir.root[idx]);
     match &stmt.kind {
         StmtKind::Let { value, .. } => {
-            let expr = prog.ir.exprs.get(*value);
-            let ty_id = expr.ty.type_id();
-            &prog.ir.types.get(ty_id).kind
+            let ty_id = prog.typeck_results.expr_types.get(value)
+                .expect("expected type for let value");
+            &prog.ir.types.get(*ty_id).kind
         }
         other => panic!("expected Let at root[{}], got {:?}", idx, other),
     }
@@ -133,7 +133,7 @@ fn compile_projection() {
     let prog = compile(
         "type T do Name: string end\n\
          let x = 42\n\
-         x |> fn row -> T { Name = \"hi\" } end",
+         x |> each row -> T { Name = \"hi\" }",
     )
     .unwrap();
     // root[2] is the pipe expression statement
@@ -184,7 +184,7 @@ fn compile_add_output_operator() {
         "type A do X: int end\n\
          type B do Y: string end\n\
          let x = 42\n\
-         x |> fn row -> A { X = 1 } end +> fn row -> B { Y = \"hi\" } end",
+         x |> each row -> A { X = 1 } +> each row -> B { Y = \"hi\" }",
     )
     .unwrap();
     // root[3] is the chained pipe expression
@@ -208,7 +208,7 @@ fn compile_chained_pipe_and_add_output() {
         "type A do X: int end\n\
          type B do Y: string end\n\
          let x = 42\n\
-         let result = x |> fn r -> A { X = 1 } end +> fn r -> B { Y = \"hi\" } end",
+         let result = x |> each r -> A { X = 1 } +> each r -> B { Y = \"hi\" }",
     )
     .unwrap();
     // result should typecheck (the last output determines type)
@@ -222,7 +222,7 @@ fn compile_add_output_produces_multi_output_projection() {
         "type A do X: int end\n\
          type B do Y: string end\n\
          let x = 42\n\
-         x |> fn row -> A { X = 1 } end +> fn row -> B { Y = \"hi\" } end",
+         x |> each row -> A { X = 1 } +> each row -> B { Y = \"hi\" }",
     )
     .unwrap();
     let stmt = prog.ir.stmts.get(prog.ir.root[3]);

@@ -64,9 +64,8 @@ where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
     // Use .then() instead of .ignore_then() to preserve full span
-    // Use parse_binding_name to allow both identifiers and underscore (discard pattern)
     let let_stmt = just(Token::Let)
-        .then(parse_binding_name(ctx))
+        .then(parse_symbol(ctx))
         .then_ignore(just(Token::Eq))
         .then(expr.clone())
         .map_with(|((_, name), value), e| {
@@ -149,14 +148,6 @@ where
     select! { Token::Identifier(ident) => ctx.intern(ident) }
 }
 
-/// Parse a binding name for let statements
-fn parse_binding_name<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
-where
-    I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
-{
-    select! { Token::Identifier(ident) => ctx.intern(ident) }
-}
-
 fn parse_path<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Path, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
@@ -178,16 +169,6 @@ where
                 Path::qualified(path)
             }
         })
-}
-
-/// Parse a parameter name - accepts identifiers
-fn parse_param_name<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
-where
-    I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
-{
-    select! {
-        Token::Identifier(ident) => ctx.intern(ident),
-    }
 }
 
 fn parse_primitive_type<'a, I>() -> impl Parser<'a, I, PrimitiveType, ParserError<'a>> + Clone
@@ -212,14 +193,19 @@ enum PipeRhs {
     Call(ExprId),
 }
 
+/// Suffix after a parsed Path, used for longest-match atom parsing.
+enum PathSuffix {
+    Provider(Vec<ProviderArgument>),
+    CtorRecord(Vec<Argument>, Vec<(Symbol, ExprId)>),
+    Application(Vec<Argument>),
+    Record(Vec<(Symbol, ExprId)>),
+}
+
 fn parse_expr<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, ExprId, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
     recursive(|expr| {
-        let path = parse_path(ctx)
-            .map_with(|path, e| ctx.alloc_expr(ExprKind::Identifier(path), ctx.to_loc(e.span())));
-
         let unit = just(Token::LParen)
             .then(just(Token::RParen))
             .map_with(|_, e| ctx.alloc_expr(ExprKind::Unit, ctx.to_loc(e.span())));
@@ -289,99 +275,82 @@ where
 
         let argument = named_arg.or(positional_arg);
 
-        // Provider invocation in expression position: provider!(args)
-        let provider_invocation = parse_path(ctx)
-            .then_ignore(just(Token::Bang))
-            .then(
+        // Longest-match path-based atom: parse Path once, then check suffix
+        let bang_suffix = just(Token::Bang)
+            .ignore_then(
                 parse_provider_argument(ctx)
                     .separated_by(just(Token::Comma))
                     .allow_trailing()
                     .collect()
                     .delimited_by(just(Token::LParen), just(Token::RParen)),
             )
-            .map_with(|(provider, args), e| {
-                ctx.alloc_expr(
-                    ExprKind::ProviderInvocation { provider, args },
-                    ctx.to_loc(e.span()),
-                )
-            });
+            .map(PathSuffix::Provider);
 
-        // Record with constructor args: Path(args) { fields }
-        let record_with_ctor = parse_path(ctx)
-            .then(
-                argument.clone()
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(Token::LParen), just(Token::RParen)),
-            )
+        let paren_suffix = argument
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LParen), just(Token::RParen))
             .then(
                 record_field.clone()
                     .separated_by(just(Token::Comma))
                     .allow_trailing()
                     .collect::<Vec<_>>()
-                    .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+                    .delimited_by(just(Token::LBrace), just(Token::RBrace))
+                    .or_not(),
             )
-            .map_with(|((type_path, ctor_args), fields), e| {
-                ctx.alloc_expr(
-                    ExprKind::RecordInstance {
-                        type_path,
-                        ctor_args,
-                        fields,
-                    },
-                    ctx.to_loc(e.span()),
-                )
+            .map(|(args, fields)| match fields {
+                Some(fields) => PathSuffix::CtorRecord(args, fields),
+                None => PathSuffix::Application(args),
             });
 
-        // Named record without ctor args: Path { fields }
-        let named_record = parse_path(ctx)
+        let brace_suffix = record_field
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace))
+            .map(PathSuffix::Record);
+
+        let path_based = parse_path(ctx)
+            .map_with(|path, e| (path, e.span()))
             .then(
-                record_field
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+                bang_suffix
+                    .or(paren_suffix)
+                    .or(brace_suffix)
+                    .or_not(),
             )
-            .map_with(|(type_path, fields), e| {
-                ctx.alloc_expr(
-                    ExprKind::RecordInstance {
-                        type_path,
-                        ctor_args: vec![],
-                        fields,
-                    },
-                    ctx.to_loc(e.span()),
-                )
+            .map_with(|((path, path_span), suffix), e| {
+                let full_loc = ctx.to_loc(e.span());
+                match suffix {
+                    Some(PathSuffix::Provider(args)) => {
+                        ctx.alloc_expr(ExprKind::ProviderInvocation { provider: path, args }, full_loc)
+                    }
+                    Some(PathSuffix::CtorRecord(ctor_args, fields)) => {
+                        ctx.alloc_expr(
+                            ExprKind::RecordInstance { type_path: path, ctor_args, fields },
+                            full_loc,
+                        )
+                    }
+                    Some(PathSuffix::Application(args)) => {
+                        let callee_loc = ctx.to_loc(path_span);
+                        let callee = ctx.alloc_expr(ExprKind::Identifier(path), callee_loc);
+                        ctx.alloc_expr(ExprKind::Application { callee, args }, full_loc)
+                    }
+                    Some(PathSuffix::Record(fields)) => {
+                        ctx.alloc_expr(
+                            ExprKind::RecordInstance { type_path: path, ctor_args: vec![], fields },
+                            full_loc,
+                        )
+                    }
+                    None => {
+                        ctx.alloc_expr(ExprKind::Identifier(path), full_loc)
+                    }
+                }
             });
 
-        let application = path
-            .clone()
-            .then(
-                argument
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .collect()
-                    .delimited_by(just(Token::LParen), just(Token::RParen)),
-            )
-            .map_with(|(callee, args), e| {
-                ctx.alloc_expr(ExprKind::Application { callee, args }, ctx.to_loc(e.span()))
-            });
-
-        // Ordering matters:
-        // - provider_invocation before record_with_ctor (Path!(args) vs Path(args){fields})
-        // - record_with_ctor before application (Path(args){fields} vs Path(args))
-        // - application before path (Path(args) vs Path)
-        // - named_record before path (Path { ... } vs Path)
-        let atom = choice((
-            provider_invocation,
-            record_with_ctor,
-            application,
-            unit,
-            literal,
-            named_record,
-            path,
-        ))
-        .map_with(|expr, e| (expr, e.span()))
-        .boxed();
+        let atom = choice((path_based, unit, literal))
+            .map_with(|expr, e| (expr, e.span()))
+            .boxed();
 
         // Dot field access via pratt parser
         let base = atom.pratt((
@@ -406,12 +375,11 @@ where
         .map(|expr| expr.0)
         .boxed();
 
-        // Pipe/AddOutput chain: base (|> | +>) (fn param -> expr end | call_expr)
-        let projection_rhs = just(Token::Func)
-            .ignore_then(parse_param_name(ctx))
+        // Pipe chain: base (|> | +>) (each param -> expr | call_expr)
+        let projection_rhs = just(Token::Each)
+            .ignore_then(parse_symbol(ctx))
             .then_ignore(just(Token::Arrow))
-            .then(base.clone())
-            .then_ignore(just(Token::End));
+            .then(base.clone());
 
         let chain_op = just(Token::Pipe).to(ChainOp::Pipe)
             .or(just(Token::PlusGt).to(ChainOp::AddOutput));
@@ -421,43 +389,86 @@ where
             base.clone().map(PipeRhs::Call),
         )));
 
-        base.foldl(pipe_rhs.repeated(), |lhs, (op, rhs)| match (op, rhs) {
-            // |> fn param -> expr end  →  Projection (single output)
-            (ChainOp::Pipe, PipeRhs::Projection(param, output)) => {
-                let loc = Loc::generated();
-                ctx.alloc_expr(
-                    ExprKind::Projection {
-                        source: lhs,
-                        param,
-                        output,
-                    },
-                    loc,
-                )
-            }
-            // +> fn param -> expr end  →  AddOutput (adds output to previous projection)
-            (ChainOp::AddOutput, PipeRhs::Projection(param, output)) => {
-                let loc = Loc::generated();
-                ctx.alloc_expr(
-                    ExprKind::AddOutput {
-                        source: lhs,
-                        param,
-                        output,
-                    },
-                    loc,
-                )
-            }
-            // |> expr  →  Pipe (function application)
-            (ChainOp::Pipe, PipeRhs::Call(rhs)) => {
-                let loc = Loc::generated();
-                ctx.alloc_expr(ExprKind::Pipe { lhs, rhs }, loc)
-            }
-            // +> expr  →  Not supported (only lambdas with +>)
-            (ChainOp::AddOutput, PipeRhs::Call(rhs)) => {
-                let loc = Loc::generated();
-                ctx.alloc_expr(ExprKind::Pipe { lhs, rhs }, loc)
-            }
-        })
+        base.then(pipe_rhs.repeated().collect::<Vec<_>>())
+            .map(|(source, stages)| {
+                if stages.is_empty() {
+                    return source;
+                }
+                build_pipe_chain(ctx, source, &stages)
+            })
     })
+}
+
+/// Build a pipe chain from a source expression and a list of stages.
+/// Groups consecutive `+> each` blocks after a `|> each` into a single Projection.
+fn build_pipe_chain(ctx: &AstCtx, source: ExprId, stages: &[(ChainOp, PipeRhs)]) -> ExprId {
+    let mut current = source;
+    let mut i = 0;
+
+    while i < stages.len() {
+        let (op, rhs) = &stages[i];
+
+        match (op, rhs) {
+            (_, PipeRhs::Call(rhs)) => {
+                // Desugar pipe to Application directly:
+                // x |> f(a)  →  f(x, a)
+                // x |> f     →  f(x)
+                let (callee, mut args) = {
+                    let ast = ctx.ast.borrow();
+                    let rhs_expr = ast.exprs.get(*rhs);
+                    match &rhs_expr.kind {
+                        ExprKind::Application { callee, args } => (*callee, args.clone()),
+                        _ => (*rhs, vec![]),
+                    }
+                };
+                args.insert(0, Argument::Positional(current));
+                let loc = {
+                    let ast = ctx.ast.borrow();
+                    ast.exprs.get(current).loc.merge(ast.exprs.get(*rhs).loc)
+                };
+                current = ctx.alloc_expr(ExprKind::Application { callee, args }, loc);
+                i += 1;
+            }
+            (ChainOp::Pipe, PipeRhs::Projection(param, output)) => {
+                // Collect this output + any consecutive +> each blocks
+                let mut outputs = vec![*output];
+                let param = *param;
+                let mut last_output = *output;
+                while i + 1 < stages.len() {
+                    if let (ChainOp::AddOutput, PipeRhs::Projection(_, next_output)) = &stages[i + 1] {
+                        outputs.push(*next_output);
+                        last_output = *next_output;
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let loc = {
+                    let ast = ctx.ast.borrow();
+                    ast.exprs.get(current).loc.merge(ast.exprs.get(last_output).loc)
+                };
+                current = ctx.alloc_expr(
+                    ExprKind::Projection { source: current, param, outputs },
+                    loc,
+                );
+                i += 1;
+            }
+            (ChainOp::AddOutput, PipeRhs::Projection(param, output)) => {
+                // A bare +> each without a preceding |> each — treat as single Projection
+                let loc = {
+                    let ast = ctx.ast.borrow();
+                    ast.exprs.get(current).loc.merge(ast.exprs.get(*output).loc)
+                };
+                current = ctx.alloc_expr(
+                    ExprKind::Projection { source: current, param: *param, outputs: vec![*output] },
+                    loc,
+                );
+                i += 1;
+            }
+        }
+    }
+
+    current
 }
 
 fn parse_literal<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Literal, ParserError<'a>> + Clone
@@ -602,33 +613,31 @@ where
         .then(just(Token::RParen))
         .map_with(|_, e| ctx.alloc_type(TypeKind::Unit, ctx.to_loc(e.span())));
 
-    let provider = parse_path(ctx)
-        .then_ignore(just(Token::Bang))
+    // Longest-match: parse Path once, then check for ! suffix (provider vs named)
+    let path_based_type = parse_path(ctx)
         .then(
-            parse_provider_argument(ctx)
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect()
-                .delimited_by(just(Token::LParen), just(Token::RParen)),
+            just(Token::Bang)
+                .ignore_then(
+                    parse_provider_argument(ctx)
+                        .separated_by(just(Token::Comma))
+                        .allow_trailing()
+                        .collect()
+                        .delimited_by(just(Token::LParen), just(Token::RParen)),
+                )
+                .or_not(),
         )
-        .map_with(|(path, args), e| {
-            ctx.alloc_type(
-                TypeKind::Provider {
-                    provider: path,
-                    args,
-                },
-                ctx.to_loc(e.span()),
-            )
+        .map_with(|(path, provider_args), e| {
+            let loc = ctx.to_loc(e.span());
+            match provider_args {
+                Some(args) => ctx.alloc_type(TypeKind::Provider { provider: path, args }, loc),
+                None => ctx.alloc_type(TypeKind::Named(path), loc),
+            }
         });
-
-    let named = parse_path(ctx)
-        .map_with(|path, e| ctx.alloc_type(TypeKind::Named(path), ctx.to_loc(e.span())));
 
     choice((
         primitive,
         unit,
-        provider,
-        named,
+        path_based_type,
     ))
     .then(just(Token::Question).or_not())
     .map_with(|(inner, opt_q), e| {

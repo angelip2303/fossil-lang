@@ -10,5 +10,5 @@ end
 let walls = ifc!("lib/fossil-ifc/examples/basic-sample/building.ifc", "IfcWall")
 
 walls
-|> fn wall -> ValidWall(wall.GlobalId) { Name = wall.Name, Description = wall.Description } end
+|> each wall -> ValidWall(wall.GlobalId) { Name = wall.Name, Description = wall.Description }
 |> Rdf.serialize("output.nt")

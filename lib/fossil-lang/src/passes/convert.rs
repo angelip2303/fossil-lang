@@ -1,8 +1,6 @@
 use crate::ast;
-use crate::context::Symbol;
 use crate::ir::{
-    Argument, Expr, ExprKind, Ident, Ir, RecordFields, Stmt, StmtKind, Type, TypeKind,
-    TypeRef,
+    Argument, Expr, ExprKind, Ir, RecordFields, Stmt, StmtKind, Type, TypeKind,
 };
 
 pub fn ast_to_ir(ast: ast::Ast) -> Ir {
@@ -36,7 +34,6 @@ impl AstToIrConverter {
                 let ir_value = self.convert_expr(ast, *value);
                 StmtKind::Let {
                     name: *name,
-                    def_id: None,
                     value: ir_value,
                 }
             }
@@ -57,7 +54,6 @@ impl AstToIrConverter {
                     .collect();
                 StmtKind::Type {
                     name: *name,
-                    def_id: None,
                     ty: ir_ty,
                     attrs: attrs.clone(),
                     ctor_params: ir_ctor_params,
@@ -78,9 +74,7 @@ impl AstToIrConverter {
         let loc = expr.loc;
 
         let kind = match &expr.kind {
-            ast::ExprKind::Identifier(path) => {
-                ExprKind::Identifier(Ident::Unresolved(path.clone()))
-            }
+            ast::ExprKind::Identifier(path) => ExprKind::Identifier(path.clone()),
 
             ast::ExprKind::Unit => ExprKind::Unit,
 
@@ -93,7 +87,7 @@ impl AstToIrConverter {
                     .map(|(name, expr)| (*name, self.convert_expr(ast, *expr)))
                     .collect();
                 ExprKind::RecordInstance {
-                    type_ident: Ident::Unresolved(type_path.clone()),
+                    type_name: type_path.clone(),
                     ctor_args: ir_ctor_args,
                     fields: ir_fields,
                 }
@@ -108,57 +102,15 @@ impl AstToIrConverter {
                 }
             }
 
-            ast::ExprKind::Pipe { lhs, rhs } => {
-                // Desugar pipe: lhs |> rhs
-                let ir_lhs = self.convert_expr(ast, *lhs);
-
-                let rhs_expr = ast.exprs.get(*rhs);
-                match &rhs_expr.kind {
-                    ast::ExprKind::Application { callee, args } => {
-                        // rhs is already f(args...), so result is f(lhs, args...)
-                        let ir_callee = self.convert_expr(ast, *callee);
-                        let mut new_args = vec![Argument::Positional(ir_lhs)];
-                        new_args.extend(self.convert_args(ast, args));
-                        ExprKind::Application {
-                            callee: ir_callee,
-                            args: new_args,
-                        }
-                    }
-                    _ => {
-                        // rhs is just f, so result is f(lhs)
-                        let ir_rhs = self.convert_expr(ast, *rhs);
-                        ExprKind::Application {
-                            callee: ir_rhs,
-                            args: vec![Argument::Positional(ir_lhs)],
-                        }
-                    }
-                }
-            }
-
-            ast::ExprKind::Projection { source, param, output } => {
+            ast::ExprKind::Projection { source, param, outputs } => {
                 let ir_source = self.convert_expr(ast, *source);
-                let ir_output = self.convert_expr(ast, *output);
-                ExprKind::Projection {
-                    source: ir_source,
-                    binding: *param,
-                    binding_def: None,
-                    outputs: vec![ir_output],
-                }
-            }
-
-            ast::ExprKind::AddOutput { .. } => {
-                // Flatten the entire AddOutput chain into a single IR Projection.
-                let (original_source, binding, output_exprs) =
-                    self.collect_output_chain(ast, expr_id);
-                let ir_source = self.convert_expr(ast, original_source);
-                let ir_outputs = output_exprs
+                let ir_outputs = outputs
                     .iter()
                     .map(|&out| self.convert_expr(ast, out))
                     .collect();
                 ExprKind::Projection {
                     source: ir_source,
-                    binding,
-                    binding_def: None,
+                    binding: *param,
                     outputs: ir_outputs,
                 }
             }
@@ -184,11 +136,7 @@ impl AstToIrConverter {
             }
         };
 
-        self.ir.exprs.alloc(Expr {
-            loc,
-            kind,
-            ty: TypeRef::Unknown,
-        })
+        self.ir.exprs.alloc(Expr { loc, kind })
     }
 
     fn convert_args(&mut self, ast: &ast::Ast, args: &[ast::Argument]) -> Vec<Argument> {
@@ -203,48 +151,12 @@ impl AstToIrConverter {
             .collect()
     }
 
-    /// Walk back through an AddOutput chain to find the original Projection source,
-    /// the shared binding name, and all output expressions in order.
-    ///
-    /// All lambdas in a `+>` chain must use the same binding name since they all
-    /// operate on the same source. Different names would be confusing and produce
-    /// undefined variable errors at resolve time.
-    fn collect_output_chain(
-        &self,
-        ast: &ast::Ast,
-        start: ast::ExprId,
-    ) -> (ast::ExprId, Symbol, Vec<ast::ExprId>) {
-        let mut outputs = Vec::new();
-        let mut binding = None;
-        let mut current = start;
-
-        loop {
-            let expr = ast.exprs.get(current);
-            match &expr.kind {
-                ast::ExprKind::AddOutput { source, param, output } => {
-                    binding = Some(*param);
-                    outputs.push(*output);
-                    current = *source;
-                }
-                ast::ExprKind::Projection { source, param, output } => {
-                    outputs.push(*output);
-                    outputs.reverse();
-                    return (*source, *param, outputs);
-                }
-                _ => {
-                    outputs.reverse();
-                    return (current, binding.unwrap(), outputs);
-                }
-            }
-        }
-    }
-
     fn convert_type(&mut self, ast: &ast::Ast, type_id: ast::TypeId) -> crate::ir::TypeId {
         let ty = ast.types.get(type_id);
         let loc = ty.loc;
 
         let kind = match &ty.kind {
-            ast::TypeKind::Named(path) => TypeKind::Named(Ident::Unresolved(path.clone())),
+            ast::TypeKind::Named(path) => TypeKind::Unresolved(path.clone()),
 
             ast::TypeKind::Unit => TypeKind::Unit,
 
@@ -276,7 +188,7 @@ impl AstToIrConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Argument, ExprKind, Ident, Literal, Path, StmtKind, TypeKind, TypeRef};
+    use crate::ir::{Argument, ExprKind, Literal, Path, StmtKind, TypeKind};
     use crate::passes::expand::ProviderExpander;
     use crate::passes::parse::Parser;
 
@@ -310,8 +222,7 @@ mod tests {
         assert_eq!(ir.root.len(), 1);
         let stmt = ir.stmts.get(ir.root[0]);
         match &stmt.kind {
-            StmtKind::Let { def_id, value, .. } => {
-                assert_eq!(*def_id, None, "def_id should be None after conversion");
+            StmtKind::Let { value, .. } => {
                 let val_expr = ir.exprs.get(*value);
                 assert!(
                     matches!(val_expr.kind, ExprKind::Literal(Literal::Integer(42))),
@@ -379,52 +290,31 @@ mod tests {
         assert_eq!(ir.root.len(), 2);
         let val_expr = get_let_value_expr(&ir, 1);
         assert!(
-            matches!(&val_expr.kind, ExprKind::Identifier(Ident::Unresolved(_))),
-            "expected Unresolved identifier, got {:?}",
+            matches!(&val_expr.kind, ExprKind::Identifier(Path::Simple(_))),
+            "expected Simple path identifier, got {:?}",
             val_expr.kind
         );
     }
 
     #[test]
-    fn convert_types_unknown() {
-        let ir = parse_and_convert("let x = 42");
-        let val_expr = get_let_value_expr(&ir, 0);
-        assert_eq!(
-            val_expr.ty,
-            TypeRef::Unknown,
-            "expression type should be Unknown after conversion"
-        );
-    }
-
-    #[test]
     fn pipe_application_prepends_source() {
-        // x |> f(1) desugars to f(x, 1) — f is just an identifier, no need to define it
         let ir = parse_and_convert("let x = 42\nlet r = x |> f(1)");
         let val_expr = get_let_value_expr(&ir, 1);
         match &val_expr.kind {
             ExprKind::Application { callee, args } => {
                 let callee_expr = ir.exprs.get(*callee);
                 assert!(
-                    matches!(
-                        &callee_expr.kind,
-                        ExprKind::Identifier(Ident::Unresolved(_))
-                    ),
-                    "callee should be unresolved identifier, got {:?}",
+                    matches!(&callee_expr.kind, ExprKind::Identifier(Path::Simple(_))),
+                    "callee should be simple path, got {:?}",
                     callee_expr.kind
                 );
-                assert_eq!(
-                    args.len(),
-                    2,
-                    "expected 2 args (source prepended + original)"
-                );
-                // First arg is source (x)
+                assert_eq!(args.len(), 2, "expected 2 args (source prepended + original)");
                 let first_arg = ir.exprs.get(args[0].value());
                 assert!(
-                    matches!(&first_arg.kind, ExprKind::Identifier(Ident::Unresolved(_))),
+                    matches!(&first_arg.kind, ExprKind::Identifier(Path::Simple(_))),
                     "first arg should be source identifier, got {:?}",
                     first_arg.kind
                 );
-                // Second arg is literal 1
                 let second_arg = ir.exprs.get(args[1].value());
                 assert!(
                     matches!(second_arg.kind, ExprKind::Literal(Literal::Integer(1))),
@@ -438,24 +328,20 @@ mod tests {
 
     #[test]
     fn pipe_identifier_to_application() {
-        // x |> f desugars to f(x)
         let ir = parse_and_convert("let x = 42\nlet y = x |> f");
         let val_expr = get_let_value_expr(&ir, 1);
         match &val_expr.kind {
             ExprKind::Application { callee, args } => {
                 let callee_expr = ir.exprs.get(*callee);
                 assert!(
-                    matches!(
-                        &callee_expr.kind,
-                        ExprKind::Identifier(Ident::Unresolved(_))
-                    ),
-                    "callee should be unresolved identifier, got {:?}",
+                    matches!(&callee_expr.kind, ExprKind::Identifier(Path::Simple(_))),
+                    "callee should be simple path, got {:?}",
                     callee_expr.kind
                 );
                 assert_eq!(args.len(), 1, "expected 1 arg (just source)");
                 let arg_expr = ir.exprs.get(args[0].value());
                 assert!(
-                    matches!(&arg_expr.kind, ExprKind::Identifier(Ident::Unresolved(_))),
+                    matches!(&arg_expr.kind, ExprKind::Identifier(Path::Simple(_))),
                     "arg should be source identifier, got {:?}",
                     arg_expr.kind
                 );
@@ -466,17 +352,13 @@ mod tests {
 
     #[test]
     fn pipe_chained() {
-        // x |> f |> g desugars to g(f(x))
         let ir = parse_and_convert("let x = 42\nlet y = x |> f |> g");
         let val_expr = get_let_value_expr(&ir, 1);
         match &val_expr.kind {
             ExprKind::Application { callee, args } => {
                 let callee_expr = ir.exprs.get(*callee);
                 assert!(
-                    matches!(
-                        &callee_expr.kind,
-                        ExprKind::Identifier(Ident::Unresolved(_))
-                    ),
+                    matches!(&callee_expr.kind, ExprKind::Identifier(Path::Simple(_))),
                     "outer callee should be g"
                 );
                 assert_eq!(args.len(), 1, "outer application has 1 arg");
@@ -488,16 +370,13 @@ mod tests {
                     } => {
                         let inner_callee_expr = ir.exprs.get(*inner_callee);
                         assert!(
-                            matches!(
-                                &inner_callee_expr.kind,
-                                ExprKind::Identifier(Ident::Unresolved(_))
-                            ),
+                            matches!(&inner_callee_expr.kind, ExprKind::Identifier(Path::Simple(_))),
                             "inner callee should be f"
                         );
                         assert_eq!(inner_args.len(), 1, "inner application has 1 arg");
                         let x_expr = ir.exprs.get(inner_args[0].value());
                         assert!(
-                            matches!(&x_expr.kind, ExprKind::Identifier(Ident::Unresolved(_))),
+                            matches!(&x_expr.kind, ExprKind::Identifier(Path::Simple(_))),
                             "innermost arg should be x"
                         );
                     }
@@ -510,7 +389,6 @@ mod tests {
 
     #[test]
     fn pipe_preserves_named_args() {
-        // x |> f(name: 1) desugars to f(x, name: 1)
         let ir = parse_and_convert("let x = 42\nlet y = x |> f(name: 1)");
         let val_expr = get_let_value_expr(&ir, 1);
         match &val_expr.kind {
@@ -547,7 +425,6 @@ mod tests {
 
     #[test]
     fn pipe_literal_source() {
-        // A literal can be the pipe source: 42 |> f
         let ir = parse_and_convert("let y = 42 |> f");
         let val_expr = get_let_value_expr(&ir, 0);
         match &val_expr.kind {
@@ -566,13 +443,11 @@ mod tests {
 
     #[test]
     fn pipe_projection() {
-        // x |> fn row -> row end → IR Projection
-        let ir = parse_and_convert("let x = 42\nlet y = x |> fn row -> row end");
+        let ir = parse_and_convert("let x = 42\nlet y = x |> each row -> row");
         let val_expr = get_let_value_expr(&ir, 1);
         match &val_expr.kind {
-            ExprKind::Projection { outputs, binding_def, .. } => {
+            ExprKind::Projection { outputs, .. } => {
                 assert_eq!(outputs.len(), 1, "expected 1 output");
-                assert_eq!(*binding_def, None, "binding_def should be None after convert");
             }
             other => panic!("expected Projection, got {:?}", other),
         }
@@ -580,8 +455,7 @@ mod tests {
 
     #[test]
     fn add_output_flattens_to_single_projection() {
-        // x |> fn row -> row end +> fn row -> row end → single IR Projection with 2 outputs
-        let ir = parse_and_convert("let x = 42\nlet y = x |> fn row -> row end +> fn row -> row end");
+        let ir = parse_and_convert("let x = 42\nlet y = x |> each row -> row +> each row -> row");
         let val_expr = get_let_value_expr(&ir, 1);
         match &val_expr.kind {
             ExprKind::Projection { outputs, .. } => {
@@ -593,9 +467,8 @@ mod tests {
 
     #[test]
     fn triple_add_output_chain() {
-        // Three outputs via +> chain → single IR Projection with 3 outputs
         let ir = parse_and_convert(
-            "let x = 42\nlet y = x |> fn a -> a end +> fn b -> b end +> fn c -> c end"
+            "let x = 42\nlet y = x |> each a -> a +> each b -> b +> each c -> c"
         );
         let val_expr = get_let_value_expr(&ir, 1);
         match &val_expr.kind {
@@ -608,7 +481,6 @@ mod tests {
 
     #[test]
     fn convert_record_with_ctor_args() {
-        // Person(42) { Name = "hi" } → RecordInstance with ctor_args
         let ir = parse_and_convert("type T do Name: string end\nT(42) { Name = \"hi\" }");
         let expr = get_expr_stmt(&ir, 1);
         match &expr.kind {
@@ -633,10 +505,7 @@ mod tests {
                         assert_eq!(exprs.len(), 1, "expected 1 interpolated expr");
                         let interp_expr = ir.exprs.get(exprs[0]);
                         assert!(
-                            matches!(
-                                &interp_expr.kind,
-                                ExprKind::Identifier(Ident::Unresolved(_))
-                            ),
+                            matches!(&interp_expr.kind, ExprKind::Identifier(Path::Simple(_))),
                             "interpolated expr should be identifier, got {:?}",
                             interp_expr.kind
                         );
@@ -650,13 +519,12 @@ mod tests {
 
     #[test]
     fn convert_dot_access_is_qualified_path() {
-        // After convert, x.name is a Qualified path — disambiguation happens in resolve
         let ir = parse_and_convert("let x = 42\nlet y = x.name");
         let val_expr = get_let_value_expr(&ir, 1);
         assert!(
             matches!(
                 &val_expr.kind,
-                ExprKind::Identifier(Ident::Unresolved(Path::Qualified(_)))
+                ExprKind::Identifier(Path::Qualified(_))
             ),
             "x.name should be Qualified path after convert, got {:?}",
             val_expr.kind

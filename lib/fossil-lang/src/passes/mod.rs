@@ -17,5 +17,7 @@ pub struct ParsedProgram {
 pub struct IrProgram {
     pub ir: ir::Ir,
     pub gcx: GlobalContext,
-    pub env: crate::passes::typecheck::TypeEnv,
+    pub type_index: ir::TypeIndex,
+    pub resolutions: ir::Resolutions,
+    pub typeck_results: ir::TypeckResults,
 }

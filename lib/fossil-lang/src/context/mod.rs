@@ -175,12 +175,6 @@ impl Interner {
         &self.strings[sym.0 as usize]
     }
 
-    /// Try to resolve a symbol, returning None if the symbol index is out of bounds.
-    /// This is useful when the symbol may have been interned in a different interner
-    /// (e.g., during error recovery in compilation).
-    pub fn try_resolve(&self, sym: Symbol) -> Option<&str> {
-        self.strings.get(sym.0 as usize).map(|s| s.as_str())
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -236,6 +230,8 @@ impl Def {
 #[derive(Default, Clone)]
 pub struct Definitions {
     items: Vec<Def>,
+    by_symbol: HashMap<Symbol, Vec<DefId>>,
+    children: HashMap<DefId, HashMap<Symbol, DefId>>,
 }
 
 impl Definitions {
@@ -244,19 +240,27 @@ impl Definitions {
     }
 
     pub fn get_by_symbol(&self, name: Symbol) -> Option<&Def> {
-        self.items.iter().find(|def| def.name == name)
+        self.by_symbol
+            .get(&name)
+            .and_then(|ids| ids.first())
+            .map(|id| self.get(*id))
     }
 
-    /// Find definition by symbol and kind predicate.
     pub fn find_by_symbol(&self, name: Symbol, pred: impl Fn(&DefKind) -> bool) -> Option<&Def> {
-        self.items
+        self.by_symbol
+            .get(&name)?
             .iter()
-            .find(|def| def.name == name && pred(&def.kind))
+            .map(|id| self.get(*id))
+            .find(|def| pred(&def.kind))
     }
 
     pub fn insert(&mut self, parent: Option<DefId>, name: Symbol, kind: DefKind) -> DefId {
         let id = DefId::new(self.items.len() as u32);
         self.items.push(Def::new(id, parent, name, kind));
+        self.by_symbol.entry(name).or_default().push(id);
+        if let Some(parent_id) = parent {
+            self.children.entry(parent_id).or_default().insert(name, id);
+        }
         id
     }
 
@@ -269,34 +273,14 @@ impl Definitions {
     }
 
     pub fn resolve(&self, path: &Path) -> Option<DefId> {
-        // if the path is empty, return None
-        if path.is_empty() {
-            return None;
-        }
-
-        // For simple paths, just look up the item symbol
         match path {
             Path::Simple(sym) => self.get_by_symbol(*sym).map(|def| def.id()),
+            Path::Qualified(parts) if parts.is_empty() => None,
             Path::Qualified(parts) => {
-                // For qualified paths, resolve step by step through the hierarchy
-                // Example: Entity::with_id resolves as: Entity (module) -> with_id (function)
-                if parts.is_empty() {
-                    return None;
-                }
-
-                // Start with the first part (module name)
                 let mut current_id = self.get_by_symbol(parts[0]).map(|def| def.id())?;
-
-                // Navigate through the rest of the path (supports arbitrary depth now)
                 for &part in &parts[1..] {
-                    // Find item with this symbol that has current_id as parent
-                    current_id = self
-                        .items
-                        .iter()
-                        .find(|def| def.name == part && def.parent == Some(current_id))
-                        .map(|def| def.id())?;
+                    current_id = *self.children.get(&current_id)?.get(&part)?;
                 }
-
                 Some(current_id)
             }
         }

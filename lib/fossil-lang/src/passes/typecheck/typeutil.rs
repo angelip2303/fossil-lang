@@ -10,11 +10,9 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::Loc;
 use crate::context::DefId;
 use crate::error::FossilError;
-use crate::ir::{Ident, Ir, Polytype, RecordFields, Type, TypeId, TypeKind, TypeVar};
+use crate::ir::{Ir, Polytype, RecordFields, Type, TypeId, TypeKind, TypeVar};
 
 use super::TypeChecker;
-
-// ── TypeEnv ─────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
 pub struct TypeEnv {
@@ -61,7 +59,10 @@ impl TypeEnv {
                 vars
             }
             TypeKind::Optional(inner) => self.free_vars_type(*inner, ir),
-            TypeKind::Primitive(_) | TypeKind::Named(_) | TypeKind::Unit => HashSet::new(),
+            TypeKind::Primitive(_)
+            | TypeKind::Named(_)
+            | TypeKind::Unresolved(_)
+            | TypeKind::Unit => HashSet::new(),
         }
     }
 
@@ -81,8 +82,6 @@ impl TypeEnv {
         Polytype { forall, ty: ty_id }
     }
 }
-
-// ── Subst ───────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
 pub struct Subst {
@@ -158,7 +157,10 @@ impl Subst {
                 }
             }
 
-            TypeKind::Primitive(_) | TypeKind::Named(_) | TypeKind::Unit => ty_id,
+            TypeKind::Primitive(_)
+            | TypeKind::Named(_)
+            | TypeKind::Unresolved(_)
+            | TypeKind::Unit => ty_id,
         };
 
         cache.insert(ty_id, result);
@@ -198,8 +200,6 @@ impl Subst {
     }
 }
 
-// ── TypeChecker helpers ─────────────────────────────────────────
-
 impl TypeChecker {
     pub fn fresh_type_var(&mut self, loc: Loc) -> TypeId {
         let var = self.tvg.fresh();
@@ -219,16 +219,14 @@ impl TypeChecker {
             TypeKind::Primitive(p) => format!("{:?}", p),
             TypeKind::Var(v) => format!("'{}", v.0),
             TypeKind::Unit => "()".to_string(),
-            TypeKind::Named(ident) => match ident {
-                Ident::Resolved(def_id) => {
-                    let def = self.gcx.definitions.get(*def_id);
-                    self.gcx.interner.resolve(def.name).to_string()
-                }
-                Ident::Unresolved(path) => path.display(&self.gcx.interner),
-            },
+            TypeKind::Named(def_id) => {
+                let def = self.gcx.definitions.get(*def_id);
+                self.gcx.interner.resolve(def.name).to_string()
+            }
+            TypeKind::Unresolved(path) => path.display(&self.gcx.interner),
             TypeKind::Function(params, ret) => {
                 let param_strs: Vec<_> = params.iter().map(|p| self.format_type(*p)).collect();
-                format!("fn({}) -> {}", param_strs.join(", "), self.format_type(*ret))
+                format!("({}) -> {}", param_strs.join(", "), self.format_type(*ret))
             }
             TypeKind::Record(fields) => {
                 format!("{{{}}}", self.format_fields(fields))
@@ -265,14 +263,16 @@ impl TypeChecker {
         let expected_params = self.get_type_ctor_param_count(type_def_id);
 
         if actual_args != expected_params {
-            return Err(FossilError::arity_mismatch(expected_params, actual_args, loc));
+            return Err(FossilError::arity_mismatch(
+                expected_params,
+                actual_args,
+                loc,
+            ));
         }
 
         Ok(())
     }
 }
-
-// ── Tests ───────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -280,11 +280,9 @@ mod tests {
     use crate::context::{DefId, Symbol};
     use crate::ir::{Ir, Polytype, PrimitiveType, Type, TypeKind, TypeVar};
 
-    // ── TypeEnv tests ──
-
     #[test]
     fn env_insert_and_lookup() {
-        let mut ir = Ir::default();
+        let ir = Ir::default();
         let int_ty = ir.int_type();
         let def_id = DefId::new(0);
         let poly = Polytype::mono(int_ty);
@@ -300,7 +298,7 @@ mod tests {
 
     #[test]
     fn generalize_no_free_vars() {
-        let mut ir = Ir::default();
+        let ir = Ir::default();
         let int_ty = ir.int_type();
 
         let env = TypeEnv::default();
@@ -341,7 +339,7 @@ mod tests {
 
     #[test]
     fn free_vars_primitive() {
-        let mut ir = Ir::default();
+        let ir = Ir::default();
         let int_ty = ir.int_type();
 
         let env = TypeEnv::default();
@@ -394,8 +392,6 @@ mod tests {
         assert!(free.contains(&var0));
         assert!(free.contains(&var1));
     }
-
-    // ── Subst tests ──
 
     #[test]
     fn apply_identity() {

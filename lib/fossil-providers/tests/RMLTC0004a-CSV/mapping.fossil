@@ -13,6 +13,6 @@ type Sport(subject: string) do
 end
 
 student_sport
-|> fn row -> Student("http://example.com/${row.Student}") { Name = row.Student } end
-+> fn row -> Sport("http://example.com/${row.Sport}") { Name = row.Sport } end
+|> each row -> Student("http://example.com/${row.Student}") { Name = row.Student }
++> each row -> Sport("http://example.com/${row.Sport}") { Name = row.Sport }
 |> Rdf.serialize("tests/RMLTC0004a-CSV/actual.nq")

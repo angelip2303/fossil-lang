@@ -1,22 +1,14 @@
-//! Type inference (Algorithm W)
-
 use crate::error::FossilError;
 use crate::ir::{
-    ExprId, ExprKind, Ident, Literal, Polytype, PrimitiveType, Type, TypeId, TypeKind,
+    ExprId, ExprKind, Literal, Polytype, PrimitiveType, Type, TypeId, TypeKind,
 };
 
 use super::{TypeChecker, typeutil::Subst};
 
 impl TypeChecker {
-    /// Algorithm W: infer the type of an expression
-    ///
-    /// Returns (substitution, inferred_type_id)
-    ///
-    /// This works directly on IR expressions. The IR expression's `ty` field
-    /// may be `TypeRef::Unknown` when we start; after inference we update it
-    /// to `TypeRef::Known(inferred_type_id)`.
     pub fn infer(&mut self, expr_id: ExprId) -> Result<(Subst, TypeId), FossilError> {
-        // Check cache first
+        let expr_id = self.resolutions.expr_rewrites.get(&expr_id).copied().unwrap_or(expr_id);
+
         if let Some(&cached_ty) = self.infer_cache.get(&expr_id) {
             let resolved_ty = self.global_subst.apply(cached_ty, &mut self.ir);
             return Ok((Subst::default(), resolved_ty));
@@ -48,83 +40,63 @@ impl TypeChecker {
                 Ok((Subst::default(), ty))
             }
 
-            ExprKind::Identifier(ident) => {
-                match ident {
-                    Ident::Resolved(def_id) => {
-                        // Look up the polytype from the environment
-                        let poly = self
-                            .env
-                            .lookup(*def_id)
-                            .ok_or_else(|| {
-                                let def = self.gcx.definitions.get(*def_id);
-                                let name_str = self.gcx.interner.resolve(def.name).to_string();
-                                FossilError::undefined_variable(name_str, loc)
-                            })?
-                            .clone();
+            ExprKind::Identifier(_) => {
+                let def_id = self.resolutions.expr_defs.get(&expr_id).ok_or_else(|| {
+                    FossilError::internal("typecheck", "Unresolved identifier reached type checker", loc)
+                })?;
 
-                        // Instantiate with fresh type variables
-                        let ty = self.instantiate(&poly);
+                let poly = self
+                    .env
+                    .lookup(*def_id)
+                    .ok_or_else(|| {
+                        let def = self.gcx.definitions.get(*def_id);
+                        let name_str = self.gcx.interner.resolve(def.name).to_string();
+                        FossilError::undefined_variable(name_str, loc)
+                    })?
+                    .clone();
 
-                        // For monomorphic types, apply local_subst
-                        let ty = if poly.forall.is_empty() {
-                            self.local_subst.apply(ty, &mut self.ir)
-                        } else {
-                            ty
-                        };
+                let ty = self.instantiate(&poly);
+                let ty = if poly.forall.is_empty() {
+                    self.local_subst.apply(ty, &mut self.ir)
+                } else {
+                    ty
+                };
 
-                        Ok((Subst::default(), ty))
-                    }
-                    Ident::Unresolved(path) => {
-                        // Should not happen after resolution - this is an internal error
-                        Err(FossilError::internal(
-                            "typecheck",
-                            format!("Unresolved identifier reached type checker: {:?}", path),
-                            loc,
-                        ))
-                    }
-                }
+                Ok((Subst::default(), ty))
             }
 
-            ExprKind::RecordInstance { type_ident, ctor_args, fields } => {
-                let type_def_id = type_ident.try_def_id().ok_or_else(|| {
+            ExprKind::RecordInstance { ctor_args, fields, .. } => {
+                let type_def_id = *self.resolutions.expr_defs.get(&expr_id).ok_or_else(|| {
                     FossilError::internal("typecheck", "Unresolved type in record instance", loc)
                 })?;
 
                 let mut subst = Subst::default();
 
-                // Infer types for ctor_args
                 for arg in ctor_args {
                     let (s, _arg_ty) = self.infer(arg.value())?;
                     subst = subst.compose(&s, &mut self.ir);
                 }
 
-                // Infer types for all fields
                 for (_name, field_expr) in fields {
                     let (s, _field_ty) = self.infer(*field_expr)?;
                     subst = subst.compose(&s, &mut self.ir);
                 }
 
-                // Check ctor arg count matches type params
                 self.check_ctor_arg_count(type_def_id, ctor_args.len(), loc)?;
 
-                // The type is the named type from the identifier
                 let named_ty = self.ir.named_type(type_def_id);
-
                 Ok((subst, named_ty))
             }
 
-            ExprKind::Projection { source, binding_def, outputs, .. } => {
+            ExprKind::Projection { source, outputs, .. } => {
                 let (mut subst, source_ty) = self.infer(*source)?;
 
-                // The binding gets the source's inferred type so field access
-                // is checked against the source schema at compile time.
                 let binding_ty = subst.apply(source_ty, &mut self.ir);
 
-                if let Some(def_id) = binding_def {
-                    self.env.insert(*def_id, Polytype::mono(binding_ty));
+                if let Some(&binding_def_id) = self.resolutions.expr_defs.get(&expr_id) {
+                    self.env.insert(binding_def_id, Polytype::mono(binding_ty));
                 }
 
-                // Infer each output — the projection's type is the last output's type
                 let mut last_ty = self.fresh_type_var(loc);
                 for &output in outputs {
                     let (s, ty) = self.infer(output)?;
@@ -165,9 +137,19 @@ impl TypeChecker {
             }
 
             ExprKind::FieldAccess { expr, field } => {
-                // Normal field access
                 let (subst, expr_ty) = self.infer(*expr)?;
                 let expr_ty = subst.apply(expr_ty, &mut self.ir);
+
+                if let Some(def_id) = self.named_def_id(expr_ty) {
+                    if let Some(underlying_ty) = self.resolve_named_type(def_id)
+                        && let TypeKind::Record(fields) = &self.ir.types.get(underlying_ty).kind
+                        && let Some(field_ty) = fields.lookup(*field)
+                    {
+                        return Ok((subst, field_ty));
+                    }
+                    let field_str = self.gcx.interner.resolve(*field).to_string();
+                    return Err(FossilError::field_not_found(field_str, loc));
+                }
 
                 let ty = self.ir.types.get(expr_ty);
                 match &ty.kind {
@@ -175,29 +157,12 @@ impl TypeChecker {
                         if let Some(field_ty) = fields.lookup(*field) {
                             Ok((subst, field_ty))
                         } else {
-                            // Field not found - error (no row polymorphism)
                             let field_str = self.gcx.interner.resolve(*field).to_string();
                             Err(FossilError::field_not_found(field_str, loc))
                         }
                     }
 
-                    TypeKind::Named(Ident::Resolved(def_id)) => {
-                        // Named type - resolve to underlying record type
-                        if let Some(underlying_ty) = self.resolve_named_type(*def_id)
-                            && let TypeKind::Record(fields) = &self.ir.types.get(underlying_ty).kind
-                            && let Some(field_ty) = fields.lookup(*field)
-                        {
-                            return Ok((subst, field_ty));
-                        }
-
-                        // Field not found - error
-                        let field_str = self.gcx.interner.resolve(*field).to_string();
-                        Err(FossilError::field_not_found(field_str, loc))
-                    }
-
                     TypeKind::Var(_) => {
-                        // Type variable - create a fresh type for the field
-                        // (simplified: just return a fresh type var without constraining the record)
                         let field_ty = self.fresh_type_var(loc);
                         Ok((subst, field_ty))
                     }
@@ -220,7 +185,6 @@ impl TypeChecker {
             }
         };
 
-        // Cache the result
         if let Ok((_, ty)) = &result {
             self.infer_cache.insert(expr_id, *ty);
         }
@@ -231,7 +195,7 @@ impl TypeChecker {
 
 #[cfg(test)]
 mod tests {
-    use crate::ir::{PrimitiveType, StmtKind, TypeKind, TypeRef};
+    use crate::ir::{PrimitiveType, StmtKind, TypeKind};
 
     fn compile_ok(src: &str) -> crate::passes::IrProgram {
         let parsed = crate::passes::parse::Parser::parse(src, 0).expect("parse failed");
@@ -240,11 +204,11 @@ mod tests {
             .expect("expand failed");
         let ty = crate::context::extract_type_metadata(&expand_result.ast);
         let ir = crate::passes::convert::ast_to_ir(expand_result.ast);
-        let (ir, gcx) = crate::passes::resolve::IrResolver::new(ir, expand_result.gcx)
+        let (ir, gcx, resolutions) = crate::passes::resolve::IrResolver::new(ir, expand_result.gcx)
             .with_type_metadata(ty)
             .resolve()
             .expect("resolve failed");
-        super::TypeChecker::new(ir, gcx)
+        super::TypeChecker::new(ir, gcx, resolutions)
             .check()
             .expect("typecheck failed")
     }
@@ -253,9 +217,8 @@ mod tests {
         let stmt_id = prog.ir.root[stmt_idx];
         let stmt = prog.ir.stmts.get(stmt_id);
         if let StmtKind::Let { value, .. } = &stmt.kind {
-            let expr = prog.ir.exprs.get(*value);
-            if let TypeRef::Known(ty_id) = &expr.ty {
-                return &prog.ir.types.get(*ty_id).kind;
+            if let Some(&ty_id) = prog.typeck_results.expr_types.get(value) {
+                return &prog.ir.types.get(ty_id).kind;
             }
         }
         panic!("Expected let with known type at index {}", stmt_idx);

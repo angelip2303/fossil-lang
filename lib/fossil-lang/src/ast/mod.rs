@@ -55,6 +55,14 @@ impl Loc {
             span: Span::new(0, 0),
         }
     }
+
+    /// Merge two locations into one spanning from start of self to end of other.
+    pub fn merge(self, other: Loc) -> Loc {
+        Loc {
+            source: self.source,
+            span: Span::new(self.span.start, other.span.end),
+        }
+    }
 }
 
 impl chumsky::span::Span for Loc {

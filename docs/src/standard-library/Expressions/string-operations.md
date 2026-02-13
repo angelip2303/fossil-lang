@@ -7,13 +7,18 @@
 Converting the casing of a string is a common operation and `fossil` supports it out of the box with the `upper` and `lower` functions.
 
 ```
-open Data.Csv
+let input = csv!("path/to/file.csv")
 
-read "path/to/file.csv"
-    |> map (fn row -> {
-        name    = row.name |> upper,
-        surname = lower row.surname,
-    })
+type Output do
+    name: string
+    surname: string
+end
+
+input
+|> each row -> Output {
+    name    = row.name |> upper,
+    surname = lower(row.surname)
+}
 ```
 
 > Note that both the pipe-oriented and call-oriented syntaxes are supported.
@@ -24,11 +29,16 @@ read "path/to/file.csv"
 This is the `trim` function.
 
 ```
-open Data.Csv
+let input = csv!("path/to/file.csv")
 
-read "path/to/file.csv"
-    |> map (fn row -> {
-        name    = row.name |> trim,
-        surname = trim row.surname,
-    })
+type Output do
+    name: string
+    surname: string
+end
+
+input
+|> each row -> Output {
+    name    = row.name |> trim,
+    surname = trim(row.surname)
+}
 ```

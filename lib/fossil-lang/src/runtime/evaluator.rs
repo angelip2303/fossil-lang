@@ -1,9 +1,9 @@
 use polars::prelude::*;
 
 use crate::ast::Loc;
-use crate::context::{DefId, Symbol};
+use crate::context::{DefId, DefKind, Symbol};
 use crate::error::FossilError;
-use crate::ir::{Argument, ExprId, ExprKind, Ident, Ir, StmtKind, TypeKind, TypeRef};
+use crate::ir::{Argument, ExprId, ExprKind, Ir, Resolutions, TypeIndex, TypeKind, TypeckResults};
 use crate::passes::GlobalContext;
 use crate::runtime::value::Value;
 use crate::traits::function::RuntimeContext;
@@ -12,7 +12,6 @@ pub use crate::runtime::value::Environment as IrEnvironment;
 
 const MAX_CALL_DEPTH: usize = 1000;
 
-/// Stack frame representing a function call
 #[derive(Debug, Clone)]
 pub struct StackFrame {
     pub function_name: String,
@@ -20,7 +19,6 @@ pub struct StackFrame {
     pub def_id: Option<DefId>,
 }
 
-/// Call stack for tracking function execution
 #[derive(Debug, Clone, Default)]
 pub struct CallStack {
     frames: Vec<StackFrame>,
@@ -35,10 +33,6 @@ impl CallStack {
         self.frames.pop()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.frames.is_empty()
-    }
-
     pub fn depth(&self) -> usize {
         self.frames.len()
     }
@@ -47,28 +41,39 @@ impl CallStack {
 pub struct IrEvaluator<'a> {
     ir: &'a Ir,
     gcx: &'a GlobalContext,
+    type_index: &'a TypeIndex,
+    resolutions: &'a Resolutions,
+    typeck_results: &'a TypeckResults,
     env: IrEnvironment,
     call_stack: CallStack,
 }
 
 impl<'a> IrEvaluator<'a> {
-    pub fn new(ir: &'a Ir, gcx: &'a GlobalContext, env: IrEnvironment) -> Self {
+    pub fn new(
+        ir: &'a Ir,
+        gcx: &'a GlobalContext,
+        type_index: &'a TypeIndex,
+        resolutions: &'a Resolutions,
+        typeck_results: &'a TypeckResults,
+        env: IrEnvironment,
+    ) -> Self {
         Self {
             ir,
             gcx,
+            type_index,
+            resolutions,
+            typeck_results,
             env,
             call_stack: Default::default(),
         }
     }
 
-    /// Allows the executor to add top-level bindings without
-    /// recreating the evaluator (avoiding environment clones).
     pub fn bind(&mut self, name: Symbol, value: Value) {
         self.env.bind(name, value);
     }
 
-    /// Evaluate an expression and return its value
     pub fn eval(&mut self, expr_id: ExprId) -> Result<Value, FossilError> {
+        let expr_id = self.resolutions.expr_rewrites.get(&expr_id).copied().unwrap_or(expr_id);
         let expr = self.ir.exprs.get(expr_id);
 
         match &expr.kind {
@@ -84,58 +89,45 @@ impl<'a> IrEvaluator<'a> {
                 }))
             }
 
-            ExprKind::Identifier(ident) => {
-                // In IR, identifiers can be:
-                // 1. Local variables (resolved to their DefId)
-                // 2. Functions (registered stdlib functions)
-                // 3. Module references
-                let def_id = match ident {
-                    Ident::Resolved(id) => *id,
-                    Ident::Unresolved(_) => {
-                        return Err(self.make_error("Unresolved identifier at runtime"));
-                    }
-                };
+            ExprKind::Identifier(_) => {
+                let &def_id = self.resolutions.expr_defs.get(&expr_id)
+                    .ok_or_else(|| self.make_error("Unresolved identifier at runtime"))?;
 
-                // First check if it's a local variable in the environment
                 let def = self.gcx.definitions.get(def_id);
 
-                // Try to look up by symbol in environment first (for local variables)
                 if let Some(val) = self.env.lookup(def.name) {
                     return Ok(val.clone());
                 }
 
-                use crate::context::DefKind;
                 match &def.kind {
-                    DefKind::Func(func) => Ok(Value::BuiltinFunction(def_id, func.clone())),
+                    DefKind::Func(func) => Ok(Value::Function(def_id, func.clone())),
                     DefKind::RecordConstructor => Ok(Value::RecordConstructor(def_id)),
                     DefKind::Let => Err(self.make_error(format!(
                         "Variable '{}' not found in environment",
                         self.gcx.interner.resolve(def.name)
                     ))),
-                    DefKind::Type => Err(self.make_error(format!(
-                        "Type '{}' cannot be used as a value",
-                        self.gcx.interner.resolve(def.name)
-                    ))),
-                    DefKind::Mod => Err(self.make_error(format!(
-                        "Module '{}' cannot be used as a value",
-                        self.gcx.interner.resolve(def.name)
-                    ))),
-                    DefKind::Provider(_) => Err(self.make_error(format!(
-                        "Provider '{}' cannot be used as a value",
-                        self.gcx.interner.resolve(def.name)
-                    ))),
+                    DefKind::Type | DefKind::Mod | DefKind::Provider(_) => {
+                        Err(self.make_error(format!(
+                            "'{}' cannot be used as a value",
+                            self.gcx.interner.resolve(def.name)
+                        )))
+                    }
                 }
             }
 
-            ExprKind::RecordInstance { type_ident, ctor_args, fields } => {
-                self.eval_named_record(type_ident, ctor_args, fields)
-            }
+            ExprKind::RecordInstance {
+                ctor_args,
+                fields,
+                ..
+            } => self.eval_named_record(expr_id, ctor_args, fields),
 
-            ExprKind::Application { callee, args } => self.eval_application(*callee, args),
+            ExprKind::Application { callee, args } => self.eval_application(expr_id, *callee, args),
 
-            ExprKind::Projection { source, binding, outputs, .. } => {
-                self.eval_projection(*source, *binding, outputs)
-            }
+            ExprKind::Projection {
+                source,
+                binding,
+                outputs,
+            } => self.eval_projection(*source, *binding, outputs),
 
             ExprKind::FieldAccess { expr, field } => self.eval_field_access(*expr, *field),
 
@@ -147,10 +139,6 @@ impl<'a> IrEvaluator<'a> {
         }
     }
 
-    /// Evaluate a string interpolation expression
-    ///
-    /// All values are Expr, so we always build a concat_str expression.
-    /// This keeps everything lazy until execution at the sink.
     fn eval_string_interpolation(
         &mut self,
         parts: &[Symbol],
@@ -168,7 +156,6 @@ impl<'a> IrEvaluator<'a> {
                 let value = self.eval(exprs[i])?;
                 match value {
                     Value::Expr(e) => {
-                        // Cast to string for concatenation
                         concat_parts.push(e.cast(polars::prelude::DataType::String));
                     }
                     _ => {
@@ -178,39 +165,24 @@ impl<'a> IrEvaluator<'a> {
             }
         }
 
-        // Build concat_str expression
         let concat_expr = concat_str(concat_parts, "", true);
         Ok(Value::Expr(concat_expr))
     }
 
-    /// Evaluate a named record construction `TypeName { field = value, ... }`
-    ///
-    /// All field values are Expr, so we always build a lazy plan.
-    /// The type_ident provides the DefId for metadata lookup.
     fn eval_named_record(
         &mut self,
-        type_ident: &Ident,
+        expr_id: ExprId,
         ctor_args: &[Argument],
         fields: &[(Symbol, ExprId)],
     ) -> Result<Value, FossilError> {
         use crate::runtime::value::Plan;
 
-        // Get the DefId from the resolved type identifier
-        let type_def_id = match type_ident {
-            Ident::Resolved(def_id) => Some(*def_id),
-            Ident::Unresolved(_) => {
-                return Err(self.make_error("Unresolved type identifier in record construction"));
-            }
-        };
+        let type_def_id = self.resolutions.expr_defs.get(&expr_id).copied();
 
-        // Evaluate constructor arguments to Polars expressions
         let ctor_exprs: Vec<Expr> = if !ctor_args.is_empty() {
             let type_def_id = type_def_id.unwrap();
-            let type_def = self.gcx.definitions.get(type_def_id);
-            let type_name = type_def.name;
-
-            // Look up ctor param names from the type statement
-            let ctor_param_names = self.get_type_ctor_param_names(type_name);
+            let info = self.type_index.get(type_def_id);
+            let ctor_param_names = info.map(|i| &i.ctor_param_names[..]).unwrap_or(&[]);
 
             ctor_args
                 .iter()
@@ -237,7 +209,6 @@ impl<'a> IrEvaluator<'a> {
             return Ok(Value::Plan(plan));
         }
 
-        // Build select expressions from all fields
         let select_exprs: Vec<Expr> = fields
             .iter()
             .map(|(name, expr_id)| {
@@ -250,11 +221,13 @@ impl<'a> IrEvaluator<'a> {
             })
             .collect::<Result<Vec<_>, FossilError>>()?;
 
-        // Combine ctor_exprs + select_exprs for schema
-        let all_exprs: Vec<Expr> = ctor_exprs.iter().chain(select_exprs.iter()).cloned().collect();
+        let all_exprs: Vec<Expr> = ctor_exprs
+            .iter()
+            .chain(select_exprs.iter())
+            .cloned()
+            .collect();
         let schema = build_schema_from_exprs(&all_exprs);
 
-        // Store as pending transformation with type info
         Ok(Value::Plan(Plan {
             source: None,
             transforms: Vec::new(),
@@ -266,7 +239,6 @@ impl<'a> IrEvaluator<'a> {
         }))
     }
 
-    /// Evaluate a projection: source |> fn param -> outputs end
     fn eval_projection(
         &mut self,
         source: ExprId,
@@ -280,10 +252,8 @@ impl<'a> IrEvaluator<'a> {
             return Err(self.make_error("Projection source must be a Plan"));
         };
 
-        // Bind param to source plan (for field access in body)
         self.env.bind(binding, Value::Plan(plan.clone()));
 
-        // Evaluate each output
         for &output_expr in outputs {
             let output_val = self.eval(output_expr)?;
             if let Value::Plan(output_plan) = output_val {
@@ -300,23 +270,9 @@ impl<'a> IrEvaluator<'a> {
         Ok(Value::Plan(plan))
     }
 
-    /// Find a type statement by name, returning its TypeId
-    fn find_type_by_name(&self, type_name: Symbol) -> Option<crate::ir::TypeId> {
-        for &stmt_id in &self.ir.root {
-            let stmt = self.ir.stmts.get(stmt_id);
-            if let StmtKind::Type { name, ty, .. } = &stmt.kind {
-                if *name == type_name {
-                    return Some(*ty);
-                }
-            }
-        }
-        None
-    }
-
-    /// Check if we've exceeded the maximum recursion depth
     fn check_recursion_depth(&self) -> Result<(), FossilError> {
         if self.call_stack.depth() >= MAX_CALL_DEPTH {
-            Err(self.make_error_with_stack(format!(
+            Err(self.make_error(format!(
                 "Stack overflow: maximum recursion depth ({}) exceeded",
                 MAX_CALL_DEPTH
             )))
@@ -325,52 +281,41 @@ impl<'a> IrEvaluator<'a> {
         }
     }
 
-    /// Evaluate a function application
     fn eval_application(
         &mut self,
+        _app_expr_id: ExprId,
         callee: ExprId,
         args: &[Argument],
     ) -> Result<Value, FossilError> {
-        // Check recursion depth before proceeding
         self.check_recursion_depth()?;
 
         let callee_expr = self.ir.exprs.get(callee);
         let callee_loc = callee_expr.loc;
         let callee_val = self.eval(callee)?;
 
-        // Evaluate arguments (extracting values from Argument enum)
-        // TODO: Full named parameter support would require looking up param names
-        // from callee's signature and reordering. For now, we just use positional order.
         let arg_values: Vec<Value> = args
             .iter()
             .map(|arg| self.eval(arg.value()))
             .collect::<Result<Vec<_>, _>>()?;
 
         match callee_val {
-            Value::BuiltinFunction(def_id, func) => {
-                // Get function name for stack trace
+            Value::Function(def_id, func) => {
                 let def = self.gcx.definitions.get(def_id);
                 let function_name = self.gcx.interner.resolve(def.name).to_string();
 
-                // Push stack frame for builtin
                 self.call_stack.push(StackFrame {
                     function_name,
                     call_site: callee_loc,
                     def_id: Some(def_id),
                 });
 
-                // Call builtin function with type context
-                let mut ctx = RuntimeContext::new(self.gcx, self.ir);
+                let mut ctx = RuntimeContext::new(self.gcx, self.ir, self.type_index);
 
-                // Try to extract DefId from first argument's type (for functions like Entity::with_id)
-                // This handles cases with explicit type annotations
                 if !args.is_empty() {
-                    let first_arg_expr = self.ir.exprs.get(args[0].value());
-                    if let TypeRef::Known(arg_type_id) = first_arg_expr.ty {
+                    let first_arg_expr_id = args[0].value();
+                    if let Some(&arg_type_id) = self.typeck_results.expr_types.get(&first_arg_expr_id) {
                         let arg_type = self.ir.types.get(arg_type_id);
-
-                        // If it's a Named type, extract the DefId
-                        if let TypeKind::Named(Ident::Resolved(def_id)) = &arg_type.kind {
+                        if let TypeKind::Named(def_id) = &arg_type.kind {
                             ctx = ctx.with_type(*def_id);
                         }
                     }
@@ -378,7 +323,6 @@ impl<'a> IrEvaluator<'a> {
 
                 let result = func.call(arg_values, &ctx);
 
-                // Pop stack frame
                 self.call_stack.pop();
 
                 result
@@ -387,16 +331,17 @@ impl<'a> IrEvaluator<'a> {
             Value::RecordConstructor(ctor_def_id) => {
                 use crate::runtime::value::Plan;
 
-                // Get the constructor's definition to find the parent (type) DefId
                 let ctor_def = self.gcx.definitions.get(ctor_def_id);
-                let type_name = ctor_def.name;
-                // The parent DefId is the type's DefId (where metadata is stored)
                 let type_def_id = ctor_def.parent().unwrap_or(ctor_def_id);
 
-                // Find the type definition with this name in the IR
-                let field_names = self.get_record_field_names(type_name)?;
+                let info = self.type_index.get(type_def_id).ok_or_else(|| {
+                    self.make_error(format!(
+                        "Record type '{}' not found",
+                        self.gcx.interner.resolve(ctor_def.name)
+                    ))
+                })?;
+                let field_names = &info.field_names;
 
-                // Build the record by matching positional args with field names
                 if arg_values.len() != field_names.len() {
                     return Err(self.make_error(format!(
                         "Record constructor expects {} arguments, got {}",
@@ -405,7 +350,6 @@ impl<'a> IrEvaluator<'a> {
                     )));
                 }
 
-                // All values are Expr - build select expressions for lazy transformation
                 let select_exprs: Vec<Expr> = field_names
                     .iter()
                     .zip(arg_values)
@@ -418,10 +362,8 @@ impl<'a> IrEvaluator<'a> {
                     })
                     .collect();
 
-                // Build schema from expressions
                 let schema = build_schema_from_exprs(&select_exprs);
 
-                // Store expressions in the plan - they'll be applied to source by List::map
                 Ok(Value::Plan(Plan::pending(
                     select_exprs,
                     type_def_id,
@@ -433,17 +375,12 @@ impl<'a> IrEvaluator<'a> {
         }
     }
 
-    /// Evaluate field access (e.g., `row.field`)
-    ///
-    /// Returns Value::Expr(col("field")) for lazy column access.
-    /// The actual selection happens at sink time (e.g., Rdf::serialize).
     fn eval_field_access(&mut self, expr: ExprId, field: Symbol) -> Result<Value, FossilError> {
         let value = self.eval(expr)?;
         let field_name = self.gcx.interner.resolve(field);
 
         match value {
             Value::Plan(plan) => {
-                // Validate field exists in schema
                 if !plan.schema.contains(field_name) {
                     return Err(self.make_error(format!(
                         "Field '{}' not found in schema. Available: {:?}",
@@ -451,7 +388,7 @@ impl<'a> IrEvaluator<'a> {
                         plan.schema.iter_names().collect::<Vec<_>>()
                     )));
                 }
-                // Return lazy column expression
+
                 Ok(Value::Expr(col(field_name)))
             }
 
@@ -459,59 +396,15 @@ impl<'a> IrEvaluator<'a> {
         }
     }
 
-    /// Get the constructor parameter names for a type
-    fn get_type_ctor_param_names(&self, type_name: Symbol) -> Vec<Symbol> {
-        for &stmt_id in &self.ir.root {
-            let stmt = self.ir.stmts.get(stmt_id);
-            if let StmtKind::Type { name, ctor_params, .. } = &stmt.kind {
-                if *name == type_name {
-                    return ctor_params.iter().map(|p| p.name).collect();
-                }
-            }
-        }
-        vec![]
-    }
-
-    /// Get the field names for a record type by its name
-    fn get_record_field_names(&self, type_name: Symbol) -> Result<Vec<Symbol>, FossilError> {
-        let Some(ty_id) = self.find_type_by_name(type_name) else {
-            return Err(self.make_error(format!(
-                "Record type '{}' not found",
-                self.gcx.interner.resolve(type_name)
-            )));
-        };
-
-        let ty = self.ir.types.get(ty_id);
-        let TypeKind::Record(fields) = &ty.kind else {
-            return Err(self.make_error(format!(
-                "Type '{}' is not a record type",
-                self.gcx.interner.resolve(type_name)
-            )));
-        };
-
-        Ok(fields.field_names())
-    }
-
-    /// Helper to create runtime errors
     fn make_error(&self, msg: impl Into<String>) -> FossilError {
-        self.make_error_with_stack(msg)
-    }
-
-    /// Create a runtime error with the current call stack
-    fn make_error_with_stack(&self, msg: impl Into<String>) -> FossilError {
         FossilError::evaluation(msg.into(), Loc::generated())
     }
 }
 
-/// Build a schema from select expressions
-///
-/// Extracts field names from aliased expressions. Types are inferred as Unknown
-/// since the actual types come from the source data at runtime.
 fn build_schema_from_exprs(exprs: &[Expr]) -> Schema {
     let fields: Vec<_> = exprs
         .iter()
         .filter_map(|expr| {
-            // Extract alias name from expression
             if let Expr::Alias(_, name) = expr {
                 Some(Field::new(
                     name.clone(),

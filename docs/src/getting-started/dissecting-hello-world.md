@@ -3,25 +3,25 @@
 ```fossil
 type Input = csv!("people.csv")
 
-type Output = {
-    #[rdf(uri = "http://example.com/person/name")]
-    name: string,
-    
-    #[rdf(uri = "http://example.com/person/age")]
-    age: number,
-    
-    #[rdf(uri = "http://example.com/person/email")]
+@rdf(type = "http://xmlns.com/foaf/0.1/Person")
+type Output(id: string) do
+    @rdf(uri = "http://example.com/person/name")
+    name: string
+
+    @rdf(uri = "http://example.com/person/age")
+    age: int
+
+    @rdf(uri = "http://example.com/person/email")
     email: string
-}
+end
 
-let csv_to_rdf = fn(row) -> {
-    Output(row.name, row.age, row.name)
-        |> Entity::with_id("http://example.com/person/${row.name}")
+input
+|> each row -> Output("http://example.com/person/${row.name}") {
+    name = row.name,
+    age = row.age,
+    email = row.email
 }
-
-Input::load()
-|> List::map(csv_to_rdf)
-|> Rdf::serialize("results.ttl")
+|> Rdf.serialize("results.ttl")
 ```
 
 There are a number of things going on in the basic pipeline example so lets break them down one step at a time.
@@ -44,22 +44,17 @@ In this example, we define a type `Input` that represents the structure of a CSV
 > Providers can be distinguished from functions as they are suffixed with the bang symbol `!`.
 
 ```fossil
-{
-    #[rdf(uri = "http://example.com/person/name")]
-    name: string,
-    
-    #[rdf(uri = "http://example.com/person/age")]
-    age: number,
-    
-    #[rdf(uri = "http://example.com/person/email")]
-    email: string
-}
+do
+    @rdf(uri = "http://example.com/person/name")
+    name: string
+    ...
+end
 ```
 
 A record is a composite data structure that can be used to represent collections of fixed (in number) fields with possibly different data types each.
-The collection of fields is surrounded by curly braces `{}` and each is separated by a comma `,`.
+The collection of fields is surrounded by `do...end` keywords.
 Fields are defined using a name followed by a colon `:` and the type of the field.
-Fields can also be annotated with attributes, such as `#[rdf(uri = "...")]`, which can be used to provide additional information about the field.
+Fields can also be annotated with attributes, such as `@rdf(uri = "...")`, which can be used to provide additional information about the field.
 
 > Internally, type providers build the record type from the source file.
 
@@ -70,32 +65,30 @@ let
 `fossil` uses the `let` keyword to bind values for later use.
 
 ```fossil
-fn(row) -> { }
+each row -> ...
 ```
 
-Functions are a way to encapsulate a block of code that can be called multiple times.
-They are defined using the `fn` keyword followed by the parameters and the return type.
-
-> Function parameters can also be annotated with their types `fn(row: Row) -> { }`.
+The `each` keyword introduces a per-row iteration block within a pipe.
+It binds the current row to a name (here `row`) and produces an output expression for each row.
 
 ```fossil
-Output(row.name, row.age, row.name)
+Output("http://example.com/person/${row.name}") { name = row.name, ... }
 ```
 
 Constructors are a way to create new instances of a record type.
-
-> A constructor for `type Name = { name: string }` is `Name("John")`, which is equivalent to `let name: Name = {name = "John"}`. Constructors are just syntactic sugar.
+Constructor arguments (in parentheses) provide metadata like the subject IRI.
+Record fields (in braces) provide the data values.
 
 ```
 |>
 ```
 
-The pipe operator `|>` is used to chain functions together.
-It takes the output of the previous function and passes it as the first argument to the next function call.
+The pipe operator `|>` is used to chain operations together.
+It takes the output of the previous expression and passes it as input to the next operation.
 Hence, `var |> func` is equivalent to `func(var)`.
 This allows for a more functional programming style.
 
-> A pipeline is typically written as a sequence of functions, each in a separate line, with the preceding pipeline operator `|>`. Refer to the last three lines of the example on the top of this page.
+> A pipeline is typically written as a sequence of operations, each in a separate line, with the preceding pipeline operator `|>`. Refer to the last three lines of the example on the top of this page.
 
 ```fossil
 "http://example.com/person/${row.name}"
