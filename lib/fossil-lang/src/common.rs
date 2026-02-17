@@ -69,6 +69,19 @@ pub enum PrimitiveType {
     Bool,
 }
 
+impl PrimitiveType {
+    /// Convert to the canonical Polars DataType.
+    pub fn to_polars_dtype(self) -> polars::prelude::DataType {
+        use polars::prelude::DataType;
+        match self {
+            PrimitiveType::Int => DataType::Int64,
+            PrimitiveType::Float => DataType::Float64,
+            PrimitiveType::Bool => DataType::Boolean,
+            PrimitiveType::String => DataType::String,
+        }
+    }
+}
+
 impl From<polars::prelude::DataType> for PrimitiveType {
     fn from(value: polars::prelude::DataType) -> Self {
         use polars::prelude::DataType;

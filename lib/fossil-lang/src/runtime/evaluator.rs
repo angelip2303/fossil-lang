@@ -4,6 +4,7 @@ use polars::prelude::*;
 
 use crate::ast::Loc;
 use crate::context::{DefId, DefKind, Symbol};
+use crate::context::global::BuiltInFieldType;
 use crate::error::FossilError;
 use crate::ir::{Argument, ExprId, ExprKind, Ir, Resolutions, TypeIndex, TypeKind, TypeckResults};
 use crate::passes::GlobalContext;
@@ -232,7 +233,7 @@ impl<'a> IrEvaluator<'a> {
             .chain(select_exprs.iter())
             .cloned()
             .collect();
-        let schema = build_schema_from_exprs(&all_exprs);
+        let schema = build_schema(&all_exprs, type_def_id, self.gcx);
 
         Ok(Value::Plan(Plan {
             source: None,
@@ -369,7 +370,7 @@ impl<'a> IrEvaluator<'a> {
                     })
                     .collect();
 
-                let schema = build_schema_from_exprs(&select_exprs);
+                let schema = build_schema(&select_exprs, Some(type_def_id), self.gcx);
 
                 Ok(Value::Plan(Plan::pending(
                     select_exprs,
@@ -408,15 +409,36 @@ impl<'a> IrEvaluator<'a> {
     }
 }
 
-fn build_schema_from_exprs(exprs: &[Expr]) -> Schema {
+fn build_schema(
+    exprs: &[Expr],
+    type_def_id: Option<DefId>,
+    gcx: &GlobalContext,
+) -> Schema {
+    use std::collections::HashMap;
+
+    // Build name→DataType map from registered types if available
+    let type_map: HashMap<&str, DataType> = type_def_id
+        .and_then(|def_id| gcx.registered_types.get(&def_id))
+        .map(|fields| {
+            fields.iter().map(|(sym, ft)| {
+                let name = gcx.interner.resolve(*sym);
+                let prim = match ft {
+                    BuiltInFieldType::Required(p) | BuiltInFieldType::Optional(p) => *p,
+                };
+                (name, prim.to_polars_dtype())
+            }).collect()
+        })
+        .unwrap_or_default();
+
     let fields: Vec<_> = exprs
         .iter()
         .filter_map(|expr| {
             if let Expr::Alias(_, name) = expr {
-                Some(Field::new(
-                    name.clone(),
-                    DataType::Unknown(Default::default()),
-                ))
+                let dtype = type_map
+                    .get(name.as_str())
+                    .cloned()
+                    .unwrap_or(DataType::Unknown(Default::default()));
+                Some(Field::new(name.clone(), dtype))
             } else {
                 None
             }

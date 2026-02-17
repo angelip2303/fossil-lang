@@ -181,7 +181,13 @@ fn serialize_rdf(
                     && let Some(field_sym) = interner.lookup(field_name)
                     && let Some(field_info) = rdf_metadata.fields.get(&field_sym)
                 {
-                    selection.push(inner.as_ref().clone().alias(&field_info.uri));
+                    let expr = match field_info.primitive_type {
+                        Some(prim) if prim != PrimitiveType::String => {
+                            inner.as_ref().clone().cast(prim.to_polars_dtype())
+                        }
+                        _ => inner.as_ref().clone(),
+                    };
+                    selection.push(expr.alias(&field_info.uri));
                 }
             }
 

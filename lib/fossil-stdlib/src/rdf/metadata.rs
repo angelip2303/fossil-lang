@@ -26,6 +26,8 @@ pub struct RdfFieldInfo {
     /// XSD datatype IRI for typed literals (e.g. `xsd:integer`).
     /// `None` means the value is serialized as a simple literal.
     pub xsd_datatype: Option<String>,
+    /// The Fossil primitive type for this field, used for Polars cast coercion.
+    pub primitive_type: Option<PrimitiveType>,
 }
 
 #[derive(Debug, Clone, FromAttrs)]
@@ -122,7 +124,7 @@ impl RdfMetadata {
 
                 metadata.fields.insert(
                     *field_name,
-                    RdfFieldInfo { uri, xsd_datatype: None },
+                    RdfFieldInfo { uri, xsd_datatype: None, primitive_type: None },
                 );
             }
         }
@@ -143,6 +145,7 @@ impl RdfMetadata {
         for (sym, field_info) in &mut self.fields {
             if let Some(prim) = field_types.get(sym) {
                 field_info.xsd_datatype = primitive_to_xsd(*prim).map(|s| s.to_string());
+                field_info.primitive_type = Some(*prim);
             }
         }
     }

@@ -73,6 +73,21 @@ impl TypeChecker {
                         ctor_param_names: ctor_params.iter().map(|p| p.name).collect(),
                         field_names,
                     });
+
+                    // Populate registered_types for user-defined types (providers, etc.)
+                    // This makes registered_types the universal source of field type info.
+                    if !self.gcx.registered_types.contains_key(&def_id) {
+                        if let TypeKind::Record(fields) = &self.ir.types.get(*ty).kind {
+                            let field_types: Vec<_> = fields.fields.iter()
+                                .filter_map(|(sym, ty_id)| {
+                                    extract_field_type(&self.ir, *ty_id).map(|ft| (*sym, ft))
+                                })
+                                .collect();
+                            if !field_types.is_empty() {
+                                self.gcx.registered_types.insert(def_id, field_types);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -224,6 +239,19 @@ impl TypeChecker {
         }
 
         subst.apply(poly.ty, &mut self.ir)
+    }
+}
+
+/// Extract BuiltInFieldType from an IR type node.
+/// Returns None for non-primitive types (e.g. functions, records, unresolved).
+fn extract_field_type(ir: &Ir, ty_id: TypeId) -> Option<BuiltInFieldType> {
+    match &ir.types.get(ty_id).kind {
+        TypeKind::Primitive(p) => Some(BuiltInFieldType::Required(*p)),
+        TypeKind::Optional(inner_id) => match &ir.types.get(*inner_id).kind {
+            TypeKind::Primitive(p) => Some(BuiltInFieldType::Optional(*p)),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
