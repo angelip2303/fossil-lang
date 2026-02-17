@@ -11,10 +11,7 @@ let data = csv!("lib/fossil-stdlib/examples/end-to-end/people.csv")
 // end
 
 @rdf(base = "http://example.com/person/")
-type Person(id: string) = shex!(
-    "lib/fossil-stdlib/examples/end-to-end/person.shex",
-    shape: "PersonShape"
-)
+type Person(id: string) = shex!("lib/fossil-stdlib/examples/end-to-end/person.shex", shape: "PersonShape")
 
 let mapped = data
     |> each row -> Person(row.email) { name = row.name, age = row.age }

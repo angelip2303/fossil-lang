@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use polars::prelude::*;
 
 use crate::ast::Loc;
@@ -5,6 +7,7 @@ use crate::context::{DefId, DefKind, Symbol};
 use crate::error::FossilError;
 use crate::ir::{Argument, ExprId, ExprKind, Ir, Resolutions, TypeIndex, TypeKind, TypeckResults};
 use crate::passes::GlobalContext;
+use crate::runtime::output::OutputResolver;
 use crate::runtime::value::Value;
 use crate::traits::function::RuntimeContext;
 
@@ -46,6 +49,7 @@ pub struct IrEvaluator<'a> {
     typeck_results: &'a TypeckResults,
     env: IrEnvironment,
     call_stack: CallStack,
+    output_resolver: Arc<dyn OutputResolver>,
 }
 
 impl<'a> IrEvaluator<'a> {
@@ -56,6 +60,7 @@ impl<'a> IrEvaluator<'a> {
         resolutions: &'a Resolutions,
         typeck_results: &'a TypeckResults,
         env: IrEnvironment,
+        output_resolver: Arc<dyn OutputResolver>,
     ) -> Self {
         Self {
             ir,
@@ -65,6 +70,7 @@ impl<'a> IrEvaluator<'a> {
             typeck_results,
             env,
             call_stack: Default::default(),
+            output_resolver,
         }
     }
 
@@ -309,7 +315,8 @@ impl<'a> IrEvaluator<'a> {
                     def_id: Some(def_id),
                 });
 
-                let mut ctx = RuntimeContext::new(self.gcx, self.ir, self.type_index);
+                let mut ctx = RuntimeContext::new(self.gcx, self.ir, self.type_index)
+                    .with_output_resolver(self.output_resolver.clone());
 
                 if !args.is_empty() {
                     let first_arg_expr_id = args[0].value();

@@ -5,7 +5,7 @@ use fossil_lang::error::FossilError;
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::traits::provider::{FieldSpec, FieldType};
 
-use polars::prelude::{PlPath, PlPathRef, Schema};
+use polars::prelude::{CloudScheme, PlPath, PlPathRef, Schema};
 
 pub fn lookup_type_id(name: &str, gcx: &GlobalContext) -> Option<DefId> {
     gcx.interner.lookup(name).and_then(|sym| {
@@ -34,7 +34,17 @@ pub fn validate_path(path: PlPathRef, loc: Loc) -> Result<(), FossilError> {
             }
             Ok(())
         }
-        PlPathRef::Cloud(_cloud) => todo!("Cloud path validation not implemented"),
+        PlPathRef::Cloud(url) => match url.scheme() {
+            CloudScheme::S3 | CloudScheme::S3a
+            | CloudScheme::Gs | CloudScheme::Gcs
+            | CloudScheme::Az | CloudScheme::Azure
+            | CloudScheme::Abfs | CloudScheme::Abfss
+            | CloudScheme::Adl => Ok(()),
+            other => Err(FossilError::data_error(
+                format!("Unsupported cloud storage scheme '{:?}'. Supported: s3://, gs://, az://, abfss://", other),
+                loc,
+            )),
+        }
     }
 }
 

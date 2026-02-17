@@ -1,6 +1,4 @@
-use std::fs::File;
-use std::io::BufWriter;
-use std::path::PathBuf;
+use std::io::Write;
 
 use oxrdf::{BlankNode, GraphNameRef, Literal, NamedNode, NamedOrBlankNode, QuadRef, Term};
 use oxrdfio::{RdfFormat, RdfSerializer, WriterQuadSerializer};
@@ -109,15 +107,13 @@ fn parse_object(s: &str) -> Result<Term, PolarsError> {
 }
 
 pub struct RdfBatchWriter {
-    serializer: WriterQuadSerializer<BufWriter<File>>,
+    serializer: WriterQuadSerializer<Box<dyn Write>>,
 }
 
 impl RdfBatchWriter {
-    pub fn new(path: PathBuf, format: RdfFormat) -> std::io::Result<Self> {
-        let file = File::create(path)?;
-        let writer = BufWriter::with_capacity(256 * 1024, file);
+    pub fn new(writer: Box<dyn Write>, format: RdfFormat) -> Self {
         let serializer = RdfSerializer::from_format(format).for_writer(writer);
-        Ok(Self { serializer })
+        Self { serializer }
     }
 
     /// Stream a DataFrame batch directly to the RDF file
@@ -217,10 +213,9 @@ impl RdfBatchWriter {
             .map_err(|_| PolarsError::ComputeError("Serialization failed".into()))
     }
 
-    pub fn finish(self) -> PolarsResult<()> {
+    pub fn finish(self) -> PolarsResult<Box<dyn Write>> {
         self.serializer
             .finish()
-            .map_err(|_| PolarsError::ComputeError("Failed to finish RDF file".into()))?;
-        Ok(())
+            .map_err(|_| PolarsError::ComputeError("Failed to finish RDF file".into()))
     }
 }

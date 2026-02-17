@@ -13,6 +13,7 @@ use crate::passes::{
 #[derive(Debug, Clone)]
 pub enum CompilerInput {
     File(PathBuf),
+    Source { name: String, content: String },
 }
 
 /// Result of compilation including the program and any warnings
@@ -49,18 +50,21 @@ impl Compiler {
 
     pub fn compile(&self, input: CompilerInput) -> Result<CompileResult, FossilErrors> {
         match input {
-            CompilerInput::File(path) => self.compile_file(path),
+            CompilerInput::File(path) => {
+                let msg = format!("Failed to read file '{}'", path.display());
+                let loc = Loc::generated();
+                let src =
+                    read_to_string(&path).map_err(|_| FossilError::internal("io", msg, loc))?;
+                self.compile_source(&src)
+            }
+            CompilerInput::Source { content, .. } => self.compile_source(&content),
         }
     }
 
-    fn compile_file(&self, path: PathBuf) -> Result<CompileResult, FossilErrors> {
-        let msg = format!("Failed to read file '{}'", path.display());
-        let loc = Loc::generated();
-        let src = read_to_string(&path).map_err(|_| FossilError::internal("io", msg, loc))?;
-
+    fn compile_source(&self, src: &str) -> Result<CompileResult, FossilErrors> {
         let gcx = self.gcx.clone().unwrap_or_default();
 
-        let parsed = Parser::parse_with_context(&src, self.source_id, gcx)?;
+        let parsed = Parser::parse_with_context(src, self.source_id, gcx)?;
         let expand_result = ProviderExpander::new((parsed.ast, parsed.gcx)).expand()?;
         let ty = extract_type_metadata(&expand_result.ast);
         let ir = passes::convert::ast_to_ir(expand_result.ast);

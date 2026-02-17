@@ -1,0 +1,15 @@
+let data = csv!("az://keasy-dev/people.csv")
+
+@rdf(base = "http://example.com/person/")
+type Person(id: string) do
+    @rdf(uri = "http://xmlns.com/foaf/0.1/name")
+    @validate(min_length = 2)
+    name: string
+
+    @rdf(uri = "http://xmlns.com/foaf/0.1/age")
+    age: int
+end
+
+data
+|> each row -> Person(row.email) { name = row.name, age = row.age }
+|> Rdf.serialize("az://keasy-dev/result.nq")

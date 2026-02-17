@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use crate::context::DefId;
 use crate::error::FossilError;
 use crate::ir::{Ir, Polytype, TypeIndex, TypeVar};
 use crate::passes::GlobalContext;
+use crate::runtime::output::{LocalOutputResolver, OutputResolver};
 use crate::runtime::value::Value;
 
 pub struct RuntimeContext<'a> {
@@ -9,6 +12,7 @@ pub struct RuntimeContext<'a> {
     pub ir: &'a Ir,
     pub type_index: &'a TypeIndex,
     pub current_type: Option<DefId>,
+    pub output_resolver: Arc<dyn OutputResolver>,
 }
 
 impl<'a> RuntimeContext<'a> {
@@ -18,11 +22,17 @@ impl<'a> RuntimeContext<'a> {
             ir,
             type_index,
             current_type: None,
+            output_resolver: Arc::new(LocalOutputResolver),
         }
     }
 
     pub fn with_type(mut self, type_def_id: DefId) -> Self {
         self.current_type = Some(type_def_id);
+        self
+    }
+
+    pub fn with_output_resolver(mut self, resolver: Arc<dyn OutputResolver>) -> Self {
+        self.output_resolver = resolver;
         self
     }
 }

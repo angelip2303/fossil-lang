@@ -4,5 +4,5 @@ PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 
 :PersonShape {
     foaf:name xsd:string MinLength 2 ;
-    foaf:age xsd:integer
+    foaf:age  xsd:integer
 }

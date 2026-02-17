@@ -2,7 +2,7 @@ pub mod metadata;
 pub mod serializer;
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::io::Write;
 pub use metadata::{RdfFieldInfo, RdfMetadata, RdfMetadataResult};
 pub use serializer::RdfBatchWriter;
 
@@ -86,12 +86,11 @@ fn serialize_rdf(
 ) -> Result<Value, FossilError> {
     let interner = ctx.gcx.interner.clone();
 
-    let path = PathBuf::from(destination);
+    let dest = ctx.output_resolver.resolve_output(destination)?;
 
-    let ext = path
+    let ext = dest
         .extension()
-        .map(|e| e.to_string_lossy().to_string())
-        .unwrap_or_else(|| "ttl".to_string()); // TODO: here we should raise error?
+        .unwrap_or_else(|| "ttl".to_string());
 
     let format =
         RdfFormat::from_extension(&ext).ok_or_else(|| RdfError::UnsupportedFormat(ext.clone()))?;
@@ -165,20 +164,19 @@ fn serialize_rdf(
         })
         .collect();
 
-    serialize_oxigraph(path, format, plan, &output_configs, batch_size)
+    serialize_oxigraph(dest.writer, format, plan, &output_configs, batch_size)
 }
 
 fn serialize_oxigraph(
-    path: PathBuf,
+    writer: Box<dyn Write + Send>,
     format: RdfFormat,
     plan: &Plan,
     output_configs: &[(Vec<Expr>, RdfMetadata)],
     batch_size: usize,
 ) -> Result<Value, FossilError> {
-    let writer =
-        RdfBatchWriter::new(path, format).map_err(|e| RdfError::CreateWriter(e.to_string()))?;
+    let rdf_writer = RdfBatchWriter::new(writer, format);
 
-    let writer = RefCell::new(writer);
+    let rdf_writer = RefCell::new(rdf_writer);
 
     let executor = ChunkedExecutor::new(batch_size);
     executor
@@ -200,15 +198,19 @@ fn serialize_oxigraph(
                         )
                     })?;
 
-                writer.borrow_mut().write_batch(&rdf_batch)?;
+                rdf_writer.borrow_mut().write_batch(&rdf_batch)?;
             }
             Ok(())
         })
         .map_err(|e| RdfError::Write(e.to_string()))?;
 
-    writer
+    let mut writer = rdf_writer
         .into_inner()
         .finish()
+        .map_err(|e| RdfError::Finalize(e.to_string()))?;
+
+    writer
+        .flush()
         .map_err(|e| RdfError::Finalize(e.to_string()))?;
 
     Ok(Value::Unit)

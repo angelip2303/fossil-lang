@@ -1,7 +1,5 @@
 use std::cell::RefCell;
-use std::fs::File;
-use std::io::BufWriter;
-use std::path::PathBuf;
+use std::io::Write;
 
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
@@ -29,7 +27,7 @@ impl FunctionImpl for ReportCsvFunction {
         Polytype::poly(vec![t_var], ir.fn_type(vec![t_ty, filename_ty], output_ty))
     }
 
-    fn call(&self, args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, FossilError> {
+    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
         let loc = fossil_lang::ast::Loc::generated();
         let mut args_iter = args.into_iter();
 
@@ -49,18 +47,16 @@ impl FunctionImpl for ReportCsvFunction {
             _ => return Err(FossilError::evaluation(String::from("Report.csv expects a Plan"), loc)),
         };
 
-        write_csv(&plan, &filename)
+        let dest = ctx.output_resolver.resolve_output(&filename)?;
+        write_csv(&plan, dest.writer)
     }
 }
 
-fn write_csv(plan: &Plan, destination: &str) -> Result<Value, FossilError> {
+fn write_csv(plan: &Plan, writer: Box<dyn Write + Send>) -> Result<Value, FossilError> {
     let loc = fossil_lang::ast::Loc::generated();
-    let path = PathBuf::from(destination);
     let batch_size = estimate_batch_size_from_plan(plan);
 
-    let file = File::create(&path)
-        .map_err(|e| FossilError::evaluation(format!("Failed to create {}: {}", destination, e), loc))?;
-    let writer = RefCell::new(BufWriter::new(file));
+    let writer = RefCell::new(writer);
     let header_written = RefCell::new(false);
 
     let executor = ChunkedExecutor::new(batch_size);

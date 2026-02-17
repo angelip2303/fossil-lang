@@ -20,11 +20,11 @@ categories = ["database"]
 keywords = [""]
 authors = ["Ángel Iglesias Préstamo <angel.iglesias.prestamo@gmail.com>"]
 edition = "2024"
-rust-version = "1.88.0"
+rust-version = "1.90.0"
 
 [workspace.dependencies]
 # external dependencies
-polars = {version = "0.52.0", features = ["lazy", "timezones", "new_streaming", "parquet", "concat_str", "strings", "csv"]}
+polars = {version = "0.52.0", features = ["lazy", "timezones", "new_streaming", "parquet", "concat_str", "strings", "csv", "cloud", "aws", "azure", "gcp"]}
 thiserror = "2.0.18"
 
 # internal dependencies
