@@ -1,15 +1,31 @@
 use std::collections::HashMap;
 
 use fossil_lang::ast::Loc;
+use fossil_lang::common::PrimitiveType;
 use fossil_lang::context::{Interner, Symbol, TypeMetadata};
 use fossil_lang::error::{FossilWarning, FossilWarnings};
 use fossil_macros::FromAttrs;
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
+/// Map a Fossil PrimitiveType to its canonical XSD datatype IRI.
+///
+/// Returns `None` for `String` since RDF simple literals are implicitly `xsd:string`.
+pub fn primitive_to_xsd(prim: PrimitiveType) -> Option<&'static str> {
+    match prim {
+        PrimitiveType::Int => Some("http://www.w3.org/2001/XMLSchema#integer"),
+        PrimitiveType::Float => Some("http://www.w3.org/2001/XMLSchema#double"),
+        PrimitiveType::Bool => Some("http://www.w3.org/2001/XMLSchema#boolean"),
+        PrimitiveType::String => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RdfFieldInfo {
     pub uri: String,
+    /// XSD datatype IRI for typed literals (e.g. `xsd:integer`).
+    /// `None` means the value is serialized as a simple literal.
+    pub xsd_datatype: Option<String>,
 }
 
 #[derive(Debug, Clone, FromAttrs)]
@@ -104,10 +120,9 @@ impl RdfMetadata {
                     }
                 }
 
-                // Default to String, can be overridden or inferred later
                 metadata.fields.insert(
                     *field_name,
-                    RdfFieldInfo { uri },
+                    RdfFieldInfo { uri, xsd_datatype: None },
                 );
             }
         }
@@ -117,5 +132,18 @@ impl RdfMetadata {
 
     pub fn has_metadata(&self) -> bool {
         self.rdf_type.is_some() || !self.fields.is_empty()
+    }
+
+    /// Build a map from predicate URI → XSD datatype IRI for all fields
+    /// that have a typed literal annotation.
+    pub fn xsd_type_map(&self) -> HashMap<String, String> {
+        self.fields
+            .values()
+            .filter_map(|f| {
+                f.xsd_datatype
+                    .as_ref()
+                    .map(|xsd| (f.uri.clone(), xsd.clone()))
+            })
+            .collect()
     }
 }

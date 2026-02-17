@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::io::Write;
 
-use oxrdf::{BlankNode, GraphNameRef, Literal, NamedNode, NamedOrBlankNode, QuadRef, Term};
+use oxrdf::{BlankNode, GraphNameRef, Literal, NamedNode, NamedNodeRef, NamedOrBlankNode, QuadRef, Term};
 use oxrdfio::{RdfFormat, RdfSerializer, WriterQuadSerializer};
 use polars::prelude::*;
 
@@ -79,7 +80,7 @@ fn parse_predicate(s: &str) -> Result<NamedNode, PolarsError> {
 }
 
 #[inline]
-fn parse_object(s: &str) -> Result<Term, PolarsError> {
+fn parse_object(s: &str, xsd_type: Option<NamedNodeRef<'_>>) -> Result<Term, PolarsError> {
     if let Some(id) = s.strip_prefix(BNODE_PREFIX) {
         let bnode = BlankNode::new(id)
             .map_err(|_| PolarsError::ComputeError(format!("Invalid blank node: {s}").into()))?;
@@ -103,7 +104,10 @@ fn parse_object(s: &str) -> Result<Term, PolarsError> {
         return Ok(node.into());
     }
 
-    Ok(Literal::new_simple_literal(s).into())
+    match xsd_type {
+        Some(dt) => Ok(Literal::new_typed_literal(s, dt).into()),
+        None => Ok(Literal::new_simple_literal(s).into()),
+    }
 }
 
 pub struct RdfBatchWriter {
@@ -118,12 +122,19 @@ impl RdfBatchWriter {
 
     /// Stream a DataFrame batch directly to the RDF file
     ///
+    /// `xsd_types` maps predicate URI → XSD datatype IRI for typed literals.
+    /// Columns whose predicate is not in the map are serialized as simple literals.
+    ///
     /// Optimizations:
     /// - Pre-filter rows with null subjects (columnar operation)
     /// - Subjects parsed once and reused across all predicate columns
     /// - Predicates parsed once per column (they're constant)
     /// - Zero-copy quad serialization using QuadRef
-    pub fn write_batch(&mut self, batch: &DataFrame) -> PolarsResult<()> {
+    pub fn write_batch(
+        &mut self,
+        batch: &DataFrame,
+        xsd_types: &HashMap<String, String>,
+    ) -> PolarsResult<()> {
         // Pre-filter: drop rows where subject is null
         // This is a columnar operation - removes the null check from the hot loop
         let filtered = batch
@@ -153,16 +164,16 @@ impl RdfBatchWriter {
             vec![ParsedGraph::Default; filtered.height()]
         };
 
+        // rdf:type values are always URIs — no XSD datatype needed
         if let Ok(type_col) = filtered.column("_type") {
             let types = type_col.cast(&DataType::String)?;
             let types = types.str()?;
             let pred = parse_predicate(RDF_TYPE)?;
 
-            // Subject guaranteed non-null, only check object
             for ((subj, graph), obj) in parsed_subjects.iter().zip(parsed_graphs.iter()).zip(types.iter()) {
                 if let Some(obj) = obj {
                     let subj_ref = subj.as_ref();
-                    self.write_quad_parsed(&subj_ref, &pred, obj, graph)?;
+                    self.write_quad_parsed(&subj_ref, &pred, obj, graph, None)?;
                 }
             }
         }
@@ -179,14 +190,17 @@ impl RdfBatchWriter {
 
         for name in &predicate_cols {
             let pred = parse_predicate(name)?;
+            // Resolve XSD type once per column — it's constant for all rows
+            let xsd_ref = xsd_types
+                .get(name.as_str())
+                .map(|uri| NamedNodeRef::new_unchecked(uri.as_str()));
             let objects = filtered.column(name.as_str())?.cast(&DataType::String)?;
             let objects = objects.str()?;
 
-            // Subject guaranteed non-null, only check object
             for ((subj, graph), obj) in parsed_subjects.iter().zip(parsed_graphs.iter()).zip(objects.iter()) {
                 if let Some(obj) = obj {
                     let subj_ref = subj.as_ref();
-                    self.write_quad_parsed(&subj_ref, &pred, obj, graph)?;
+                    self.write_quad_parsed(&subj_ref, &pred, obj, graph, xsd_ref)?;
                 }
             }
         }
@@ -197,6 +211,7 @@ impl RdfBatchWriter {
     /// Write a quad with pre-parsed subject and graph
     ///
     /// Uses QuadRef to avoid cloning subject/predicate strings - only references are passed.
+    /// When `xsd_type` is provided, non-URI/non-bnode objects become typed literals.
     #[inline]
     fn write_quad_parsed(
         &mut self,
@@ -204,8 +219,9 @@ impl RdfBatchWriter {
         pred: &NamedNode,
         obj: &str,
         graph: &ParsedGraph,
+        xsd_type: Option<NamedNodeRef<'_>>,
     ) -> PolarsResult<()> {
-        let obj = parse_object(obj)?;
+        let obj = parse_object(obj, xsd_type)?;
         // Use QuadRef::new with references - no string cloning
         let quad = QuadRef::new(subj, pred, &obj, graph.as_ref());
         self.serializer

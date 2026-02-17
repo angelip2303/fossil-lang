@@ -6,6 +6,7 @@ use std::io::Write;
 pub use metadata::{RdfFieldInfo, RdfMetadata, RdfMetadataResult};
 pub use serializer::RdfBatchWriter;
 
+use fossil_lang::common::PrimitiveType;
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
@@ -13,6 +14,29 @@ use fossil_lang::runtime::chunked_executor::{ChunkedExecutor, estimate_batch_siz
 use fossil_lang::runtime::value::{Plan, Value};
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 
+use metadata::primitive_to_xsd;
+
+/// Safely convert a Polars `DataType` to a Fossil `PrimitiveType`.
+///
+/// Returns `None` for types that have no Fossil equivalent (e.g. `Unknown`, `Date`),
+/// instead of panicking like `PrimitiveType::from(DataType)`.
+fn try_primitive(dtype: &DataType) -> Option<PrimitiveType> {
+    match dtype {
+        DataType::Boolean => Some(PrimitiveType::Bool),
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::Int128
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64 => Some(PrimitiveType::Int),
+        DataType::Float32 | DataType::Float64 => Some(PrimitiveType::Float),
+        DataType::String => Some(PrimitiveType::String),
+        _ => None,
+    }
+}
 use oxrdfio::RdfFormat;
 use polars::prelude::*;
 use thiserror::Error;
@@ -125,7 +149,7 @@ fn serialize_rdf(
                 }
             }
 
-            let rdf_metadata = rdf_result
+            let mut rdf_metadata = rdf_result
                 .map(|r| r.metadata)
                 .filter(|m| m.has_metadata())
                 .unwrap_or_default();
@@ -154,8 +178,17 @@ fn serialize_rdf(
             for transform_expr in &output_spec.select_exprs {
                 if let Expr::Alias(inner, field_name) = transform_expr
                     && let Some(field_sym) = interner.lookup(field_name)
-                    && let Some(field_info) = rdf_metadata.fields.get(&field_sym)
+                    && let Some(field_info) = rdf_metadata.fields.get_mut(&field_sym)
                 {
+                    // Resolve XSD datatype from the schema's Polars type (safe — no panic)
+                    if let Some(dtype) = output_spec.schema.get(field_name) {
+                        if let Some(prim) = try_primitive(dtype) {
+                            if let Some(xsd_uri) = primitive_to_xsd(prim) {
+                                field_info.xsd_datatype = Some(xsd_uri.to_string());
+                            }
+                        }
+                    }
+
                     combined_selection.push(inner.as_ref().clone().alias(&field_info.uri));
                 }
             }
@@ -183,10 +216,12 @@ fn serialize_oxigraph(
         .execute_plan_batched(plan, |batch| {
             let lazy_batch = batch.clone().lazy();
 
-            for (combined_selection, _rdf_metadata) in output_configs {
+            for (combined_selection, rdf_metadata) in output_configs {
                 if combined_selection.is_empty() {
                     continue;
                 }
+
+                let xsd_types = rdf_metadata.xsd_type_map();
 
                 let rdf_batch = lazy_batch
                     .clone()
@@ -198,7 +233,7 @@ fn serialize_oxigraph(
                         )
                     })?;
 
-                rdf_writer.borrow_mut().write_batch(&rdf_batch)?;
+                rdf_writer.borrow_mut().write_batch(&rdf_batch, &xsd_types)?;
             }
             Ok(())
         })
