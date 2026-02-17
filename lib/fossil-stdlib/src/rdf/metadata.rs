@@ -134,8 +134,24 @@ impl RdfMetadata {
         self.rdf_type.is_some() || !self.fields.is_empty()
     }
 
+    /// Resolve XSD datatype annotations for all fields using Fossil's type information.
+    ///
+    /// Each field's `xsd_datatype` is set to the canonical XSD IRI for its `PrimitiveType`.
+    /// Fields whose symbol isn't in `field_types` (or whose primitive maps to `None`,
+    /// like `String`) are left as simple literals.
+    pub fn resolve_xsd_types(&mut self, field_types: &HashMap<Symbol, PrimitiveType>) {
+        for (sym, field_info) in &mut self.fields {
+            if let Some(prim) = field_types.get(sym) {
+                field_info.xsd_datatype = primitive_to_xsd(*prim).map(|s| s.to_string());
+            }
+        }
+    }
+
     /// Build a map from predicate URI → XSD datatype IRI for all fields
     /// that have a typed literal annotation.
+    ///
+    /// Intended to be called once after `resolve_xsd_types` and passed
+    /// to the batch serializer.
     pub fn xsd_type_map(&self) -> HashMap<String, String> {
         self.fields
             .values()

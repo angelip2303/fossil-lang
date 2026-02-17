@@ -2,11 +2,14 @@ pub mod metadata;
 pub mod serializer;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::Write;
 pub use metadata::{RdfFieldInfo, RdfMetadata, RdfMetadataResult};
 pub use serializer::RdfBatchWriter;
 
 use fossil_lang::common::PrimitiveType;
+use fossil_lang::context::global::BuiltInFieldType;
+use fossil_lang::context::Symbol;
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
@@ -14,29 +17,6 @@ use fossil_lang::runtime::chunked_executor::{ChunkedExecutor, estimate_batch_siz
 use fossil_lang::runtime::value::{Plan, Value};
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 
-use metadata::primitive_to_xsd;
-
-/// Safely convert a Polars `DataType` to a Fossil `PrimitiveType`.
-///
-/// Returns `None` for types that have no Fossil equivalent (e.g. `Unknown`, `Date`),
-/// instead of panicking like `PrimitiveType::from(DataType)`.
-fn try_primitive(dtype: &DataType) -> Option<PrimitiveType> {
-    match dtype {
-        DataType::Boolean => Some(PrimitiveType::Bool),
-        DataType::Int8
-        | DataType::Int16
-        | DataType::Int32
-        | DataType::Int64
-        | DataType::Int128
-        | DataType::UInt8
-        | DataType::UInt16
-        | DataType::UInt32
-        | DataType::UInt64 => Some(PrimitiveType::Int),
-        DataType::Float32 | DataType::Float64 => Some(PrimitiveType::Float),
-        DataType::String => Some(PrimitiveType::String),
-        _ => None,
-    }
-}
 use oxrdfio::RdfFormat;
 use polars::prelude::*;
 use thiserror::Error;
@@ -66,6 +46,13 @@ pub enum RdfError {
 impl From<RdfError> for FossilError {
     fn from(err: RdfError) -> Self {
         FossilError::evaluation(err.to_string(), fossil_lang::ast::Loc::generated())
+    }
+}
+
+/// Extract the `PrimitiveType` from a `BuiltInFieldType`, discarding optionality.
+fn primitive_of(ft: &BuiltInFieldType) -> PrimitiveType {
+    match ft {
+        BuiltInFieldType::Required(p) | BuiltInFieldType::Optional(p) => *p,
     }
 }
 
@@ -121,8 +108,14 @@ fn serialize_rdf(
 
     let batch_size = estimate_batch_size_from_plan(plan);
 
-    // Prepare combined selections for each output
-    // Each selection combines: @id meta-field + rdf:type + predicate columns
+    // Phase 1: Build combined selections and XSD type maps for each output type.
+    //
+    // For each output we:
+    //   1. Extract RDF metadata (predicates, rdf:type, base) from type attributes
+    //   2. Resolve XSD datatypes from Fossil's type registry (the plan schema
+    //      only contains DataType::Unknown, so it can't be used)
+    //   3. Build the Polars selection: _subject, _graph, _type, predicate columns
+    //   4. Pre-compute the XSD type map (predicate URI → XSD IRI) once
     let output_configs: Vec<_> = plan
         .outputs
         .iter()
@@ -130,6 +123,7 @@ fn serialize_rdf(
             let type_name = ctx.gcx.definitions.get(output_spec.type_def_id).name;
             let type_name_str = interner.resolve(type_name);
 
+            // 1. Extract RDF metadata from @rdf attributes
             let rdf_result = ctx
                 .gcx
                 .type_metadata
@@ -142,7 +136,6 @@ fn serialize_rdf(
                     )
                 });
 
-            // Log any warnings (at runtime, we can't use ariadne)
             if let Some(ref result) = rdf_result {
                 for warning in &result.warnings.0 {
                     eprintln!("warning: {:?}", warning);
@@ -154,49 +147,52 @@ fn serialize_rdf(
                 .filter(|m| m.has_metadata())
                 .unwrap_or_default();
 
-            let mut combined_selection: Vec<Expr> = Vec::new();
+            // 2. Resolve XSD datatypes from Fossil's type registry
+            if let Some(registered) = ctx.gcx.registered_types.get(&output_spec.type_def_id) {
+                let field_types: HashMap<Symbol, PrimitiveType> = registered
+                    .iter()
+                    .map(|(sym, ft)| (*sym, primitive_of(ft)))
+                    .collect();
+                rdf_metadata.resolve_xsd_types(&field_types);
+            }
 
-            // 1. Generate _subject and _graph columns from constructor arguments (positional)
-            // Position 0 = subject, Position 1 = graph (optional)
+            // 3. Build Polars selection
+            let mut selection: Vec<Expr> = Vec::new();
+
             if let Some(subject_expr) = output_spec.ctor_args.first() {
                 let subject_expr = if let Some(ref base) = rdf_metadata.base {
                     concat_str([lit(base.as_str()), subject_expr.clone()], "", true)
                 } else {
                     subject_expr.clone()
                 };
-                combined_selection.push(subject_expr.alias("_subject"));
+                selection.push(subject_expr.alias("_subject"));
             }
 
             if let Some(graph_expr) = output_spec.ctor_args.get(1) {
-                combined_selection.push(graph_expr.clone().alias("_graph"));
+                selection.push(graph_expr.clone().alias("_graph"));
             }
 
             if let Some(ref rdf_type) = rdf_metadata.rdf_type {
-                combined_selection.push(lit(rdf_type.as_str()).alias("_type"));
+                selection.push(lit(rdf_type.as_str()).alias("_type"));
             }
 
             for transform_expr in &output_spec.select_exprs {
                 if let Expr::Alias(inner, field_name) = transform_expr
                     && let Some(field_sym) = interner.lookup(field_name)
-                    && let Some(field_info) = rdf_metadata.fields.get_mut(&field_sym)
+                    && let Some(field_info) = rdf_metadata.fields.get(&field_sym)
                 {
-                    // Resolve XSD datatype from the schema's Polars type (safe — no panic)
-                    if let Some(dtype) = output_spec.schema.get(field_name) {
-                        if let Some(prim) = try_primitive(dtype) {
-                            if let Some(xsd_uri) = primitive_to_xsd(prim) {
-                                field_info.xsd_datatype = Some(xsd_uri.to_string());
-                            }
-                        }
-                    }
-
-                    combined_selection.push(inner.as_ref().clone().alias(&field_info.uri));
+                    selection.push(inner.as_ref().clone().alias(&field_info.uri));
                 }
             }
 
-            (combined_selection, rdf_metadata)
+            // 4. Pre-compute XSD type map (done once, reused across all batches)
+            let xsd_types = rdf_metadata.xsd_type_map();
+
+            (selection, xsd_types)
         })
         .collect();
 
+    // Phase 2: Stream batches through the RDF serializer
     serialize_oxigraph(dest.writer, format, plan, &output_configs, batch_size)
 }
 
@@ -204,28 +200,24 @@ fn serialize_oxigraph(
     writer: Box<dyn Write + Send>,
     format: RdfFormat,
     plan: &Plan,
-    output_configs: &[(Vec<Expr>, RdfMetadata)],
+    output_configs: &[(Vec<Expr>, HashMap<String, String>)],
     batch_size: usize,
 ) -> Result<Value, FossilError> {
-    let rdf_writer = RdfBatchWriter::new(writer, format);
-
-    let rdf_writer = RefCell::new(rdf_writer);
+    let rdf_writer = RefCell::new(RdfBatchWriter::new(writer, format));
 
     let executor = ChunkedExecutor::new(batch_size);
     executor
         .execute_plan_batched(plan, |batch| {
             let lazy_batch = batch.clone().lazy();
 
-            for (combined_selection, rdf_metadata) in output_configs {
-                if combined_selection.is_empty() {
+            for (selection, xsd_types) in output_configs {
+                if selection.is_empty() {
                     continue;
                 }
 
-                let xsd_types = rdf_metadata.xsd_type_map();
-
                 let rdf_batch = lazy_batch
                     .clone()
-                    .select(combined_selection.clone())
+                    .select(selection.clone())
                     .collect()
                     .map_err(|e| {
                         PolarsError::ComputeError(
@@ -233,7 +225,7 @@ fn serialize_oxigraph(
                         )
                     })?;
 
-                rdf_writer.borrow_mut().write_batch(&rdf_batch, &xsd_types)?;
+                rdf_writer.borrow_mut().write_batch(&rdf_batch, xsd_types)?;
             }
             Ok(())
         })
