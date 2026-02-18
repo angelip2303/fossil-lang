@@ -6,7 +6,7 @@ use crate::context::global::TypeInfo;
 use crate::error::{FossilError, FossilErrors, FossilWarnings};
 use crate::passes::GlobalContext;
 use crate::traits::provider::{
-    FieldType, ModuleSpec, ProviderKind, ProviderSchema, resolve_to_provider_args,
+    FieldType, ModuleSpec, ProviderContext, ProviderKind, ProviderSchema, resolve_to_provider_args,
 };
 
 pub struct ExpandResult {
@@ -175,12 +175,13 @@ impl ProviderExpander {
         )?;
 
         let type_name_str = self.gcx.interner.resolve(type_name).to_string();
-        let provider_output = provider_impl.provide(
-            &provider_args,
-            &mut self.gcx.interner,
-            &type_name_str,
-            loc,
-        )?;
+        let provider_output = {
+            let mut ctx = ProviderContext {
+                interner: &mut self.gcx.interner,
+                storage: &self.gcx.storage,
+            };
+            provider_impl.provide(&provider_args, &mut ctx, &type_name_str, loc)?
+        };
 
         if provider_output.kind == ProviderKind::Data {
             let provider_name = provider_path.display(&self.gcx.interner);
@@ -255,12 +256,13 @@ impl ProviderExpander {
         )?;
 
         let binding_name_str = self.gcx.interner.resolve(binding_name).to_string();
-        let provider_output = provider_impl.provide(
-            &provider_args,
-            &mut self.gcx.interner,
-            &binding_name_str,
-            loc,
-        )?;
+        let provider_output = {
+            let mut ctx = ProviderContext {
+                interner: &mut self.gcx.interner,
+                storage: &self.gcx.storage,
+            };
+            provider_impl.provide(&provider_args, &mut ctx, &binding_name_str, loc)?
+        };
 
         if provider_output.kind == ProviderKind::Schema {
             let provider_name = provider_path.display(&self.gcx.interner);

@@ -1,18 +1,19 @@
 use fossil_lang::ast::Loc;
-use fossil_lang::context::Interner;
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
+use fossil_lang::runtime::storage::StorageConfig;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 use fossil_lang::traits::provider::{
-    FunctionDef, ModuleSpec, ProviderArgs, ProviderOutput, ProviderParamInfo, ProviderSchema,
-    TypeProviderImpl,
+    FunctionDef, ModuleSpec, ProviderArgs, ProviderContext, ProviderOutput, ProviderParamInfo,
+    ProviderSchema, TypeProviderImpl,
 };
 use fossil_lang::traits::source::Source;
 
 use polars::prelude::*;
 
+use crate::cloud_options::build_cloud_options;
 use crate::utils::{lookup_type_id, polars_schema_to_field_specs, resolve_path, validate_extension, validate_path};
 
 #[derive(Debug, Clone)]
@@ -38,11 +39,12 @@ impl Default for CsvOptions {
 pub struct CsvSource {
     pub path: PlPath,
     pub options: CsvOptions,
+    pub storage: StorageConfig,
 }
 
 impl CsvSource {
-    pub fn new(path: PlPath, options: CsvOptions) -> Self {
-        Self { path, options }
+    pub fn new(path: PlPath, options: CsvOptions, storage: StorageConfig) -> Self {
+        Self { path, options, storage }
     }
 
     pub fn infer_schema(&self) -> PolarsResult<Schema> {
@@ -54,11 +56,13 @@ impl CsvSource {
 
 impl Source for CsvSource {
     fn to_lazy_frame(&self) -> PolarsResult<LazyFrame> {
+        let cloud_opts = build_cloud_options(self.path.to_str(), &self.storage);
         LazyCsvReader::new(self.path.clone())
             .with_separator(self.options.delimiter)
             .with_has_header(self.options.has_header)
             .with_quote_char(self.options.quote_char)
             .with_infer_schema_length(self.options.infer_schema_length)
+            .with_cloud_options(cloud_opts)
             .finish()
     }
 
@@ -93,7 +97,7 @@ impl TypeProviderImpl for CsvProvider {
     fn provide(
         &self,
         args: &ProviderArgs,
-        interner: &mut Interner,
+        ctx: &mut ProviderContext,
         type_name: &str,
         loc: Loc,
     ) -> Result<ProviderOutput, FossilError> {
@@ -112,12 +116,12 @@ impl TypeProviderImpl for CsvProvider {
             options.has_header = has_header;
         }
 
-        let csv_source = CsvSource::new(path, options);
+        let csv_source = CsvSource::new(path, options, ctx.storage.clone());
         let schema = csv_source
             .infer_schema()
             .map_err(|e| FossilError::data_error(e.to_string(), loc))?;
 
-        let fields = polars_schema_to_field_specs(&schema, interner);
+        let fields = polars_schema_to_field_specs(&schema, ctx.interner);
 
         let module_spec = ModuleSpec {
             functions: vec![FunctionDef::new("load", CsvLoadFunction {
@@ -157,8 +161,13 @@ impl FunctionImpl for CsvLoadFunction {
     fn call(&self, _args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
         use fossil_lang::runtime::value::Plan;
 
-        let schema = self
-            .source
+        let source = CsvSource {
+            path: self.source.path.clone(),
+            options: self.source.options.clone(),
+            storage: (*ctx.storage).clone(),
+        };
+
+        let schema = source
             .infer_schema()
             .map_err(|e| FossilError::data_error(e.to_string(), self.loc))?;
 
@@ -169,8 +178,8 @@ impl FunctionImpl for CsvLoadFunction {
             .and_then(|sym| ctx.gcx.definitions.get_by_symbol(sym).map(|d| d.id()));
 
         let plan = match type_def_id {
-            Some(def_id) => Plan::from_source_with_type(self.source.box_clone(), schema, def_id),
-            None => Plan::from_source(self.source.box_clone(), schema),
+            Some(def_id) => Plan::from_source_with_type(source.box_clone(), schema, def_id),
+            None => Plan::from_source(source.box_clone(), schema),
         };
 
         Ok(Value::Plan(plan))

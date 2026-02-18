@@ -328,7 +328,7 @@ mod tests {
         fn provide(
             &self,
             _args: &ProviderArgs,
-            _interner: &mut Interner,
+            _ctx: &mut crate::traits::provider::ProviderContext,
             _type_name: &str,
             _loc: Loc,
         ) -> Result<ProviderOutput, FossilError> {

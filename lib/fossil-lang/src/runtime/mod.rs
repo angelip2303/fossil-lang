@@ -3,4 +3,5 @@ pub mod evaluator;
 pub mod executor;
 pub mod lazy_frame;
 pub mod output;
+pub mod storage;
 pub mod value;

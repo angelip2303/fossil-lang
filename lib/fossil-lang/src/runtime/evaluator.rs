@@ -51,6 +51,7 @@ pub struct IrEvaluator<'a> {
     env: IrEnvironment,
     call_stack: CallStack,
     output_resolver: Arc<dyn OutputResolver>,
+    storage: Arc<crate::runtime::storage::StorageConfig>,
 }
 
 impl<'a> IrEvaluator<'a> {
@@ -62,6 +63,7 @@ impl<'a> IrEvaluator<'a> {
         typeck_results: &'a TypeckResults,
         env: IrEnvironment,
         output_resolver: Arc<dyn OutputResolver>,
+        storage: Arc<crate::runtime::storage::StorageConfig>,
     ) -> Self {
         Self {
             ir,
@@ -72,6 +74,7 @@ impl<'a> IrEvaluator<'a> {
             env,
             call_stack: Default::default(),
             output_resolver,
+            storage,
         }
     }
 
@@ -317,7 +320,8 @@ impl<'a> IrEvaluator<'a> {
                 });
 
                 let mut ctx = RuntimeContext::new(self.gcx, self.ir, self.type_index)
-                    .with_output_resolver(self.output_resolver.clone());
+                    .with_output_resolver(self.output_resolver.clone())
+                    .with_storage(self.storage.clone());
 
                 if !args.is_empty() {
                     let first_arg_expr_id = args[0].value();

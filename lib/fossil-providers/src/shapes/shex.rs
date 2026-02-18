@@ -5,8 +5,8 @@ use fossil_lang::ast::{Attribute, AttributeArg, Literal, PrimitiveType};
 use fossil_lang::context::Interner;
 use fossil_lang::error::{FossilError, FossilWarning, FossilWarnings};
 use fossil_lang::traits::provider::{
-    FieldSpec, FieldType, ProviderArgs, ProviderOutput, ProviderParamInfo, ProviderSchema,
-    TypeProviderImpl,
+    FieldSpec, FieldType, ProviderArgs, ProviderContext, ProviderOutput, ProviderParamInfo,
+    ProviderSchema, TypeProviderImpl,
 };
 
 use iri_s::IriS;
@@ -39,7 +39,7 @@ impl TypeProviderImpl for ShexProvider {
     fn provide(
         &self,
         args: &ProviderArgs,
-        interner: &mut Interner,
+        ctx: &mut ProviderContext,
         _type_name: &str,
         loc: Loc,
     ) -> Result<ProviderOutput, FossilError> {
@@ -55,9 +55,9 @@ impl TypeProviderImpl for ShexProvider {
             .map_err(|e| FossilError::read_error(path_str.clone(), e.to_string(), loc))?;
 
         let schema = parse_shex_schema(&shex_content, loc)?;
-        let base_attrs = extract_base_attribute(&schema, interner, loc);
+        let base_attrs = extract_base_attribute(&schema, ctx.interner, loc);
         let extraction = extract_shape_fields(&schema, shape_name, loc)?;
-        let fields = shex_fields_to_field_specs(extraction.fields, interner, loc);
+        let fields = shex_fields_to_field_specs(extraction.fields, ctx.interner, loc);
 
         Ok(ProviderOutput::new(ProviderSchema { fields })
             .with_warnings(extraction.warnings)

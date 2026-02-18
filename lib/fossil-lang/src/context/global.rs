@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::ast::RecordField;
 use crate::common::PrimitiveType;
 use crate::context::{DefId, DefKind, Definitions, Interner, Symbol, TypeMetadata};
+use crate::runtime::storage::StorageConfig;
 
 use crate::traits::provider::{ModuleSpec, TypeProviderImpl};
 
@@ -29,6 +30,7 @@ pub struct GlobalContext {
     pub type_metadata: HashMap<DefId, Arc<TypeMetadata>>,
     pub registered_types: HashMap<DefId, Vec<(Symbol, BuiltInFieldType)>>,
     pub module_generators: Vec<ModuleGeneratorFn>,
+    pub storage: StorageConfig,
 }
 
 impl GlobalContext {
@@ -86,6 +88,7 @@ impl Default for GlobalContext {
             type_metadata: HashMap::new(),
             registered_types: HashMap::new(),
             module_generators: Vec::new(),
+            storage: StorageConfig::default(),
         }
     }
 }

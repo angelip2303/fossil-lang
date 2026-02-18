@@ -5,6 +5,7 @@ use crate::ast::Loc;
 use crate::ast::{Attribute, Literal, PrimitiveType, ProviderArgument};
 use crate::context::{Interner, Symbol};
 use crate::error::{FossilError, FossilWarnings};
+use crate::runtime::storage::StorageConfig;
 use crate::traits::function::FunctionImpl;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +188,11 @@ fn literal_to_provider_literal(lit: &Literal, interner: &Interner) -> ProviderLi
     }
 }
 
+pub struct ProviderContext<'a> {
+    pub interner: &'a mut Interner,
+    pub storage: &'a StorageConfig,
+}
+
 pub trait TypeProviderImpl: Send + Sync {
     fn param_info(&self) -> Vec<ProviderParamInfo> {
         vec![]
@@ -195,7 +201,7 @@ pub trait TypeProviderImpl: Send + Sync {
     fn provide(
         &self,
         args: &ProviderArgs,
-        interner: &mut Interner,
+        ctx: &mut ProviderContext,
         type_name: &str,
         loc: Loc,
     ) -> Result<ProviderOutput, FossilError>;

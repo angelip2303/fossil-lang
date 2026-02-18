@@ -5,16 +5,19 @@ use crate::ir::StmtKind;
 use crate::passes::IrProgram;
 use crate::runtime::evaluator::IrEvaluator;
 use crate::runtime::output::{LocalOutputResolver, OutputResolver};
+use crate::runtime::storage::StorageConfig;
 use crate::runtime::value::{Environment, Value};
 
 pub struct ExecutionConfig {
     pub output_resolver: Arc<dyn OutputResolver>,
+    pub storage: StorageConfig,
 }
 
 impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
             output_resolver: Arc::new(LocalOutputResolver),
+            storage: StorageConfig::default(),
         }
     }
 }
@@ -39,6 +42,7 @@ impl IrExecutor {
             &typeck_results,
             Environment::default(),
             config.output_resolver,
+            Arc::new(config.storage),
         );
         let mut results = Vec::new();
 

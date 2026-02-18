@@ -5,15 +5,15 @@ pub(crate) mod step;
 use std::path::PathBuf;
 
 use fossil_lang::ast::Loc;
-use fossil_lang::context::{DefKind, Interner};
+use fossil_lang::context::DefKind;
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 use fossil_lang::traits::provider::{
-    FieldSpec, FieldType, FunctionDef, ModuleSpec, ProviderArgs, ProviderOutput, ProviderParamInfo,
-    ProviderSchema, TypeProviderImpl,
+    FieldSpec, FieldType, FunctionDef, ModuleSpec, ProviderArgs, ProviderContext, ProviderOutput,
+    ProviderParamInfo, ProviderSchema, TypeProviderImpl,
 };
 use fossil_lang::traits::source::Source;
 
@@ -55,7 +55,7 @@ impl TypeProviderImpl for IfcProvider {
     fn provide(
         &self,
         args: &ProviderArgs,
-        interner: &mut Interner,
+        ctx: &mut ProviderContext,
         type_name: &str,
         loc: Loc,
     ) -> Result<ProviderOutput, FossilError> {
@@ -96,7 +96,7 @@ impl TypeProviderImpl for IfcProvider {
         let fields: Vec<FieldSpec> = all_fields
             .iter()
             .map(|f| FieldSpec {
-                name: interner.intern(f.name),
+                name: ctx.interner.intern(f.name),
                 ty: ifc_field_to_field_type(f),
                 attrs: vec![],
             })
