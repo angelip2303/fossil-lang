@@ -5,8 +5,8 @@ use chumsky::pratt::postfix;
 use chumsky::prelude::*;
 
 use crate::ast::{
-    Argument, Ast, Attribute, AttributeArg, ConstructorParam, Expr, ExprId, ExprKind, Literal,
-    Path, PrimitiveType, ProviderArgument, RecordField, Stmt, StmtId, StmtKind, Type,
+    Argument, Ast, Attribute, AttributeArg, ConstructorParam, Expr, ExprId, ExprKind, JoinHow,
+    Literal, Path, PrimitiveType, ProviderArgument, RecordField, Stmt, StmtId, StmtKind, Type,
     TypeId, TypeKind,
 };
 use crate::ast::Loc;
@@ -179,6 +179,7 @@ where
         Token::IntType => PrimitiveType::Int,
         Token::BoolType => PrimitiveType::Bool,
         Token::StringType => PrimitiveType::String,
+        Token::FloatType => PrimitiveType::Float,
     }
 }
 
@@ -191,6 +192,13 @@ enum ChainOp {
 enum PipeRhs {
     Projection(Symbol, ExprId),
     Call(ExprId),
+    Join {
+        right: ExprId,
+        left_on: Vec<Symbol>,
+        right_on: Vec<Symbol>,
+        how: JoinHow,
+        suffix: Option<Symbol>,
+    },
 }
 
 /// Suffix after a parsed Path, used for longest-match atom parsing.
@@ -275,6 +283,8 @@ where
 
         let argument = named_arg.or(positional_arg);
 
+        let ref_args = argument.clone();
+
         // Longest-match path-based atom: parse Path once, then check suffix
         let bang_suffix = just(Token::Bang)
             .ignore_then(
@@ -348,7 +358,23 @@ where
                 }
             });
 
-        let atom = choice((path_based, unit, literal))
+        let ref_expr = just(Token::Ref)
+            .ignore_then(parse_path(ctx))
+            .then(
+                ref_args
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .map_with(|(type_path, ctor_args), e| {
+                ctx.alloc_expr(
+                    ExprKind::Reference { type_path, ctor_args },
+                    ctx.to_loc(e.span()),
+                )
+            });
+
+        let atom = choice((ref_expr, path_based, unit, literal))
             .map_with(|expr, e| (expr, e.span()))
             .boxed();
 
@@ -375,17 +401,47 @@ where
         .map(|expr| expr.0)
         .boxed();
 
-        // Pipe chain: base (|> | +>) (each param -> expr | call_expr)
+        // Pipe chain: base (|> | +>) (each param -> expr | join ... on ... | call_expr)
         let projection_rhs = just(Token::Each)
             .ignore_then(parse_symbol(ctx))
             .then_ignore(just(Token::Arrow))
             .then(base.clone());
+
+        // Parse join columns: either single symbol or (sym1, sym2, ...)
+        let join_cols = parse_symbol(ctx)
+            .map(|s| vec![s])
+            .or(
+                parse_symbol(ctx)
+                    .separated_by(just(Token::Comma))
+                    .at_least(1)
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            );
+
+        let join_suffix = just(Token::Suffix)
+            .ignore_then(select! { Token::String(s) => ctx.intern(s) })
+            .or_not();
+
+        let join_rhs = choice((
+            just(Token::Join).to(JoinHow::Inner),
+            just(Token::LeftJoin).to(JoinHow::Left),
+        ))
+        .then(base.clone())
+        .then_ignore(just(Token::On))
+        .then(join_cols.clone())
+        .then_ignore(just(Token::Eq))
+        .then(join_cols)
+        .then(join_suffix)
+        .map(|((((how, right), left_on), right_on), suffix)| {
+            PipeRhs::Join { right, left_on, right_on, how, suffix }
+        });
 
         let chain_op = just(Token::Pipe).to(ChainOp::Pipe)
             .or(just(Token::PlusGt).to(ChainOp::AddOutput));
 
         let pipe_rhs = chain_op.then(choice((
             projection_rhs.map(|(param, output)| PipeRhs::Projection(param, output)),
+            join_rhs,
             base.clone().map(PipeRhs::Call),
         )));
 
@@ -464,6 +520,27 @@ fn build_pipe_chain(ctx: &AstCtx, source: ExprId, stages: &[(ChainOp, PipeRhs)])
                     loc,
                 );
                 i += 1;
+            }
+            (ChainOp::Pipe, PipeRhs::Join { right, left_on, right_on, how, suffix }) => {
+                let loc = {
+                    let ast = ctx.ast.borrow();
+                    ast.exprs.get(current).loc.merge(ast.exprs.get(*right).loc)
+                };
+                current = ctx.alloc_expr(
+                    ExprKind::Join {
+                        left: current,
+                        right: *right,
+                        left_on: left_on.clone(),
+                        right_on: right_on.clone(),
+                        how: *how,
+                        suffix: *suffix,
+                    },
+                    loc,
+                );
+                i += 1;
+            }
+            (ChainOp::AddOutput, PipeRhs::Join { .. }) => {
+                i += 1; // skip — nonsensical syntax
             }
         }
     }

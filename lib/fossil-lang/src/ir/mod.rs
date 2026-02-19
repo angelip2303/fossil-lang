@@ -1,6 +1,6 @@
 use crate::ast::Loc;
 use crate::ast::Attribute;
-pub use crate::common::{Literal, Path, PrimitiveType};
+pub use crate::common::{JoinHow, Literal, Path, PrimitiveType};
 use crate::context::{Arena, DefId, NodeId, Symbol};
 
 pub mod resolutions;
@@ -18,6 +18,7 @@ pub type TypeId = NodeId<Type>;
 #[derive(Debug)]
 pub struct CommonTypes {
     pub int: TypeId,
+    pub float: TypeId,
     pub string: TypeId,
     pub bool: TypeId,
     pub unit: TypeId,
@@ -36,6 +37,7 @@ impl Default for Ir {
     fn default() -> Self {
         let mut types = Arena::default();
         let int = types.alloc(Type { loc: Loc::generated(), kind: TypeKind::Primitive(PrimitiveType::Int) });
+        let float = types.alloc(Type { loc: Loc::generated(), kind: TypeKind::Primitive(PrimitiveType::Float) });
         let string = types.alloc(Type { loc: Loc::generated(), kind: TypeKind::Primitive(PrimitiveType::String) });
         let bool = types.alloc(Type { loc: Loc::generated(), kind: TypeKind::Primitive(PrimitiveType::Bool) });
         let unit = types.alloc(Type { loc: Loc::generated(), kind: TypeKind::Unit });
@@ -44,13 +46,14 @@ impl Default for Ir {
             exprs: Arena::default(),
             types,
             root: Vec::new(),
-            common: CommonTypes { int, string, bool, unit },
+            common: CommonTypes { int, float, string, bool, unit },
         }
     }
 }
 
 impl Ir {
     pub fn int_type(&self) -> TypeId { self.common.int }
+    pub fn float_type(&self) -> TypeId { self.common.float }
     pub fn string_type(&self) -> TypeId { self.common.string }
     pub fn bool_type(&self) -> TypeId { self.common.bool }
     pub fn unit_type(&self) -> TypeId { self.common.unit }
@@ -134,6 +137,14 @@ pub enum ExprKind {
         binding: Symbol,
         outputs: Vec<ExprId>,
     },
+    Join {
+        left: ExprId,
+        right: ExprId,
+        left_on: Vec<Symbol>,
+        right_on: Vec<Symbol>,
+        how: JoinHow,
+        suffix: Option<Symbol>,
+    },
     FieldAccess {
         expr: ExprId,
         field: Symbol,
@@ -141,6 +152,10 @@ pub enum ExprKind {
     StringInterpolation {
         parts: Vec<Symbol>,
         exprs: Vec<ExprId>,
+    },
+    Reference {
+        type_name: Path,
+        ctor_args: Vec<Argument>,
     },
 }
 

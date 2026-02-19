@@ -115,6 +115,19 @@ impl AstToIrConverter {
                 }
             }
 
+            ast::ExprKind::Join { left, right, left_on, right_on, how, suffix } => {
+                let ir_left = self.convert_expr(ast, *left);
+                let ir_right = self.convert_expr(ast, *right);
+                ExprKind::Join {
+                    left: ir_left,
+                    right: ir_right,
+                    left_on: left_on.clone(),
+                    right_on: right_on.clone(),
+                    how: *how,
+                    suffix: *suffix,
+                }
+            }
+
             ast::ExprKind::FieldAccess { expr, field } => {
                 let ir_expr = self.convert_expr(ast, *expr);
                 ExprKind::FieldAccess {
@@ -128,6 +141,14 @@ impl AstToIrConverter {
                 ExprKind::StringInterpolation {
                     parts: parts.clone(),
                     exprs: ir_exprs,
+                }
+            }
+
+            ast::ExprKind::Reference { type_path, ctor_args } => {
+                let ir_ctor_args = self.convert_args(ast, ctor_args);
+                ExprKind::Reference {
+                    type_name: type_path.clone(),
+                    ctor_args: ir_ctor_args,
                 }
             }
 
@@ -489,6 +510,58 @@ mod tests {
                 assert_eq!(fields.len(), 1, "expected 1 field");
             }
             other => panic!("expected RecordInstance, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn join_basic() {
+        let ir = parse_and_convert(
+            "let a = 1\nlet b = 2\nlet c = a |> join b on X = Y"
+        );
+        let val = get_let_value_expr(&ir, 2);
+        assert!(matches!(&val.kind, ExprKind::Join { .. }));
+    }
+
+    #[test]
+    fn left_join_basic() {
+        let ir = parse_and_convert(
+            "let a = 1\nlet b = 2\nlet c = a |> left_join b on X = Y"
+        );
+        let val = get_let_value_expr(&ir, 2);
+        match &val.kind {
+            ExprKind::Join { how, .. } => {
+                assert_eq!(*how, crate::common::JoinHow::Left);
+            }
+            other => panic!("expected Join, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn join_multi_column() {
+        let ir = parse_and_convert(
+            "let a = 1\nlet b = 2\nlet c = a |> join b on (X, Y) = (A, B)"
+        );
+        let val = get_let_value_expr(&ir, 2);
+        match &val.kind {
+            ExprKind::Join { left_on, right_on, .. } => {
+                assert_eq!(left_on.len(), 2);
+                assert_eq!(right_on.len(), 2);
+            }
+            other => panic!("expected Join, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn join_with_suffix() {
+        let ir = parse_and_convert(
+            "let a = 1\nlet b = 2\nlet c = a |> join b on X = Y suffix \"_room\""
+        );
+        let val = get_let_value_expr(&ir, 2);
+        match &val.kind {
+            ExprKind::Join { suffix, .. } => {
+                assert!(suffix.is_some(), "suffix should be present");
+            }
+            other => panic!("expected Join, got {:?}", other),
         }
     }
 

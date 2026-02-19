@@ -15,6 +15,14 @@ pub enum Token<'a> {
     Do,
     #[token("end")]
     End,
+    #[token("join")]
+    Join,
+    #[token("left_join")]
+    LeftJoin,
+    #[token("on")]
+    On,
+    #[token("suffix")]
+    Suffix,
     #[token("true")]
     True,
     #[token("false")]
@@ -25,6 +33,10 @@ pub enum Token<'a> {
     BoolType,
     #[token("string")]
     StringType,
+    #[token("float")]
+    FloatType,
+    #[token("ref")]
+    Ref,
 
     #[token("=")]
     Eq,

@@ -103,6 +103,12 @@ impl From<polars::prelude::DataType> for PrimitiveType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JoinHow {
+    Inner,
+    Left,
+}
+
 /// A provider argument (literal-based or positional)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProviderArgument {

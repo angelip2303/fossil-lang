@@ -1,0 +1,108 @@
+// Urban Mobility — Madrid bus network
+// Joins 4 heterogeneous CSV sources, then projects 3 RDF types
+// Each type draws fields from MULTIPLE source files (only possible via joins)
+
+let comfort  = csv!("lib/fossil-stdlib/examples/mobility/passenger_comfort.csv")
+let potholes = csv!("lib/fossil-stdlib/examples/mobility/pothole_telemetry.csv")
+let routes   = csv!("lib/fossil-stdlib/examples/mobility/route_efficiency.csv")
+let weather  = csv!("lib/fossil-stdlib/examples/mobility/weather_observations.csv")
+
+// Join all sources on their timestamp columns
+let unified = comfort
+    |> join potholes on recorded_at = timestamp
+    |> join routes on recorded_at = event_time
+    |> join weather on recorded_at = observation_time
+
+// Type 1: Comfort + Weather (from comfort.csv + weather.csv)
+@rdf(type = "http://example.com/mobility#ComfortObservation", base = "http://example.com/mobility/comfort/")
+type ComfortObservation(subject: string) do
+    @rdf(uri = "http://example.com/mobility#serviceLine")
+    ServiceLine: int
+
+    @rdf(uri = "http://example.com/mobility#comfortScore")
+    ComfortScore: float
+
+    @rdf(uri = "http://example.com/mobility#satisfaction")
+    Satisfaction: float
+
+    @rdf(uri = "http://example.com/mobility#weatherCondition")
+    WeatherCondition: string
+
+    @rdf(uri = "http://example.com/mobility#temperature")
+    Temperature: float
+
+    @rdf(uri = "http://example.com/mobility#relatedHazard")
+    RelatedHazard: RoadHazard
+end
+
+// Type 2: Pothole + Weather (from pothole.csv + weather.csv)
+@rdf(type = "http://example.com/mobility#RoadHazard", base = "http://example.com/mobility/hazard/")
+type RoadHazard(subject: string) do
+    @rdf(uri = "http://example.com/mobility#severity")
+    Severity: string
+
+    @rdf(uri = "http://example.com/mobility#potholeSizeMm")
+    PotholeSizeMm: int
+
+    @rdf(uri = "http://example.com/mobility#roadSurface")
+    RoadSurface: string
+
+    @rdf(uri = "http://example.com/mobility#precipitation")
+    Precipitation: float
+
+    @rdf(uri = "http://example.com/mobility#windSpeed")
+    WindSpeed: float
+end
+
+// Type 3: Route delay + Comfort + Weather (from routes.csv + comfort.csv + weather.csv)
+@rdf(type = "http://example.com/mobility#ServiceDisruption", base = "http://example.com/mobility/disruption/")
+type ServiceDisruption(subject: string) do
+    @rdf(uri = "http://example.com/mobility#delayMinutes")
+    DelayMinutes: float
+
+    @rdf(uri = "http://example.com/mobility#detourKm")
+    DetourKm: float
+
+    @rdf(uri = "http://example.com/mobility#complaintCount")
+    ComplaintCount: int
+
+    @rdf(uri = "http://example.com/mobility#comfortScore")
+    ComfortScore: float
+
+    @rdf(uri = "http://example.com/mobility#weatherCondition")
+    WeatherCondition: string
+
+    @rdf(uri = "http://example.com/mobility#comfortContext")
+    ComfortContext: ComfortObservation
+
+    @rdf(uri = "http://example.com/mobility#hazardContext")
+    HazardContext: RoadHazard
+end
+
+// Multi-output: 3 RDF types from one joined dataset
+unified
+    |> each row -> ComfortObservation(row.unit_identifier) {
+        ServiceLine = row.service_line,
+        ComfortScore = row.comfort_score,
+        Satisfaction = row.passenger_satisfaction,
+        WeatherCondition = row.weather_condition,
+        Temperature = row.air_temperature_c,
+        RelatedHazard = ref RoadHazard(row.unit_identifier)
+    }
+    +> each row -> RoadHazard(row.unit_identifier) {
+        Severity = row.severity,
+        PotholeSizeMm = row.size_mm,
+        RoadSurface = row.road_surface_condition,
+        Precipitation = row.precipitation_mm,
+        WindSpeed = row.wind_speed_kmh
+    }
+    +> each row -> ServiceDisruption(row.unit_identifier) {
+        DelayMinutes = row.delay_minutes,
+        DetourKm = row.detour_km,
+        ComplaintCount = row.complaint_count,
+        ComfortScore = row.comfort_score,
+        WeatherCondition = row.weather_condition,
+        ComfortContext = ref ComfortObservation(row.unit_identifier),
+        HazardContext = ref RoadHazard(row.unit_identifier)
+    }
+    |> Rdf.serialize("lib/fossil-stdlib/examples/mobility/mobility.nq")

@@ -230,6 +230,11 @@ impl IrResolver {
                 self.scopes.pop();
             }
 
+            ExprKind::Join { left, right, .. } => {
+                self.resolve_expr(*left, errors);
+                self.resolve_expr(*right, errors);
+            }
+
             ExprKind::Application { callee, args } => {
                 self.resolve_expr(*callee, errors);
                 for arg in args {
@@ -244,6 +249,15 @@ impl IrResolver {
             ExprKind::StringInterpolation { exprs, .. } => {
                 for &expr in exprs {
                     self.resolve_expr(expr, errors);
+                }
+            }
+
+            ExprKind::Reference { type_name, ctor_args } => {
+                if let Some(def_id) = self.resolve_type_path(type_name, expr.loc, errors) {
+                    self.resolutions.expr_defs.insert(expr_id, def_id);
+                }
+                for arg in ctor_args {
+                    self.resolve_expr(arg.value(), errors);
                 }
             }
 

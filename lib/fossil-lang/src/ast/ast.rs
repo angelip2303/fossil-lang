@@ -1,5 +1,5 @@
 use crate::ast::Loc;
-pub use crate::common::{Literal, Path, PrimitiveType, ProviderArgument};
+pub use crate::common::{JoinHow, Literal, Path, PrimitiveType, ProviderArgument};
 use crate::context::*;
 
 pub type StmtId = NodeId<Stmt>;
@@ -66,6 +66,14 @@ pub enum ExprKind {
         param: Symbol,
         outputs: Vec<ExprId>,
     },
+    Join {
+        left: ExprId,
+        right: ExprId,
+        left_on: Vec<Symbol>,
+        right_on: Vec<Symbol>,
+        how: JoinHow,
+        suffix: Option<Symbol>,
+    },
     FieldAccess {
         expr: ExprId,
         field: Symbol,
@@ -77,6 +85,10 @@ pub enum ExprKind {
     ProviderInvocation {
         provider: Path,
         args: Vec<ProviderArgument>,
+    },
+    Reference {
+        type_path: Path,
+        ctor_args: Vec<Argument>,
     },
 }
 

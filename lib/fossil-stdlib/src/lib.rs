@@ -5,6 +5,8 @@ pub mod validate;
 pub use rdf::{RdfMetadata, RdfSerializeFunction};
 pub use report::ReportCsvFunction;
 
+use std::sync::Arc;
+
 use fossil_lang::context::global::BuiltInFieldType;
 use fossil_lang::common::PrimitiveType;
 use fossil_lang::passes::GlobalContext;
@@ -31,4 +33,12 @@ pub fn init(gcx: &mut GlobalContext) {
 
     gcx.module_generators
         .push(validate::validate_module_generator(validation_error_def_id));
+
+    gcx.ref_resolver = Some(Arc::new(|def_id, gcx| {
+        let metadata = gcx.type_metadata.get(&def_id)?;
+        let rdf_sym = gcx.interner.lookup("rdf")?;
+        let base_sym = gcx.interner.lookup("base")?;
+        let attr = metadata.get_type_attribute(rdf_sym)?;
+        Some(attr.get_string(base_sym, &gcx.interner)?.to_string())
+    }));
 }

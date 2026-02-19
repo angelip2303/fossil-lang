@@ -23,6 +23,10 @@ pub struct TypeInfo<'a> {
 
 pub type ModuleGeneratorFn = Arc<dyn Fn(&TypeInfo) -> Option<ModuleSpec> + Send + Sync>;
 
+/// Hook for resolving the base URI of a type referenced by `ref Type(args)`.
+/// Returns `Some(base_string)` if the type has a base — the evaluator prepends it to the ctor arg.
+pub type RefResolverFn = Arc<dyn Fn(DefId, &GlobalContext) -> Option<String> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct GlobalContext {
     pub interner: Interner,
@@ -30,6 +34,7 @@ pub struct GlobalContext {
     pub type_metadata: HashMap<DefId, Arc<TypeMetadata>>,
     pub registered_types: HashMap<DefId, Vec<(Symbol, BuiltInFieldType)>>,
     pub module_generators: Vec<ModuleGeneratorFn>,
+    pub ref_resolver: Option<RefResolverFn>,
     pub storage: StorageConfig,
 }
 
@@ -88,6 +93,7 @@ impl Default for GlobalContext {
             type_metadata: HashMap::new(),
             registered_types: HashMap::new(),
             module_generators: Vec::new(),
+            ref_resolver: None,
             storage: StorageConfig::default(),
         }
     }

@@ -37,6 +37,10 @@ impl SafeLazyFrame {
         Self(self.0.inner_join(other.0, left_on, right_on))
     }
 
+    pub fn join(self, other: Self, left_on: Vec<Expr>, right_on: Vec<Expr>, args: JoinArgs) -> Self {
+        Self(self.0.join(other.0, left_on, right_on, args))
+    }
+
     pub(crate) fn into_inner(self) -> LazyFrame {
         self.0
     }

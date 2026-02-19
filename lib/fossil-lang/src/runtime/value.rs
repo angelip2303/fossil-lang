@@ -3,14 +3,26 @@ use std::sync::Arc;
 
 use polars::prelude::*;
 
+use crate::common::JoinHow;
 use crate::context::{DefId, Symbol};
 use crate::traits::function::FunctionImpl;
 use crate::traits::source::Source;
 
 #[derive(Debug, Clone)]
+pub struct JoinTransform {
+    pub right_source: Option<Box<dyn Source>>,
+    pub right_transforms: Vec<Transform>,
+    pub left_on: Vec<Expr>,
+    pub right_on: Vec<Expr>,
+    pub how: JoinHow,
+    pub suffix: String,
+}
+
+#[derive(Debug, Clone)]
 pub enum Transform {
     Select(Vec<Expr>),
     Filter(Expr),
+    Join(JoinTransform),
 }
 
 #[derive(Clone, Debug)]

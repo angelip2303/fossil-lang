@@ -139,9 +139,31 @@ impl<'a> IrEvaluator<'a> {
                 outputs,
             } => self.eval_projection(*source, *binding, outputs),
 
+            ExprKind::Join { left, right, left_on, right_on, how, suffix } => {
+                self.eval_join(*left, *right, left_on, right_on, *how, suffix.as_ref().copied())
+            }
+
             ExprKind::FieldAccess { expr, field } => self.eval_field_access(*expr, *field),
 
             ExprKind::Unit => Ok(Value::Unit),
+
+            ExprKind::Reference { ctor_args, .. } => {
+                let value = if let Some(first_arg) = ctor_args.first() {
+                    self.eval(first_arg.value())?
+                } else {
+                    return Ok(Value::Expr(lit(NULL)));
+                };
+                if let Some(ref resolver) = self.gcx.ref_resolver {
+                    if let Some(&def_id) = self.resolutions.expr_defs.get(&expr_id) {
+                        if let Some(base) = resolver(def_id, self.gcx) {
+                            if let Value::Expr(expr) = value {
+                                return Ok(Value::Expr(concat_str([lit(base.as_str()), expr], "", true)));
+                            }
+                        }
+                    }
+                }
+                Ok(value)
+            }
 
             ExprKind::StringInterpolation { parts, exprs } => {
                 self.eval_string_interpolation(parts, exprs)
@@ -278,6 +300,80 @@ impl<'a> IrEvaluator<'a> {
             }
         }
         Ok(Value::Plan(plan))
+    }
+
+    fn eval_join(
+        &mut self,
+        left_id: ExprId,
+        right_id: ExprId,
+        left_on: &[crate::context::Symbol],
+        right_on: &[crate::context::Symbol],
+        how: crate::common::JoinHow,
+        suffix: Option<crate::context::Symbol>,
+    ) -> Result<Value, FossilError> {
+        use crate::runtime::value::{JoinTransform, Plan, Transform};
+
+        let left_val = self.eval(left_id)?;
+        let right_val = self.eval(right_id)?;
+
+        let Value::Plan(left_plan) = left_val else {
+            return Err(self.make_error("Join left side must be a Plan"));
+        };
+        let Value::Plan(right_plan) = right_val else {
+            return Err(self.make_error("Join right side must be a Plan"));
+        };
+
+        let suffix_str = suffix
+            .map(|s| self.gcx.interner.resolve(s).to_string())
+            .unwrap_or_else(|| "_right".to_string());
+
+        let left_on_exprs: Vec<Expr> = left_on.iter()
+            .map(|s| col(self.gcx.interner.resolve(*s)))
+            .collect();
+        let right_on_exprs: Vec<Expr> = right_on.iter()
+            .map(|s| col(self.gcx.interner.resolve(*s)))
+            .collect();
+
+        // Merge schemas (left + right with suffix on conflicts)
+        let mut schema_fields: Vec<Field> = left_plan.schema
+            .iter()
+            .map(|(name, dtype)| Field::new(name.clone(), dtype.clone()))
+            .collect();
+
+        let left_names: std::collections::HashSet<&str> =
+            left_plan.schema.iter_names().map(|n| n.as_str()).collect();
+
+        for (name, dtype) in right_plan.schema.iter() {
+            let final_name = if left_names.contains(name.as_str()) {
+                format!("{}{}", name, suffix_str)
+            } else {
+                name.to_string()
+            };
+            schema_fields.push(Field::new(final_name.into(), dtype.clone()));
+        }
+
+        let merged_schema = Schema::from_iter(schema_fields);
+
+        let mut result_plan = Plan {
+            source: left_plan.source,
+            transforms: left_plan.transforms,
+            type_def_id: None,
+            schema: Arc::new(merged_schema),
+            outputs: Vec::new(),
+            pending_exprs: None,
+            ctor_exprs: vec![],
+        };
+
+        result_plan.transforms.push(Transform::Join(JoinTransform {
+            right_source: right_plan.source,
+            right_transforms: right_plan.transforms,
+            left_on: left_on_exprs,
+            right_on: right_on_exprs,
+            how,
+            suffix: suffix_str,
+        }));
+
+        Ok(Value::Plan(result_plan))
     }
 
     fn check_recursion_depth(&self) -> Result<(), FossilError> {

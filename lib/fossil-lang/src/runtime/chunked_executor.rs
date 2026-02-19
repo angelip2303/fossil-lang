@@ -148,17 +148,34 @@ impl ChunkedExecutor {
 
         // Apply all transforms
         for transform in &plan.transforms {
-            safe_lf = Self::apply_transform(safe_lf, transform);
+            safe_lf = Self::apply_transform(safe_lf, transform)?;
         }
 
         Ok(safe_lf)
     }
 
     /// Apply a transform to a SafeLazyFrame
-    fn apply_transform(safe_lf: SafeLazyFrame, transform: &Transform) -> SafeLazyFrame {
+    fn apply_transform(safe_lf: SafeLazyFrame, transform: &Transform) -> PolarsResult<SafeLazyFrame> {
         match transform {
-            Transform::Select(exprs) => safe_lf.select(exprs.clone()),
-            Transform::Filter(expr) => safe_lf.filter(expr.clone()),
+            Transform::Select(exprs) => Ok(safe_lf.select(exprs.clone())),
+            Transform::Filter(expr) => Ok(safe_lf.filter(expr.clone())),
+            Transform::Join(join) => {
+                let mut right_lf = match &join.right_source {
+                    Some(src) => SafeLazyFrame::new(src.to_lazy_frame()?),
+                    None => SafeLazyFrame::new(LazyFrame::default()),
+                };
+                for t in &join.right_transforms {
+                    right_lf = Self::apply_transform(right_lf, t)?;
+                }
+
+                let args = JoinArgs::new(match join.how {
+                    crate::common::JoinHow::Inner => JoinType::Inner,
+                    crate::common::JoinHow::Left => JoinType::Left,
+                })
+                .with_suffix(Some(join.suffix.clone().into()));
+
+                Ok(safe_lf.join(right_lf, join.left_on.clone(), join.right_on.clone(), args))
+            }
         }
     }
 }

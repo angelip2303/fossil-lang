@@ -1,6 +1,8 @@
+use std::collections::HashSet;
+
 use crate::error::FossilError;
 use crate::ir::{
-    ExprId, ExprKind, Literal, Polytype, PrimitiveType, Type, TypeId, TypeKind,
+    ExprId, ExprKind, Literal, Polytype, PrimitiveType, RecordFields, Type, TypeId, TypeKind,
 };
 
 use super::{TypeChecker, typeutil::Subst};
@@ -107,6 +109,57 @@ impl TypeChecker {
                 Ok((subst, last_ty))
             }
 
+            ExprKind::Join { left, right, left_on, right_on, how: _, suffix } => {
+                let (mut subst, left_ty) = self.infer(*left)?;
+                let (s, right_ty) = self.infer(*right)?;
+                subst = subst.compose(&s, &mut self.ir);
+
+                let left_ty_applied = subst.apply(left_ty, &mut self.ir);
+                let right_ty_applied = subst.apply(right_ty, &mut self.ir);
+
+                let left_fields = self.get_record_fields(left_ty_applied, loc)?;
+                let right_fields = self.get_record_fields(right_ty_applied, loc)?;
+
+                // Validate that left_on fields exist in left record
+                for on_sym in left_on {
+                    if left_fields.lookup(*on_sym).is_none() {
+                        let name = self.gcx.interner.resolve(*on_sym).to_string();
+                        return Err(FossilError::field_not_found(name, loc));
+                    }
+                }
+
+                // Validate that right_on fields exist in right record
+                for on_sym in right_on {
+                    if right_fields.lookup(*on_sym).is_none() {
+                        let name = self.gcx.interner.resolve(*on_sym).to_string();
+                        return Err(FossilError::field_not_found(name, loc));
+                    }
+                }
+
+                // Build merged Record type: left fields + right fields (suffix on conflicts)
+                let suffix_str = suffix
+                    .map(|s| self.gcx.interner.resolve(s).to_string())
+                    .unwrap_or_else(|| "_right".to_string());
+
+                let left_names: HashSet<_> =
+                    left_fields.field_names().into_iter().collect();
+
+                let mut merged = left_fields.fields.clone();
+                for (name, ty) in &right_fields.fields {
+                    if left_names.contains(name) {
+                        let name_str = self.gcx.interner.resolve(*name);
+                        let suffixed = format!("{}{}", name_str, suffix_str);
+                        let suffixed_sym = self.gcx.interner.intern(&suffixed);
+                        merged.push((suffixed_sym, *ty));
+                    } else {
+                        merged.push((*name, *ty));
+                    }
+                }
+
+                let merged_ty = self.ir.alloc_type(TypeKind::Record(RecordFields::from_fields(merged)));
+                Ok((subst, merged_ty))
+            }
+
             ExprKind::Application { callee, args } => {
                 let saved_local_subst = std::mem::take(&mut self.local_subst);
 
@@ -174,6 +227,20 @@ impl TypeChecker {
                 }
             }
 
+            ExprKind::Reference { ctor_args, .. } => {
+                let type_def_id = *self.resolutions.expr_defs.get(&expr_id).ok_or_else(|| {
+                    FossilError::internal("typecheck", "Unresolved type in reference", loc)
+                })?;
+                let mut subst = Subst::default();
+                for arg in ctor_args {
+                    let (s, _) = self.infer(arg.value())?;
+                    subst = subst.compose(&s, &mut self.ir);
+                }
+                self.check_ctor_arg_count(type_def_id, ctor_args.len(), loc)?;
+                let named_ty = self.ir.named_type(type_def_id);
+                Ok((subst, named_ty))
+            }
+
             ExprKind::StringInterpolation { parts: _, exprs } => {
                 let mut subst = Subst::default();
                 for &expr in exprs {
@@ -190,6 +257,22 @@ impl TypeChecker {
         }
 
         result
+    }
+
+    fn get_record_fields(&self, ty_id: TypeId, loc: crate::ast::Loc) -> Result<RecordFields, FossilError> {
+        // Try Named type → resolve to Record
+        if let Some(def_id) = self.named_def_id(ty_id) {
+            if let Some(underlying) = self.resolve_named_type(def_id) {
+                if let TypeKind::Record(fields) = &self.ir.types.get(underlying).kind {
+                    return Ok(fields.clone());
+                }
+            }
+        }
+        // Direct Record type
+        if let TypeKind::Record(fields) = &self.ir.types.get(ty_id).kind {
+            return Ok(fields.clone());
+        }
+        Err(FossilError::internal("typecheck", "Join requires record types", loc))
     }
 }
 
@@ -222,6 +305,48 @@ mod tests {
             }
         }
         panic!("Expected let with known type at index {}", stmt_idx);
+    }
+
+    #[test]
+    fn join_merges_record_types() {
+        let prog = compile_ok(
+            "type A do X: int Y: string end\n\
+             type B do X: int Z: bool end\n\
+             let a = A { X = 1, Y = \"hi\" }\n\
+             let b = B { X = 1, Z = true }\n\
+             let c = a |> join b on X = X",
+        );
+        let ty = get_let_value_type(&prog, 4);
+        match ty {
+            TypeKind::Record(fields) => {
+                // c should have: X, Y, X_right, Z
+                assert_eq!(fields.len(), 4, "expected 4 fields in merged record, got {}", fields.len());
+            }
+            other => panic!("expected Record type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn join_field_not_found_left() {
+        let parsed = crate::passes::parse::Parser::parse(
+            "type A do X: int end\n\
+             type B do Y: int end\n\
+             let a = A { X = 1 }\n\
+             let b = B { Y = 1 }\n\
+             let c = a |> join b on Z = Y",
+            0,
+        ).expect("parse failed");
+        let expand_result = crate::passes::expand::ProviderExpander::new((parsed.ast, parsed.gcx))
+            .expand()
+            .expect("expand failed");
+        let ty = crate::context::extract_type_metadata(&expand_result.ast);
+        let ir = crate::passes::convert::ast_to_ir(expand_result.ast);
+        let (ir, gcx, resolutions) = crate::passes::resolve::IrResolver::new(ir, expand_result.gcx)
+            .with_type_metadata(ty)
+            .resolve()
+            .expect("resolve failed");
+        let result = super::TypeChecker::new(ir, gcx, resolutions).check();
+        assert!(result.is_err(), "expected typecheck error for missing field Z");
     }
 
     #[test]
