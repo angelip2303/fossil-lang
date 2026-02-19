@@ -1,56 +1,65 @@
-// Urban Mobility — Madrid bus network
-// Joins 4 heterogeneous CSV sources, then projects 4 RDF types with cross-references
-// Models: Vehicle, Route (reference-only) + PassengerImpact, PotholeEvent,
-//         RouteEfficiency, WeatherObservation (projected)
+type PassengerComfortData = csv!("lib/fossil-stdlib/examples/mobility/passenger_comfort.csv")
+type PotholeTelemetryData = csv!("lib/fossil-stdlib/examples/mobility/pothole_telemetry.csv")
+type RouteEfficiencyData = csv!("lib/fossil-stdlib/examples/mobility/route_efficiency.csv")
+type WeatherObservationData = csv!("lib/fossil-stdlib/examples/mobility/weather_observations.csv")
 
-let comfort  = csv!("lib/fossil-stdlib/examples/mobility/passenger_comfort.csv")
-let potholes = csv!("lib/fossil-stdlib/examples/mobility/pothole_telemetry.csv")
-let routes   = csv!("lib/fossil-stdlib/examples/mobility/route_efficiency.csv")
-let weather  = csv!("lib/fossil-stdlib/examples/mobility/weather_observations.csv")
 
-// Join all sources on their timestamp columns
-let unified = comfort
-    |> join potholes on recorded_at = timestamp
-    |> join routes on recorded_at = event_time
-    |> join weather on recorded_at = observation_time
-
-// Reference-only types (no projected fields — used as cross-reference targets)
-@rdf(type = "http://example.org/urban#Vehicle", base = "http://example.org/urban/vehicle/")
-type Vehicle(id: string) do
+@rdf(type = "http://example.org/urban#Vehicle", base = "http://example.org/urban#")
+type Vehicle(subject: string) do
+    @rdf(uri = "http://example.org/urban#identifier")
+    Identifier: string
 end
 
-@rdf(type = "http://example.org/urban#Route", base = "http://example.org/urban/route/")
-type Route(id: string) do
+@rdf(type = "http://example.org/urban#Route", base = "http://example.org/urban#")
+type Route(subject: string) do
+    @rdf(uri = "http://example.org/urban#identifier")
+    Identifier: string
 end
 
-// Type 1: Weather observations
-@rdf(type = "http://example.org/urban#WeatherObservation", base = "http://example.org/urban/weather/")
+@rdf(type = "http://example.org/urban#Location", base = "http://example.org/urban#")
+type Location(subject: string) do
+    @rdf(uri = "http://example.org/urban#latitude")
+    Latitude: float
+
+    @rdf(uri = "http://example.org/urban#longitude")
+    Longitude: float
+end
+
+@rdf(type = "http://example.org/urban#WeatherObservation", base = "http://example.org/urban#")
 type WeatherObservation(id: string) do
-    @rdf(uri = "http://example.org/urban#temperatureC")
-    TemperatureC: float
+    @rdf(uri = "http://example.org/urban#dateTime")
+    DateTime: string
 
-    @rdf(uri = "http://example.org/urban#humidityPct")
-    HumidityPct: float
+    @rdf(uri = "http://example.org/urban#temperature")
+    Temperature: float
 
-    @rdf(uri = "http://example.org/urban#precipitationMM")
-    PrecipitationMM: float
+    @rdf(uri = "http://example.org/urban#humidityPercentage")
+    HumidityPercentage: int
 
-    @rdf(uri = "http://example.org/urban#windSpeedKmh")
-    WindSpeedKmh: float
+    @rdf(uri = "http://example.org/urban#precipitation")
+    Precipitation: float
 
-    @rdf(uri = "http://example.org/urban#visibilityKm")
-    VisibilityKm: float
+    @rdf(uri = "http://example.org/urban#windSpeed")
+    WindSpeed: float
+
+    @rdf(uri = "http://example.org/urban#visibility")
+    Visibility: float
 
     @rdf(uri = "http://example.org/urban#weatherCondition")
     WeatherCondition: string
 
-    @rdf(uri = "http://example.org/urban#roadConditionEstimated")
-    RoadConditionEstimated: string
+    @rdf(uri = "http://example.org/urban#roadCondition")
+    RoadCondition: string
+
+    @rdf(uri = "http://example.org/urban#hasLocation")
+    HasLocation: Location
 end
 
-// Type 2: Passenger comfort impact
-@rdf(type = "http://example.org/urban#PassengerImpact", base = "http://example.org/urban/comfort/")
+@rdf(type = "http://example.org/urban#PassengerImpact", base = "http://example.org/urban#")
 type PassengerImpact(id: string) do
+    @rdf(uri = "http://example.org/urban#dateTime")
+    DateTime: string
+
     @rdf(uri = "http://example.org/urban#comfortScore")
     ComfortScore: float
 
@@ -66,103 +75,185 @@ type PassengerImpact(id: string) do
     @rdf(uri = "http://example.org/urban#reportedBy")
     ReportedBy: Vehicle
 
-    @rdf(uri = "http://example.org/urban#onRoute")
-    OnRoute: Route
+    @rdf(uri = "http://example.org/urban#hasLocation")
+    HasLocation: Location
 
-    @rdf(uri = "http://example.org/urban#occursDuring")
-    OccursDuring: WeatherObservation
+    @rdf(uri = "http://example.org/urban#relatedTo")
+    RelatedTo: Route
 end
 
-// Type 3: Pothole detection events
-@rdf(type = "http://example.org/urban#PotholeEvent", base = "http://example.org/urban/pothole/")
+@rdf(type = "http://example.org/urban#PotholeEvent", base = "http://example.org/urban#")
 type PotholeEvent(id: string) do
+    @rdf(uri = "http://example.org/urban#dateTime")
+    DateTime: string
+
     @rdf(uri = "http://example.org/urban#severity")
     Severity: string
 
     @rdf(uri = "http://example.org/urban#confidence")
     Confidence: float
 
-    @rdf(uri = "http://example.org/urban#sizeMM")
-    SizeMM: int
+    @rdf(uri = "http://example.org/urban#SizeInMilimiters")
+    SizeInMilimiters: float
 
     @rdf(uri = "http://example.org/urban#roadSurfaceCondition")
-    RoadSurfaceCondition: string
+    RoadSurfaceCondition: float
 
     @rdf(uri = "http://example.org/urban#detectedBy")
     DetectedBy: Vehicle
 
-    @rdf(uri = "http://example.org/urban#onRoute")
-    OnRoute: Route
+    @rdf(uri = "http://example.org/urban#hasLocation")
+    HasLocation: Location
 
-    @rdf(uri = "http://example.org/urban#occursDuring")
+    @rdf(uri = "http://example.org/urban#occursAt")
     OccursDuring: WeatherObservation
+
+    @rdf(uri = "http://example.org/urban#relatedTo")
+    RelatedTo: Route
 end
 
-// Type 4: Route efficiency metrics
-@rdf(type = "http://example.org/urban#RouteEfficiency", base = "http://example.org/urban/efficiency/")
+@rdf(type = "http://example.org/urban#RouteEfficiency", base = "http://example.org/urban#")
 type RouteEfficiency(id: string) do
+    @rdf(uri = "http://example.org/urban#dateTime")
+    DateTime: string
+
+    @rdf(uri = "http://example.org/urban#altRouteFlag")
+    AltRouteFlag: bool
+
     @rdf(uri = "http://example.org/urban#delayMinutes")
     DelayMinutes: float
 
-    @rdf(uri = "http://example.org/urban#fuelExtraPct")
-    FuelExtraPct: float
+    @rdf(uri = "http://example.org/urban#fuelExtractPercentage")
+    FuelExtractPercentage: float
 
-    @rdf(uri = "http://example.org/urban#detourDistanceKM")
-    DetourDistanceKM: float
+    @rdf(uri = "http://example.org/urban#detourDistanceInKilometers")
+    DetourDistanceInKilometers: float
 
     @rdf(uri = "http://example.org/urban#performedBy")
     PerformedBy: Vehicle
 
-    @rdf(uri = "http://example.org/urban#onRoute")
-    OnRoute: Route
+    @rdf(uri = "http://example.org/urban#hasLocation")
+    HasLocation: Location
 
-    @rdf(uri = "http://example.org/urban#occursDuring")
-    OccursDuring: WeatherObservation
-
-    @rdf(uri = "http://example.org/urban#comfortContext")
-    ComfortContext: PassengerImpact
-
-    @rdf(uri = "http://example.org/urban#hazardContext")
-    HazardContext: PotholeEvent
+    @rdf(uri = "http://example.org/urban#relatedTo")
+    RelatedTo: Route
 end
 
-// Multi-output: 4 RDF types from one joined dataset
-unified
-    |> each row -> WeatherObservation(row.station_code) {
-        TemperatureC = row.air_temperature_c,
-        HumidityPct = row.humidity_pct,
-        PrecipitationMM = row.precipitation_mm,
-        WindSpeedKmh = row.wind_speed_kmh,
-        VisibilityKm = row.visibility_km,
-        WeatherCondition = row.weather_condition,
-        RoadConditionEstimated = row.road_condition_estimated
-    }
-    +> each row -> PassengerImpact(row.unit_identifier) {
-        ComfortScore = row.comfort_score,
-        ComplaintCount = row.complaint_count,
-        RidershipImpact = row.ridership_impact,
-        PassengerSatisfaction = row.passenger_satisfaction,
-        ReportedBy = ref Vehicle(row.unit_identifier),
-        OnRoute = ref Route(row.service_line),
-        OccursDuring = ref WeatherObservation(row.station_code)
-    }
-    +> each row -> PotholeEvent(row.bus_code) {
-        Severity = row.severity,
-        Confidence = row.confidence,
-        SizeMM = row.size_mm,
-        RoadSurfaceCondition = row.road_surface_condition,
-        DetectedBy = ref Vehicle(row.bus_code),
-        OnRoute = ref Route(row.line_number),
-        OccursDuring = ref WeatherObservation(row.station_code)
-    }
-    +> each row -> RouteEfficiency(row.fleet_unit) {
-        DelayMinutes = row.delay_minutes,
-        FuelExtraPct = row.fuel_extra_pct,
-        DetourDistanceKM = row.detour_km,
-        PerformedBy = ref Vehicle(row.fleet_unit),
-        OnRoute = ref Route(row.line_number),
-        OccursDuring = ref WeatherObservation(row.station_code),
-        ComfortContext = ref PassengerImpact(row.unit_identifier),
-        HazardContext = ref PotholeEvent(row.bus_code)
-    }
-    |> Rdf.serialize("lib/fossil-stdlib/examples/mobility/mobility.nq")
+let passenger_efficiency =
+    PassengerComfortData.load()
+        |> each row -> PassengerComfortData {
+            unit_identifier = String.extract(row.unit_identifier, "(\d+)"),
+            vehicle_category = row.vehicle_category,
+            recorded_at = row.recorded_at,
+            geo_location_lon = row.geo_location_lon,
+            geo_location_lat = row.geo_location_lat,
+            service_line = row.service_line,
+            comfort_score = row.comfort_score,
+            complaint_count = row.complaint_count,
+            ridership_impact = row.ridership_impact,
+            passenger_satisfaction = row.passenger_satisfaction,
+        }
+
+let pothole_telemetry =
+    PotholeTelemetryData.load()
+        |> each row -> PotholeTelemetryData {
+            bus_code = String.extract(row.bus_code, "(\d+)"),
+            bus_type = row.bus_type,
+            timestamp = row.timestamp,
+            pothole_latitude = row.pothole_latitude,
+            pothole_longitude = row.pothole_longitude,
+            severity = row.severity,
+            confidence = row.confidence,
+            size_mm = row.size_mm,
+            road_surface_condition = row.road_surface_condition,
+            num_passengers_onboard = row.num_passengers_onboard,
+        }
+
+let route_efficiency =
+    RouteEfficiencyData.load()
+        |> each row -> RouteEfficiencyData {
+            fleet_unit = String.extract(row.fleet_unit, "(\d+)"),
+            type = row.type,
+            event_time = row.event_time,
+            coord_lng = row.coord_lng,
+            coord_lat = row.coord_lat,
+            line_number = row.line_number,
+            alt_route_flag = row.alt_route_flag,
+            delay_minutes = row.delay_minutes,
+            fuel_extra_pct = row.fuel_extra_pct,
+            detour_km = row.detour_km,
+        }
+
+let weather_observations =
+    WeatherObservationData.load()
+        |> each row -> WeatherObservationData {
+            station_code = row.station_code,
+            observation_time = row.observation_time,
+            geo_point_longitude = row.geo_point_longitude,
+            geo_point_latitude = row.geo_point_latitude,
+            air_temperature_c = row.air_temperature_c,
+            humidity_pct = row.humidity_pct,
+            precipitation_mm = row.precipitation_mm,
+            wind_speed_kmh = row.wind_speed_kmh,
+            visibility_km = row.visibility_km,
+            weather_condition = row.weather_condition,
+            road_condition_estimated = row.road_condition_estimated,
+        }
+
+passenger_efficiency
+|> join pothole_telemetry on (unit_identifier, recorded_at, geo_location_lon, geo_location_lat) = (bus_code, timestamp, pothole_longitude, pothole_latitude)
+|> join route_efficiency  on (unit_identifier, recorded_at, geo_location_lon, geo_location_lat, service_line) = (fleet_unit, event_time, coord_lng, coord_lat, line_number)
+|> join weather_observations on (recorded_at, geo_location_lon, geo_location_lat) = (observation_time, geo_point_longitude, geo_point_latitude)
+|> each row -> WeatherObservation("WeatherObservation_${row.unit_identifier}") {
+    DateTime = row.recorded_at,
+    Temperature = row.air_temperature_c,
+    HumidityPercentage = row.humidity_pct,
+    Precipitation = row.precipitation_mm,
+    WindSpeed = row.wind_speed_kmh,
+    Visibility = row.visibility_km,
+    WeatherCondition = row.weather_condition,
+    RoadCondition = row.road_condition_estimated,
+    HasLocation = ref Location("Location_${row.geo_location_lon}_${row.geo_location_lat}"),
+}
++> each row -> PassengerImpact("PassengerImpact_${row.unit_identifier}") {
+    DateTime = row.recorded_at,
+    ComfortScore = row.comfort_score,
+    ComplaintCount = row.complaint_count,
+    RidershipImpact = row.ridership_impact,
+    PassengerSatisfaction = row.passenger_satisfaction,
+    ReportedBy = ref Vehicle("Vehicle_${row.unit_identifier}"),
+    HasLocation = ref Location("Location_${row.geo_location_lon}_${row.geo_location_lat}"),
+    RelatedTo = ref Route("Route_${row.service_line}"),
+}
++> each row -> PotholeEvent("PotholeEvent_${row.unit_identifier}") {
+    DateTime = row.recorded_at,
+    Severity = row.severity,
+    Confidence = row.confidence,
+    SizeInMilimiters = row.size_mm,
+    RoadSurfaceCondition = row.road_surface_condition,
+    DetectedBy = ref Vehicle("Vehicle_${row.unit_identifier}"),
+    HasLocation = ref Location("Location_${row.geo_location_lon}_${row.geo_location_lat}"),
+    OccursDuring = ref WeatherObservation("WeatherObservation_${row.unit_identifier}"),
+    RelatedTo = ref Route("Route_${row.service_line}")
+}
++> each row -> RouteEfficiency("RouteEfficiency_${row.unit_identifier}") {
+    DateTime = row.recorded_at,
+    AltRouteFlag = row.fuel_extra_pct,
+    DelayMinutes = row.detour_km,
+    FuelExtractPercentage = row.fuel_extra_pct,
+    DetourDistanceInKilometers = row.detour_km,
+    PerformedBy = ref Vehicle("Vehicle_${row.unit_identifier}"),
+    HasLocation = ref Location("Location_${row.geo_location_lon}_${row.geo_location_lat}"),
+    RelatedTo = ref Route("Route_${row.service_line}"),
+}
++> each row -> Vehicle("Vehicle_${row.unit_identifier}") {
+    Identifier = row.unit_identifier,
+}
++> each row -> Route("Route_${row.service_line}") {
+    Identifier = row.service_line,
+}
++> each row -> Location("Location_${row.geo_location_lon}_${row.geo_location_lat}") {
+    Latitude = row.geo_location_lon,
+    Longitude = row.geo_location_lat
+}
+|> Rdf.serialize("mobility.nq")

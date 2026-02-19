@@ -75,3 +75,28 @@ pub enum Token<'a> {
     #[regex(r"[0-9]+", |lex| lex.slice().parse().ok())]
     Integer(i64),
 }
+
+impl Token<'_> {
+    /// Returns the string representation of keyword tokens, or None for non-keyword tokens.
+    pub fn as_keyword_str(&self) -> Option<&str> {
+        match self {
+            Token::Let => Some("let"),
+            Token::Type => Some("type"),
+            Token::Each => Some("each"),
+            Token::Do => Some("do"),
+            Token::End => Some("end"),
+            Token::Join => Some("join"),
+            Token::LeftJoin => Some("left_join"),
+            Token::On => Some("on"),
+            Token::Suffix => Some("suffix"),
+            Token::True => Some("true"),
+            Token::False => Some("false"),
+            Token::IntType => Some("int"),
+            Token::BoolType => Some("bool"),
+            Token::StringType => Some("string"),
+            Token::FloatType => Some("float"),
+            Token::Ref => Some("ref"),
+            _ => None,
+        }
+    }
+}

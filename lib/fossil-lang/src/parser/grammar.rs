@@ -97,7 +97,7 @@ where
     let do_end_field = parse_attribute(ctx)
         .repeated()
         .collect::<Vec<_>>()
-        .then(parse_symbol(ctx))
+        .then(parse_field_name(ctx))
         .then_ignore(just(Token::Colon))
         .then(parse_type(ctx))
         .map(|((attrs, name), ty)| RecordField { name, ty, attrs });
@@ -270,7 +270,7 @@ where
 
         let literal = non_string_literal.or(string_expr);
 
-        let record_field = parse_symbol(ctx)
+        let record_field = parse_field_name(ctx)
             .then_ignore(just(Token::Eq))
             .then(expr.clone());
 
@@ -383,7 +383,7 @@ where
             postfix(
                 10, // Highest precedence
                 just(Token::Dot)
-                    .ignore_then(parse_symbol(ctx))
+                    .ignore_then(parse_field_name(ctx))
                     .map_with(|field, e| (field, e.span())),
                 |(lhs, lhs_span): (ExprId, SimpleSpan),
                  (field, field_span): (Symbol, SimpleSpan),
@@ -621,15 +621,38 @@ fn is_valid_identifier(s: &str) -> bool {
     chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-fn parse_attr_key<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
+/// Parse a field name: allows identifiers and keywords in field positions
+/// (record constructors, field access after `.`, type field definitions).
+fn parse_field_name<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
     select! {
         Token::Identifier(ident) => ctx.intern(ident),
-        Token::Type => ctx.intern("type"),
         Token::Let => ctx.intern("let"),
+        Token::Type => ctx.intern("type"),
+        Token::Each => ctx.intern("each"),
+        Token::Do => ctx.intern("do"),
+        Token::End => ctx.intern("end"),
+        Token::Join => ctx.intern("join"),
+        Token::LeftJoin => ctx.intern("left_join"),
+        Token::On => ctx.intern("on"),
+        Token::Suffix => ctx.intern("suffix"),
+        Token::True => ctx.intern("true"),
+        Token::False => ctx.intern("false"),
+        Token::IntType => ctx.intern("int"),
+        Token::BoolType => ctx.intern("bool"),
+        Token::StringType => ctx.intern("string"),
+        Token::FloatType => ctx.intern("float"),
+        Token::Ref => ctx.intern("ref"),
     }
+}
+
+fn parse_attr_key<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
+where
+    I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
+{
+    parse_field_name(ctx)
 }
 
 /// Parse attribute: @name(key = value, ...) or @name("positional")

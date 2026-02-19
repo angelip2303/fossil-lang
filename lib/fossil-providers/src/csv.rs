@@ -133,7 +133,7 @@ impl TypeProviderImpl for CsvProvider {
 
         Ok(ProviderOutput::new(ProviderSchema { fields })
             .with_module(module_spec)
-            .as_data())
+            .as_both())
     }
 }
 

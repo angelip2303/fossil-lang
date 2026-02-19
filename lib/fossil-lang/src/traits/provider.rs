@@ -14,6 +14,8 @@ pub enum ProviderKind {
     Schema,
     /// Generates a type + loads data (e.g. CSV). Use with `let x = provider!(...)`.
     Data,
+    /// Works in both positions: `type X = provider!(...)` or `let x = provider!(...)`.
+    Both,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +59,11 @@ impl ProviderOutput {
 
     pub fn as_data(mut self) -> Self {
         self.kind = ProviderKind::Data;
+        self
+    }
+
+    pub fn as_both(mut self) -> Self {
+        self.kind = ProviderKind::Both;
         self
     }
 
