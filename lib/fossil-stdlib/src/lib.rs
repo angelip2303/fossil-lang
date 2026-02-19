@@ -1,5 +1,6 @@
 pub mod rdf;
 pub mod report;
+pub mod string;
 pub mod validate;
 
 pub use rdf::{RdfMetadata, RdfSerializeFunction};
@@ -18,6 +19,13 @@ pub fn init(gcx: &mut GlobalContext) {
     });
     gcx.register_module("Report", ModuleSpec {
         functions: vec![FunctionDef::new("csv", ReportCsvFunction)],
+    });
+    gcx.register_module("String", ModuleSpec {
+        functions: vec![
+            FunctionDef::new("extract", string::StringExtractFunction),
+            FunctionDef::new("replace", string::StringReplaceFunction),
+            FunctionDef::new("replace_all", string::StringReplaceAllFunction),
+        ],
     });
 
     let validation_error_def_id = gcx.register_record_type_with_optionality(
