@@ -187,6 +187,16 @@ impl TypeChecker {
             return Err(errors);
         }
 
+        // Finalize: populate expr_types for ALL expressions with fully-resolved types.
+        // check_stmt only inserts root expressions of Let/Expr statements.
+        // This fills in all sub-expressions (joins, applications, etc.) from infer_cache.
+        let cached: Vec<_> = self.infer_cache.iter().map(|(&k, &v)| (k, v)).collect();
+        for (expr_id, raw_ty) in cached {
+            self.typeck_results.expr_types
+                .entry(expr_id)
+                .or_insert_with(|| self.global_subst.apply(raw_ty, &mut self.ir));
+        }
+
         Ok(IrProgram {
             ir: self.ir,
             gcx: self.gcx,

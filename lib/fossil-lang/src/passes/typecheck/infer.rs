@@ -254,7 +254,6 @@ impl TypeChecker {
 
         if let Ok((_, ty)) = &result {
             self.infer_cache.insert(expr_id, *ty);
-            self.typeck_results.expr_types.insert(expr_id, *ty);
         }
 
         result
