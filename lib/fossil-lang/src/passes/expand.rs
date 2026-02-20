@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::ast::*;
-use crate::context::{DefKind, Symbol};
+use crate::context::{DefKind, Interner, Symbol};
 use crate::context::global::TypeInfo;
 use crate::error::{FossilError, FossilErrors, FossilWarnings};
 use crate::passes::GlobalContext;
@@ -51,6 +51,31 @@ fn schema_to_ast(schema: &ProviderSchema, ast: &mut Ast, loc: Loc) -> TypeId {
         loc,
         kind: TypeKind::Record(fields),
     })
+}
+
+fn build_provider_attribute(
+    interner: &mut Interner,
+    provider_name: &str,
+    kind: ProviderKind,
+    loc: Loc,
+) -> Attribute {
+    let attr_name = interner.intern("provider");
+    let name_key = interner.intern("name");
+    let name_value = interner.intern(provider_name);
+    let kind_key = interner.intern("kind");
+    let kind_value = interner.intern(match kind {
+        ProviderKind::Schema => "schema",
+        ProviderKind::Data => "data",
+        ProviderKind::Both => "both",
+    });
+    Attribute {
+        name: attr_name,
+        args: vec![
+            AttributeArg::Named { key: name_key, value: Literal::String(name_value) },
+            AttributeArg::Named { key: kind_key, value: Literal::String(kind_value) },
+        ],
+        loc,
+    }
 }
 
 impl ProviderExpander {
@@ -175,6 +200,7 @@ impl ProviderExpander {
         )?;
 
         let type_name_str = self.gcx.interner.resolve(type_name).to_string();
+        let provider_name_str = provider_path.display(&self.gcx.interner);
         let provider_output = {
             let mut ctx = ProviderContext {
                 interner: &mut self.gcx.interner,
@@ -184,13 +210,16 @@ impl ProviderExpander {
         };
 
         if provider_output.kind == ProviderKind::Data {
-            let provider_name = provider_path.display(&self.gcx.interner);
             return Err(FossilError::provider_kind_mismatch(
-                provider_name,
+                provider_name_str,
                 "loads data, use `let` instead of `type`",
                 loc,
             ));
         }
+
+        let provider_attr = build_provider_attribute(
+            &mut self.gcx.interner, &provider_name_str, provider_output.kind, loc,
+        );
 
         self.warnings.extend(provider_output.warnings);
 
@@ -200,10 +229,13 @@ impl ProviderExpander {
         let ty_mut = self.ast.types.get_mut(type_id);
         ty_mut.kind = generated_kind;
 
-        if !provider_output.type_attributes.is_empty() {
+        {
             let stmt_mut = self.ast.stmts.get_mut(stmt_id);
             if let StmtKind::Type { attrs, .. } = &mut stmt_mut.kind {
                 let user_names: HashSet<Symbol> = attrs.iter().map(|a| a.name).collect();
+                if !user_names.contains(&provider_attr.name) {
+                    attrs.push(provider_attr);
+                }
                 let new_attrs: Vec<_> = provider_output.type_attributes
                     .into_iter()
                     .filter(|a| !user_names.contains(&a.name))
@@ -256,6 +288,7 @@ impl ProviderExpander {
         )?;
 
         let binding_name_str = self.gcx.interner.resolve(binding_name).to_string();
+        let provider_name_str = provider_path.display(&self.gcx.interner);
         let provider_output = {
             let mut ctx = ProviderContext {
                 interner: &mut self.gcx.interner,
@@ -265,13 +298,16 @@ impl ProviderExpander {
         };
 
         if provider_output.kind == ProviderKind::Schema {
-            let provider_name = provider_path.display(&self.gcx.interner);
             return Err(FossilError::provider_kind_mismatch(
-                provider_name,
+                provider_name_str,
                 "is schema-only, use `type` instead of `let`",
                 loc,
             ));
         }
+
+        let provider_attr = build_provider_attribute(
+            &mut self.gcx.interner, &provider_name_str, provider_output.kind, loc,
+        );
 
         self.warnings.extend(provider_output.warnings);
 
@@ -283,12 +319,15 @@ impl ProviderExpander {
             kind: generated_kind,
         });
 
+        let mut attrs = provider_output.type_attributes;
+        attrs.push(provider_attr);
+
         let synth_type_stmt = self.ast.stmts.alloc(Stmt {
             loc,
             kind: StmtKind::Type {
                 name: binding_name,
                 ty: synth_type_id,
-                attrs: provider_output.type_attributes,
+                attrs,
                 ctor_params: vec![],
             },
         });
