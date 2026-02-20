@@ -18,7 +18,7 @@ pub enum ValidateMode {
     Errors,
 }
 
-/// Generates `Type.validate()` and `Type.errors()` for record types with `@validate` attributes
+/// Generates `Type.validate()` and `Type.errors()` for record types with `#[validate]` attributes
 pub fn validate_module_generator(
     validation_error_def_id: DefId,
 ) -> Arc<dyn Fn(&TypeInfo) -> Option<ModuleSpec> + Send + Sync> {

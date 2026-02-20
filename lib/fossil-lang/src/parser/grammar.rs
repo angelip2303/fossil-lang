@@ -93,7 +93,7 @@ where
         .or_not()
         .map(|opt| opt.unwrap_or_default());
 
-    // do...end record syntax: type Name(params) do @attr Field: Type ... end
+    // do...end record syntax: type Name(params) do #[attr] Field: Type ... end
     let do_end_field = parse_attribute(ctx)
         .repeated()
         .collect::<Vec<_>>()
@@ -652,7 +652,7 @@ where
     parse_field_name(ctx)
 }
 
-/// Parse attribute: @name(key = value, ...) or @name("positional")
+/// Parse attribute: #[name(key = value, ...)] or #[name("positional")]
 fn parse_attribute<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Attribute, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
@@ -666,7 +666,7 @@ where
 
     let attr_arg = named_arg.or(positional_arg);
 
-    just(Token::At)
+    just(Token::HashBracket)
         .ignore_then(parse_symbol(ctx))
         .then(
             attr_arg
@@ -676,6 +676,7 @@ where
                 .delimited_by(just(Token::LParen), just(Token::RParen))
                 .or_not(),
         )
+        .then_ignore(just(Token::RBracket))
         .map_with(|(name, args), e| Attribute {
             name,
             args: args.unwrap_or_default(),

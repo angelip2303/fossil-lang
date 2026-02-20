@@ -123,7 +123,7 @@ fn serialize_rdf(
             let type_name = ctx.gcx.definitions.get(output_spec.type_def_id).name;
             let type_name_str = interner.resolve(type_name);
 
-            // 1. Extract RDF metadata from @rdf attributes
+            // 1. Extract RDF metadata from #[rdf] attributes
             let rdf_result = ctx
                 .gcx
                 .type_metadata

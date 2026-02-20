@@ -1,14 +1,14 @@
 let student_sport = csv!("tests/RMLTC0004a-CSV/student_sport.csv")
 
-@rdf(type = "http://example.com/Student")
+#[rdf(type = "http://example.com/Student")]
 type Student(subject: string) do
-    @rdf(uri = "http://xmlns.com/foaf/0.1/name")
+    #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
     Name: string
 end
 
-@rdf(type = "http://example.com/Sport")
+#[rdf(type = "http://example.com/Sport")]
 type Sport(subject: string) do
-    @rdf(uri = "http://xmlns.com/foaf/0.1/name")
+    #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
     Name: string
 end
 

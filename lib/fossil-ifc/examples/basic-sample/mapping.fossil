@@ -1,9 +1,9 @@
-@rdf(type = "http://example.com/bim#Wall", base = "http://example.com/wall/")
+#[rdf(type = "http://example.com/bim#Wall", base = "http://example.com/wall/")]
 type ValidWall(id: string) do
-    @rdf("https://w3id.org/digitalconstruction/0.5/Entities#hasLabel")
+    #[rdf("https://w3id.org/digitalconstruction/0.5/Entities#hasLabel")]
     Name: string
 
-    @rdf("http://example.com/bim#Description")
+    #[rdf("http://example.com/bim#Description")]
     Description: string?
 end
 

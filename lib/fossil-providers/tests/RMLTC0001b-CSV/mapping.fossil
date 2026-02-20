@@ -1,7 +1,7 @@
 let input = csv!("tests/RMLTC0001b-CSV/student.csv")
 
 type Output(subject: string) do
-    @rdf(uri = "http://xmlns.com/foaf/0.1/name")
+    #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
     Name: string
 end
 

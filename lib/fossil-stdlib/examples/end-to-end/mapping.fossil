@@ -1,16 +1,16 @@
 let data = csv!("lib/fossil-stdlib/examples/end-to-end/people.csv")
 
-// @rdf(base = "http://example.com/person/")
+// #[rdf(base = "http://example.com/person/")]
 // type Person(id: string) do
-//     @rdf(uri = "http://xmlns.com/foaf/0.1/name")
-//     @validate(min_length = 2)
+//     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
+//     #[validate(min_length = 2)]
 //     name: string
 
-//     @rdf(uri = "http://xmlns.com/foaf/0.1/age")
+//     #[rdf(uri = "http://xmlns.com/foaf/0.1/age")]
 //     age: int
 // end
 
-@rdf(base = "http://example.com/person/")
+#[rdf(base = "http://example.com/person/")]
 type Person(id: string) = shex!("lib/fossil-stdlib/examples/end-to-end/person.shex", shape: "PersonShape")
 
 let mapped = data

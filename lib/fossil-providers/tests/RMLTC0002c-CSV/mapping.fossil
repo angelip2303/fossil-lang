@@ -1,10 +1,10 @@
 let input = csv!("tests/RMLTC0002c-CSV/student.csv")
 
 type Output do
-    @rdf(uri = "http://example.com/id")
+    #[rdf(uri = "http://example.com/id")]
     ID: string
 
-    @rdf(uri = "http://xmlns.com/foaf/0.1/name")
+    #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
     Name: string
 end
 
@@ -12,7 +12,7 @@ end
 // This should cause a compilation error (negative test)
 input
 |> map(each row -> Output {
-    @id = "http://example.com/${row.ID}/${row.Name}",
+    id = "http://example.com/${row.ID}/${row.Name}",
     ID = row.IDs,
     Name = row.Name
 })

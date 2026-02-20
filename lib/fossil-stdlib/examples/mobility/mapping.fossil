@@ -4,138 +4,138 @@ type RouteEfficiencyData = csv!("lib/fossil-stdlib/examples/mobility/route_effic
 type WeatherObservationData = csv!("lib/fossil-stdlib/examples/mobility/weather_observations.csv")
 
 
-@rdf(type = "http://example.org/urban#Vehicle", base = "http://example.org/urban#")
+#[rdf(type = "http://example.org/urban#Vehicle", base = "http://example.org/urban#")]
 type Vehicle(subject: string) do
-    @rdf(uri = "http://example.org/urban#identifier")
+    #[rdf(uri = "http://example.org/urban#identifier")]
     Identifier: string
 end
 
-@rdf(type = "http://example.org/urban#Route", base = "http://example.org/urban#")
+#[rdf(type = "http://example.org/urban#Route", base = "http://example.org/urban#")]
 type Route(subject: string) do
-    @rdf(uri = "http://example.org/urban#identifier")
+    #[rdf(uri = "http://example.org/urban#identifier")]
     Identifier: string
 end
 
-@rdf(type = "http://example.org/urban#Location", base = "http://example.org/urban#")
+#[rdf(type = "http://example.org/urban#Location", base = "http://example.org/urban#")]
 type Location(subject: string) do
-    @rdf(uri = "http://example.org/urban#latitude")
+    #[rdf(uri = "http://example.org/urban#latitude")]
     Latitude: float
 
-    @rdf(uri = "http://example.org/urban#longitude")
+    #[rdf(uri = "http://example.org/urban#longitude")]
     Longitude: float
 end
 
-@rdf(type = "http://example.org/urban#WeatherObservation", base = "http://example.org/urban#")
+#[rdf(type = "http://example.org/urban#WeatherObservation", base = "http://example.org/urban#")]
 type WeatherObservation(id: string) do
-    @rdf(uri = "http://example.org/urban#dateTime")
+    #[rdf(uri = "http://example.org/urban#dateTime")]
     DateTime: string
 
-    @rdf(uri = "http://example.org/urban#temperature")
+    #[rdf(uri = "http://example.org/urban#temperature")]
     Temperature: float
 
-    @rdf(uri = "http://example.org/urban#humidityPercentage")
+    #[rdf(uri = "http://example.org/urban#humidityPercentage")]
     HumidityPercentage: int
 
-    @rdf(uri = "http://example.org/urban#precipitation")
+    #[rdf(uri = "http://example.org/urban#precipitation")]
     Precipitation: float
 
-    @rdf(uri = "http://example.org/urban#windSpeed")
+    #[rdf(uri = "http://example.org/urban#windSpeed")]
     WindSpeed: float
 
-    @rdf(uri = "http://example.org/urban#visibility")
+    #[rdf(uri = "http://example.org/urban#visibility")]
     Visibility: float
 
-    @rdf(uri = "http://example.org/urban#weatherCondition")
+    #[rdf(uri = "http://example.org/urban#weatherCondition")]
     WeatherCondition: string
 
-    @rdf(uri = "http://example.org/urban#roadCondition")
+    #[rdf(uri = "http://example.org/urban#roadCondition")]
     RoadCondition: string
 
-    @rdf(uri = "http://example.org/urban#hasLocation")
+    #[rdf(uri = "http://example.org/urban#hasLocation")]
     HasLocation: Location
 end
 
-@rdf(type = "http://example.org/urban#PassengerImpact", base = "http://example.org/urban#")
+#[rdf(type = "http://example.org/urban#PassengerImpact", base = "http://example.org/urban#")]
 type PassengerImpact(id: string) do
-    @rdf(uri = "http://example.org/urban#dateTime")
+    #[rdf(uri = "http://example.org/urban#dateTime")]
     DateTime: string
 
-    @rdf(uri = "http://example.org/urban#comfortScore")
+    #[rdf(uri = "http://example.org/urban#comfortScore")]
     ComfortScore: float
 
-    @rdf(uri = "http://example.org/urban#complaintCount")
+    #[rdf(uri = "http://example.org/urban#complaintCount")]
     ComplaintCount: int
 
-    @rdf(uri = "http://example.org/urban#ridershipImpact")
+    #[rdf(uri = "http://example.org/urban#ridershipImpact")]
     RidershipImpact: float
 
-    @rdf(uri = "http://example.org/urban#passengerSatisfaction")
+    #[rdf(uri = "http://example.org/urban#passengerSatisfaction")]
     PassengerSatisfaction: float
 
-    @rdf(uri = "http://example.org/urban#reportedBy")
+    #[rdf(uri = "http://example.org/urban#reportedBy")]
     ReportedBy: Vehicle
 
-    @rdf(uri = "http://example.org/urban#hasLocation")
+    #[rdf(uri = "http://example.org/urban#hasLocation")]
     HasLocation: Location
 
-    @rdf(uri = "http://example.org/urban#relatedTo")
+    #[rdf(uri = "http://example.org/urban#relatedTo")]
     RelatedTo: Route
 end
 
-@rdf(type = "http://example.org/urban#PotholeEvent", base = "http://example.org/urban#")
+#[rdf(type = "http://example.org/urban#PotholeEvent", base = "http://example.org/urban#")]
 type PotholeEvent(id: string) do
-    @rdf(uri = "http://example.org/urban#dateTime")
+    #[rdf(uri = "http://example.org/urban#dateTime")]
     DateTime: string
 
-    @rdf(uri = "http://example.org/urban#severity")
+    #[rdf(uri = "http://example.org/urban#severity")]
     Severity: string
 
-    @rdf(uri = "http://example.org/urban#confidence")
+    #[rdf(uri = "http://example.org/urban#confidence")]
     Confidence: float
 
-    @rdf(uri = "http://example.org/urban#SizeInMilimiters")
+    #[rdf(uri = "http://example.org/urban#SizeInMilimiters")]
     SizeInMilimiters: float
 
-    @rdf(uri = "http://example.org/urban#roadSurfaceCondition")
+    #[rdf(uri = "http://example.org/urban#roadSurfaceCondition")]
     RoadSurfaceCondition: float
 
-    @rdf(uri = "http://example.org/urban#detectedBy")
+    #[rdf(uri = "http://example.org/urban#detectedBy")]
     DetectedBy: Vehicle
 
-    @rdf(uri = "http://example.org/urban#hasLocation")
+    #[rdf(uri = "http://example.org/urban#hasLocation")]
     HasLocation: Location
 
-    @rdf(uri = "http://example.org/urban#occursAt")
+    #[rdf(uri = "http://example.org/urban#occursAt")]
     OccursDuring: WeatherObservation
 
-    @rdf(uri = "http://example.org/urban#relatedTo")
+    #[rdf(uri = "http://example.org/urban#relatedTo")]
     RelatedTo: Route
 end
 
-@rdf(type = "http://example.org/urban#RouteEfficiency", base = "http://example.org/urban#")
+#[rdf(type = "http://example.org/urban#RouteEfficiency", base = "http://example.org/urban#")]
 type RouteEfficiency(id: string) do
-    @rdf(uri = "http://example.org/urban#dateTime")
+    #[rdf(uri = "http://example.org/urban#dateTime")]
     DateTime: string
 
-    @rdf(uri = "http://example.org/urban#altRouteFlag")
+    #[rdf(uri = "http://example.org/urban#altRouteFlag")]
     AltRouteFlag: bool
 
-    @rdf(uri = "http://example.org/urban#delayMinutes")
+    #[rdf(uri = "http://example.org/urban#delayMinutes")]
     DelayMinutes: float
 
-    @rdf(uri = "http://example.org/urban#fuelExtractPercentage")
+    #[rdf(uri = "http://example.org/urban#fuelExtractPercentage")]
     FuelExtractPercentage: float
 
-    @rdf(uri = "http://example.org/urban#detourDistanceInKilometers")
+    #[rdf(uri = "http://example.org/urban#detourDistanceInKilometers")]
     DetourDistanceInKilometers: float
 
-    @rdf(uri = "http://example.org/urban#performedBy")
+    #[rdf(uri = "http://example.org/urban#performedBy")]
     PerformedBy: Vehicle
 
-    @rdf(uri = "http://example.org/urban#hasLocation")
+    #[rdf(uri = "http://example.org/urban#hasLocation")]
     HasLocation: Location
 
-    @rdf(uri = "http://example.org/urban#relatedTo")
+    #[rdf(uri = "http://example.org/urban#relatedTo")]
     RelatedTo: Route
 end
 

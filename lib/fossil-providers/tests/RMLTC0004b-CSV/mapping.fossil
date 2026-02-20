@@ -1,7 +1,7 @@
 let input = csv!("tests/RMLTC0004b-CSV/student.csv")
 
 type Output do
-    @rdf(uri = "http://xmlns.com/foaf/0.1/name")
+    #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
     Name: string
 end
 
@@ -9,7 +9,7 @@ end
 // {Name} is not a valid IRI (negative test)
 input
 |> map(each row -> Output {
-    @id = "${row.Name}",
+    id = "${row.Name}",
     Name = row.Name
 })
 |> Rdf.serialize("tests/RMLTC0004b-CSV/actual.nq")

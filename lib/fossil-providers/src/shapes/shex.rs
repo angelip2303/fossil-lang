@@ -201,7 +201,7 @@ fn extract_fields_from_triple_expr(
 
             if predicate_uri == RDF_TYPE {
                 warnings.push(FossilWarning::generic(
-                    format!("shape '{}': rdf:type constraint ignored (use @rdf(type) instead)", shape_name),
+                    format!("shape '{}': rdf:type constraint ignored (use #[rdf(type)] instead)", shape_name),
                     loc,
                 ));
                 return;

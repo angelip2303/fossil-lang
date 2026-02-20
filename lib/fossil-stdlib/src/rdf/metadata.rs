@@ -116,7 +116,7 @@ impl RdfMetadata {
                         let type_name_str = type_name.unwrap_or("<anonymous>");
 
                         warnings.push(FossilWarning::generic(
-                            format!("type '{}': @rdf(type) attribute '{}' conflicts with rdf:type field '{}'", type_name_str, attr_type, field_name_str),
+                            format!("type '{}': #[rdf(type)] attribute '{}' conflicts with rdf:type field '{}'", type_name_str, attr_type, field_name_str),
                             Loc::generated(),
                         ));
                     }

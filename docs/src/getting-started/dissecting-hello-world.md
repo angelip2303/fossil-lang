@@ -3,15 +3,15 @@
 ```fossil
 type Input = csv!("people.csv")
 
-@rdf(type = "http://xmlns.com/foaf/0.1/Person")
+#[rdf(type = "http://xmlns.com/foaf/0.1/Person")]
 type Output(id: string) do
-    @rdf(uri = "http://example.com/person/name")
+    #[rdf(uri = "http://example.com/person/name")]
     name: string
 
-    @rdf(uri = "http://example.com/person/age")
+    #[rdf(uri = "http://example.com/person/age")]
     age: int
 
-    @rdf(uri = "http://example.com/person/email")
+    #[rdf(uri = "http://example.com/person/email")]
     email: string
 end
 
@@ -45,7 +45,7 @@ In this example, we define a type `Input` that represents the structure of a CSV
 
 ```fossil
 do
-    @rdf(uri = "http://example.com/person/name")
+    #[rdf(uri = "http://example.com/person/name")]
     name: string
     ...
 end
@@ -54,7 +54,7 @@ end
 A record is a composite data structure that can be used to represent collections of fixed (in number) fields with possibly different data types each.
 The collection of fields is surrounded by `do...end` keywords.
 Fields are defined using a name followed by a colon `:` and the type of the field.
-Fields can also be annotated with attributes, such as `@rdf(uri = "...")`, which can be used to provide additional information about the field.
+Fields can also be annotated with attributes, such as `#[rdf(uri = "...")]`, which can be used to provide additional information about the field.
 
 > Internally, type providers build the record type from the source file.
 

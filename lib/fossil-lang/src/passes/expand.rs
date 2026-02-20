@@ -456,9 +456,9 @@ mod tests {
     #[test]
     fn attribute_preserved_through_expand() {
         let src = concat!(
-            "@rdf(type = \"http://example.org/Person\")\n",
+            "#[rdf(type = \"http://example.org/Person\")]\n",
             "type Person(subject: string) do\n",
-            "    @rdf(uri = \"http://xmlns.com/foaf/0.1/name\")\n",
+            "    #[rdf(uri = \"http://xmlns.com/foaf/0.1/name\")]\n",
             "    Name: string\n",
             "end\n",
         );

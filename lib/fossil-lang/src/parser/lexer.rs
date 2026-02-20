@@ -64,8 +64,10 @@ pub enum Token<'a> {
     Bang,
     #[token("?")]
     Question,
-    #[token("@")]
-    At,
+    #[token("#[")]
+    HashBracket,
+    #[token("]")]
+    RBracket,
 
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice(), priority = 2)]
     Identifier(&'a str),
