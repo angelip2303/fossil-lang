@@ -203,9 +203,9 @@ let weather_observations =
 
 
 passenger_efficiency
-|> left_join pothole_telemetry on (unit_identifier, recorded_at) = (bus_code, timestamp)
-|> left_join route_efficiency  on (unit_identifier, recorded_at) = (fleet_unit, event_time)
-|> left_join weather_observations on (recorded_at) = (observation_time)
+|> join pothole_telemetry on (unit_identifier, recorded_at) = (bus_code, timestamp)
+|> join route_efficiency  on (unit_identifier, recorded_at) = (fleet_unit, event_time)
+|> join weather_observations on (recorded_at) = (observation_time)
 |> each row -> WeatherObservation("WeatherObservation_${row.unit_identifier}") {
     DateTime = row.recorded_at,
     Temperature = row.air_temperature_c,

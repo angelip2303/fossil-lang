@@ -241,9 +241,7 @@ fn extract_fields_from_triple_expr(
             }
         }
 
-        TripleExpr::TripleExprRef(_) => {
-            unimplemented!("Expressions referencing other shapes are not supported yet")
-        }
+        _ => {}
     }
 }
 
