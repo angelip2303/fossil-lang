@@ -350,6 +350,46 @@ mod tests {
     }
 
     #[test]
+    fn join_inside_projection_populates_expr_types() {
+        use crate::ir::ExprKind;
+
+        let prog = compile_ok(
+            "type A do X: int Y: string end\n\
+             type B do X: int Z: bool end\n\
+             type Out do Y: string Z: bool end\n\
+             let a = A { X = 1, Y = \"hi\" }\n\
+             let b = B { X = 1, Z = true }\n\
+             a |> join b on X = X |> each row -> Out { Y = row.Y, Z = row.Z }",
+        );
+
+        // The last statement is an Expr containing Projection(source=Join(...), ...)
+        let last_stmt_id = *prog.ir.root.last().unwrap();
+        let stmt = prog.ir.stmts.get(last_stmt_id);
+        let proj_expr_id = match &stmt.kind {
+            StmtKind::Expr(e) => *e,
+            _ => panic!("expected Expr statement"),
+        };
+
+        // Walk into the Projection to find its source (the Join)
+        let proj_expr = prog.ir.exprs.get(proj_expr_id);
+        let join_expr_id = match &proj_expr.kind {
+            ExprKind::Projection { source, .. } => *source,
+            _ => panic!("expected Projection expression"),
+        };
+
+        // The join ExprId must be in expr_types with a Record type
+        let join_ty_id = prog.typeck_results.expr_types.get(&join_expr_id)
+            .expect("join ExprId missing from expr_types — finalization bug");
+        let join_ty = &prog.ir.types.get(*join_ty_id).kind;
+        match join_ty {
+            TypeKind::Record(fields) => {
+                assert_eq!(fields.len(), 4, "expected 4 merged fields, got {}", fields.len());
+            }
+            other => panic!("expected Record type for join, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn infer_nested_field_access() {
         let prog = compile_ok(
             "type Inner do Value: int end\n\
