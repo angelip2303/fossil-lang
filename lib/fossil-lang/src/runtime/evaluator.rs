@@ -139,8 +139,8 @@ impl<'a> IrEvaluator<'a> {
                 outputs,
             } => self.eval_projection(*source, *binding, outputs),
 
-            ExprKind::Join { left, right, left_on, right_on, how, suffix } => {
-                self.eval_join(*left, *right, left_on, right_on, *how, suffix.as_ref().copied())
+            ExprKind::Join { left, right, left_on, right_on, suffix } => {
+                self.eval_join(*left, *right, left_on, right_on, suffix.as_ref().copied())
             }
 
             ExprKind::FieldAccess { expr, field } => self.eval_field_access(*expr, *field),
@@ -297,7 +297,6 @@ impl<'a> IrEvaluator<'a> {
         right_id: ExprId,
         left_on: &[crate::context::Symbol],
         right_on: &[crate::context::Symbol],
-        how: crate::common::JoinHow,
         suffix: Option<crate::context::Symbol>,
     ) -> Result<Value, FossilError> {
         let left_val = self.eval(left_id)?;
@@ -327,7 +326,6 @@ impl<'a> IrEvaluator<'a> {
             right_plan,
             left_on_exprs,
             right_on_exprs,
-            how,
             suffix_str,
         )))
     }

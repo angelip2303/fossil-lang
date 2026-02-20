@@ -1,6 +1,6 @@
 use crate::ast::Loc;
 use crate::ast::Attribute;
-pub use crate::common::{JoinHow, Literal, Path, PrimitiveType};
+pub use crate::common::{Literal, Path, PrimitiveType};
 use crate::context::{Arena, DefId, NodeId, Symbol};
 
 pub mod resolutions;
@@ -142,7 +142,6 @@ pub enum ExprKind {
         right: ExprId,
         left_on: Vec<Symbol>,
         right_on: Vec<Symbol>,
-        how: JoinHow,
         suffix: Option<Symbol>,
     },
     FieldAccess {

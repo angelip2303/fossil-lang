@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use polars::prelude::*;
 
-use crate::common::JoinHow;
 use crate::context::{DefId, Symbol};
 use crate::traits::function::FunctionImpl;
 use crate::traits::source::Source;
@@ -14,7 +13,6 @@ pub struct JoinTransform {
     pub right_transforms: Vec<Transform>,
     pub left_on: Vec<Expr>,
     pub right_on: Vec<Expr>,
-    pub how: JoinHow,
     pub suffix: String,
 }
 
@@ -73,7 +71,6 @@ impl Plan {
         right: Plan,
         left_on: Vec<Expr>,
         right_on: Vec<Expr>,
-        how: JoinHow,
         suffix: String,
     ) -> Self {
         let merged = self.merge_schema(&right.schema, &suffix);
@@ -82,7 +79,6 @@ impl Plan {
             right_transforms: right.transforms,
             left_on,
             right_on,
-            how,
             suffix,
         }));
         self.schema = Arc::new(merged);

@@ -5,9 +5,9 @@ use chumsky::pratt::postfix;
 use chumsky::prelude::*;
 
 use crate::ast::{
-    Argument, Ast, Attribute, AttributeArg, ConstructorParam, Expr, ExprId, ExprKind, JoinHow,
-    Literal, Path, PrimitiveType, ProviderArgument, RecordField, Stmt, StmtId, StmtKind, Type,
-    TypeId, TypeKind,
+    Argument, Ast, Attribute, AttributeArg, ConstructorParam, Expr, ExprId, ExprKind, Literal,
+    Path, PrimitiveType, ProviderArgument, RecordField, Stmt, StmtId, StmtKind, Type, TypeId,
+    TypeKind,
 };
 use crate::ast::Loc;
 use crate::ast::SourceId;
@@ -196,7 +196,6 @@ enum PipeRhs {
         right: ExprId,
         left_on: Vec<Symbol>,
         right_on: Vec<Symbol>,
-        how: JoinHow,
         suffix: Option<Symbol>,
     },
 }
@@ -422,19 +421,16 @@ where
             .ignore_then(select! { Token::String(s) => ctx.intern(s) })
             .or_not();
 
-        let join_rhs = choice((
-            just(Token::Join).to(JoinHow::Inner),
-            just(Token::LeftJoin).to(JoinHow::Left),
-        ))
-        .then(base.clone())
-        .then_ignore(just(Token::On))
-        .then(join_cols.clone())
-        .then_ignore(just(Token::Eq))
-        .then(join_cols)
-        .then(join_suffix)
-        .map(|((((how, right), left_on), right_on), suffix)| {
-            PipeRhs::Join { right, left_on, right_on, how, suffix }
-        });
+        let join_rhs = just(Token::Join)
+            .ignore_then(base.clone())
+            .then_ignore(just(Token::On))
+            .then(join_cols.clone())
+            .then_ignore(just(Token::Eq))
+            .then(join_cols)
+            .then(join_suffix)
+            .map(|(((right, left_on), right_on), suffix)| {
+                PipeRhs::Join { right, left_on, right_on, suffix }
+            });
 
         let chain_op = just(Token::Pipe).to(ChainOp::Pipe)
             .or(just(Token::PlusGt).to(ChainOp::AddOutput));
@@ -521,7 +517,7 @@ fn build_pipe_chain(ctx: &AstCtx, source: ExprId, stages: &[(ChainOp, PipeRhs)])
                 );
                 i += 1;
             }
-            (ChainOp::Pipe, PipeRhs::Join { right, left_on, right_on, how, suffix }) => {
+            (ChainOp::Pipe, PipeRhs::Join { right, left_on, right_on, suffix }) => {
                 let loc = {
                     let ast = ctx.ast.borrow();
                     ast.exprs.get(current).loc.merge(ast.exprs.get(*right).loc)
@@ -532,7 +528,6 @@ fn build_pipe_chain(ctx: &AstCtx, source: ExprId, stages: &[(ChainOp, PipeRhs)])
                         right: *right,
                         left_on: left_on.clone(),
                         right_on: right_on.clone(),
-                        how: *how,
                         suffix: *suffix,
                     },
                     loc,
@@ -635,7 +630,6 @@ where
         Token::Do => ctx.intern("do"),
         Token::End => ctx.intern("end"),
         Token::Join => ctx.intern("join"),
-        Token::LeftJoin => ctx.intern("left_join"),
         Token::On => ctx.intern("on"),
         Token::Suffix => ctx.intern("suffix"),
         Token::True => ctx.intern("true"),

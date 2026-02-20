@@ -109,7 +109,7 @@ impl TypeChecker {
                 Ok((subst, last_ty))
             }
 
-            ExprKind::Join { left, right, left_on, right_on, how: _, suffix } => {
+            ExprKind::Join { left, right, left_on, right_on, suffix } => {
                 let (mut subst, left_ty) = self.infer(*left)?;
                 let (s, right_ty) = self.infer(*right)?;
                 subst = subst.compose(&s, &mut self.ir);

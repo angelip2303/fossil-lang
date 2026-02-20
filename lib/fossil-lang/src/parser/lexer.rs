@@ -17,8 +17,6 @@ pub enum Token<'a> {
     End,
     #[token("join")]
     Join,
-    #[token("left_join")]
-    LeftJoin,
     #[token("on")]
     On,
     #[token("suffix")]
@@ -86,7 +84,6 @@ impl Token<'_> {
             Token::Do => Some("do"),
             Token::End => Some("end"),
             Token::Join => Some("join"),
-            Token::LeftJoin => Some("left_join"),
             Token::On => Some("on"),
             Token::Suffix => Some("suffix"),
             Token::True => Some("true"),

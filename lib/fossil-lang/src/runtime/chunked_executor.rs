@@ -160,11 +160,8 @@ impl ChunkedExecutor {
                     right_lf = Self::apply_transform(right_lf, t)?;
                 }
 
-                let args = JoinArgs::new(match join.how {
-                    crate::common::JoinHow::Inner => JoinType::Inner,
-                    crate::common::JoinHow::Left => JoinType::Left,
-                })
-                .with_suffix(Some(join.suffix.clone().into()));
+                let args = JoinArgs::new(JoinType::Inner)
+                    .with_suffix(Some(join.suffix.clone().into()));
 
                 Ok(safe_lf.join(right_lf, join.left_on.clone(), join.right_on.clone(), args))
             }

@@ -115,7 +115,7 @@ impl AstToIrConverter {
                 }
             }
 
-            ast::ExprKind::Join { left, right, left_on, right_on, how, suffix } => {
+            ast::ExprKind::Join { left, right, left_on, right_on, suffix } => {
                 let ir_left = self.convert_expr(ast, *left);
                 let ir_right = self.convert_expr(ast, *right);
                 ExprKind::Join {
@@ -123,7 +123,6 @@ impl AstToIrConverter {
                     right: ir_right,
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
-                    how: *how,
                     suffix: *suffix,
                 }
             }
@@ -520,20 +519,6 @@ mod tests {
         );
         let val = get_let_value_expr(&ir, 2);
         assert!(matches!(&val.kind, ExprKind::Join { .. }));
-    }
-
-    #[test]
-    fn left_join_basic() {
-        let ir = parse_and_convert(
-            "let a = 1\nlet b = 2\nlet c = a |> left_join b on X = Y"
-        );
-        let val = get_let_value_expr(&ir, 2);
-        match &val.kind {
-            ExprKind::Join { how, .. } => {
-                assert_eq!(*how, crate::common::JoinHow::Left);
-            }
-            other => panic!("expected Join, got {:?}", other),
-        }
     }
 
     #[test]
