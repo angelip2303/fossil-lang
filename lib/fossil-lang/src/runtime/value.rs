@@ -106,10 +106,6 @@ impl Plan {
         !self.outputs.is_empty()
     }
 
-    pub fn schema(&self) -> &Arc<Schema> {
-        &self.schema
-    }
-
     fn merge_schema(&self, right: &Schema, suffix: &str) -> Schema {
         let mut fields: Vec<Field> = self
             .schema
