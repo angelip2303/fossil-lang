@@ -25,6 +25,14 @@ impl OutputDestination {
 /// The server provides `CloudOutputResolver` which streams to cloud storage.
 pub trait OutputResolver: Send + Sync {
     fn resolve_output(&self, destination: &str) -> Result<OutputDestination, FossilError>;
+
+    /// Commit all pending outputs. Called after successful execution.
+    fn commit(&self) -> Result<(), FossilError> {
+        Ok(())
+    }
+
+    /// Abort all pending outputs. Called on failure/cancellation.
+    fn abort(&self) {}
 }
 
 /// Default: creates local files (current CLI behavior).

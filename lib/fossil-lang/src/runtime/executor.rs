@@ -34,6 +34,7 @@ impl IrExecutor {
         config: ExecutionConfig,
     ) -> Result<Vec<Value>, FossilError> {
         let IrProgram { ir, gcx, type_index, resolutions, typeck_results } = program;
+        let output_resolver = config.output_resolver.clone();
         let mut evaluator = IrEvaluator::new(
             &ir,
             &gcx,
@@ -46,23 +47,35 @@ impl IrExecutor {
         );
         let mut results = Vec::new();
 
-        for &stmt_id in &ir.root {
-            match &ir.stmts.get(stmt_id).kind {
-                StmtKind::Let { name, value, .. } => {
-                    let val = evaluator.eval(*value)?;
-                    evaluator.bind(*name, val.clone());
-                    results.push(val);
-                }
+        let outcome = (|| {
+            for &stmt_id in &ir.root {
+                match &ir.stmts.get(stmt_id).kind {
+                    StmtKind::Let { name, value, .. } => {
+                        let val = evaluator.eval(*value)?;
+                        evaluator.bind(*name, val.clone());
+                        results.push(val);
+                    }
 
-                StmtKind::Expr(expr_id) => {
-                    let val = evaluator.eval(*expr_id)?;
-                    results.push(val);
-                }
+                    StmtKind::Expr(expr_id) => {
+                        let val = evaluator.eval(*expr_id)?;
+                        results.push(val);
+                    }
 
-                StmtKind::Type { .. } => {}
+                    StmtKind::Type { .. } => {}
+                }
+            }
+            Ok::<(), FossilError>(())
+        })();
+
+        match outcome {
+            Ok(()) => {
+                output_resolver.commit()?;
+                Ok(results)
+            }
+            Err(e) => {
+                output_resolver.abort();
+                Err(e)
             }
         }
-
-        Ok(results)
     }
 }

@@ -126,6 +126,7 @@ pub enum ExprKind {
     RecordInstance {
         type_name: Path,
         ctor_args: Vec<Argument>,
+        spread: Option<ExprId>,
         fields: Vec<(Symbol, ExprId)>,
     },
     Application {

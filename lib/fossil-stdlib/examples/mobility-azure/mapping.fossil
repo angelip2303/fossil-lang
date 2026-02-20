@@ -143,69 +143,29 @@ end
 let passenger_efficiency =
     PassengerComfortData.load()
         |> each row -> PassengerComfortData {
-            unit_identifier = row.unit_identifier  |> String.extract("(\d+)"),
-            vehicle_category = row.vehicle_category,
-            recorded_at = row.recorded_at,
-            geo_location_lon = row.geo_location_lon,
-            geo_location_lat = row.geo_location_lat,
-            service_line = row.service_line,
-            comfort_score = row.comfort_score,
-            complaint_count = row.complaint_count,
-            ridership_impact = row.ridership_impact,
-            passenger_satisfaction = row.passenger_satisfaction,
+            ..row,
+            unit_identifier = row.unit_identifier |> String.extract("(\d+)"),
         }
 
 let pothole_telemetry =
     PotholeTelemetryData.load()
         |> each row -> PotholeTelemetryData {
+            ..row,
             bus_code = row.bus_code |> String.extract("(\d+)"),
-            bus_type = row.bus_type,
-            timestamp = row.timestamp,
-            pothole_latitude = row.pothole_latitude,
-            pothole_longitude = row.pothole_longitude,
-            severity = row.severity,
-            confidence = row.confidence,
-            size_mm = row.size_mm,
-            road_surface_condition = row.road_surface_condition,
-            num_passengers_onboard = row.num_passengers_onboard,
         }
 
 let route_efficiency =
     RouteEfficiencyData.load()
         |> each row -> RouteEfficiencyData {
-            fleet_unit = row.fleet_unit  |> String.extract("(\d+)"),
-            type = row.type,
-            event_time = row.event_time,
-            coord_lng = row.coord_lng,
-            coord_lat = row.coord_lat,
-            line_number = row.line_number,
-            alt_route_flag = row.alt_route_flag,
-            delay_minutes = row.delay_minutes,
-            fuel_extra_pct = row.fuel_extra_pct,
-            detour_km = row.detour_km,
-        }
-
-let weather_observations =
-    WeatherObservationData.load()
-        |> each row -> WeatherObservationData {
-            station_code = row.station_code,
-            observation_time = row.observation_time,
-            geo_point_longitude = row.geo_point_longitude,
-            geo_point_latitude = row.geo_point_latitude,
-            air_temperature_c = row.air_temperature_c,
-            humidity_pct = row.humidity_pct,
-            precipitation_mm = row.precipitation_mm,
-            wind_speed_kmh = row.wind_speed_kmh,
-            visibility_km = row.visibility_km,
-            weather_condition = row.weather_condition,
-            road_condition_estimated = row.road_condition_estimated,
+            ..row,
+            fleet_unit = row.fleet_unit |> String.extract("(\d+)"),
         }
 
 
 passenger_efficiency
 |> join pothole_telemetry on (unit_identifier, recorded_at) = (bus_code, timestamp)
 |> join route_efficiency  on (unit_identifier, recorded_at) = (fleet_unit, event_time)
-|> join weather_observations on (recorded_at) = (observation_time)
+|> join WeatherObservationData.load() on (recorded_at) = (observation_time)
 |> each row -> WeatherObservation("WeatherObservation_${row.unit_identifier}") {
     DateTime = row.recorded_at,
     Temperature = row.air_temperature_c,

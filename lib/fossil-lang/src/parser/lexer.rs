@@ -40,6 +40,8 @@ pub enum Token<'a> {
     Eq,
     #[token("->")]
     Arrow,
+    #[token("..")]
+    DotDot,
     #[token(".")]
     Dot,
     #[token(":")]

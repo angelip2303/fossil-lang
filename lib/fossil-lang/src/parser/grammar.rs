@@ -203,9 +203,9 @@ enum PipeRhs {
 /// Suffix after a parsed Path, used for longest-match atom parsing.
 enum PathSuffix {
     Provider(Vec<ProviderArgument>),
-    CtorRecord(Vec<Argument>, Vec<(Symbol, ExprId)>),
+    CtorRecord(Vec<Argument>, Option<ExprId>, Vec<(Symbol, ExprId)>),
     Application(Vec<Argument>),
-    Record(Vec<(Symbol, ExprId)>),
+    Record(Option<ExprId>, Vec<(Symbol, ExprId)>),
 }
 
 fn parse_expr<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, ExprId, ParserError<'a>> + Clone
@@ -295,30 +295,33 @@ where
             )
             .map(PathSuffix::Provider);
 
+        let spread = just(Token::DotDot).ignore_then(expr.clone());
+
+        // Record body: { ..spread, field = expr, ... } or { field = expr, ... }
+        let record_body = spread.clone()
+            .then_ignore(just(Token::Comma).or_not())
+            .or_not()
+            .then(
+                record_field.clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>(),
+            )
+            .delimited_by(just(Token::LBrace), just(Token::RBrace));
+
         let paren_suffix = argument
             .separated_by(just(Token::Comma))
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just(Token::LParen), just(Token::RParen))
-            .then(
-                record_field.clone()
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(Token::LBrace), just(Token::RBrace))
-                    .or_not(),
-            )
-            .map(|(args, fields)| match fields {
-                Some(fields) => PathSuffix::CtorRecord(args, fields),
+            .then(record_body.clone().or_not())
+            .map(|(args, body)| match body {
+                Some((spread, fields)) => PathSuffix::CtorRecord(args, spread, fields),
                 None => PathSuffix::Application(args),
             });
 
-        let brace_suffix = record_field
-            .separated_by(just(Token::Comma))
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(just(Token::LBrace), just(Token::RBrace))
-            .map(PathSuffix::Record);
+        let brace_suffix = record_body
+            .map(|(spread, fields)| PathSuffix::Record(spread, fields));
 
         let path_based = parse_path(ctx)
             .map_with(|path, e| (path, e.span()))
@@ -334,9 +337,9 @@ where
                     Some(PathSuffix::Provider(args)) => {
                         ctx.alloc_expr(ExprKind::ProviderInvocation { provider: path, args }, full_loc)
                     }
-                    Some(PathSuffix::CtorRecord(ctor_args, fields)) => {
+                    Some(PathSuffix::CtorRecord(ctor_args, spread, fields)) => {
                         ctx.alloc_expr(
-                            ExprKind::RecordInstance { type_path: path, ctor_args, fields },
+                            ExprKind::RecordInstance { type_path: path, ctor_args, spread, fields },
                             full_loc,
                         )
                     }
@@ -345,9 +348,9 @@ where
                         let callee = ctx.alloc_expr(ExprKind::Identifier(path), callee_loc);
                         ctx.alloc_expr(ExprKind::Application { callee, args }, full_loc)
                     }
-                    Some(PathSuffix::Record(fields)) => {
+                    Some(PathSuffix::Record(spread, fields)) => {
                         ctx.alloc_expr(
-                            ExprKind::RecordInstance { type_path: path, ctor_args: vec![], fields },
+                            ExprKind::RecordInstance { type_path: path, ctor_args: vec![], spread, fields },
                             full_loc,
                         )
                     }

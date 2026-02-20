@@ -127,9 +127,10 @@ impl<'a> IrEvaluator<'a> {
 
             ExprKind::RecordInstance {
                 ctor_args,
+                spread,
                 fields,
                 ..
-            } => self.eval_named_record(expr_id, ctor_args, fields),
+            } => self.eval_named_record(expr_id, ctor_args, spread.as_ref().copied(), fields),
 
             ExprKind::Application { callee, args } => self.eval_application(expr_id, *callee, args),
 
@@ -205,8 +206,10 @@ impl<'a> IrEvaluator<'a> {
         &mut self,
         expr_id: ExprId,
         ctor_args: &[Argument],
+        spread: Option<ExprId>,
         fields: &[(Symbol, ExprId)],
     ) -> Result<Value, FossilError> {
+        use std::collections::HashSet;
         use crate::runtime::value::{Plan, PendingOutput};
 
         let type_def_id = self.resolutions.expr_defs.get(&expr_id).copied();
@@ -235,11 +238,11 @@ impl<'a> IrEvaluator<'a> {
             vec![]
         };
 
-        if fields.is_empty() && ctor_args.is_empty() {
+        if fields.is_empty() && ctor_args.is_empty() && spread.is_none() {
             return Ok(Value::Plan(Plan::empty(Schema::default())));
         }
 
-        let select_exprs: Vec<Expr> = fields
+        let mut select_exprs: Vec<Expr> = fields
             .iter()
             .map(|(name, expr_id)| {
                 let value = self.eval(*expr_id)?;
@@ -250,6 +253,26 @@ impl<'a> IrEvaluator<'a> {
                 }
             })
             .collect::<Result<Vec<_>, FossilError>>()?;
+
+        // Expand spread: for every target-type field not explicitly listed,
+        // generate col(name).alias(name) from the spread source.
+        if spread.is_some() {
+            if let Some(type_def_id) = type_def_id {
+                let explicit: HashSet<Symbol> = fields.iter().map(|(n, _)| *n).collect();
+                if let Some(info) = self.type_index.get(type_def_id) {
+                    let spread_exprs: Vec<Expr> = info
+                        .field_names
+                        .iter()
+                        .filter(|n| !explicit.contains(n))
+                        .map(|n| {
+                            let s = self.gcx.interner.resolve(*n);
+                            col(s).alias(s)
+                        })
+                        .collect();
+                    select_exprs = [spread_exprs, select_exprs].concat();
+                }
+            }
+        }
 
         let all_exprs: Vec<Expr> = ctor_exprs
             .iter()

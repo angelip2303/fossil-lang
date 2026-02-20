@@ -201,13 +201,17 @@ impl IrResolver {
                 }
             }
 
-            ExprKind::RecordInstance { type_name, ctor_args, fields } => {
+            ExprKind::RecordInstance { type_name, ctor_args, spread, fields } => {
                 if let Some(def_id) = self.resolve_type_path(type_name, expr.loc, errors) {
                     self.resolutions.expr_defs.insert(expr_id, def_id);
                 }
 
                 for arg in ctor_args {
                     self.resolve_expr(arg.value(), errors);
+                }
+
+                if let Some(spread_expr) = spread {
+                    self.resolve_expr(*spread_expr, errors);
                 }
 
                 for (_, field_expr) in fields {

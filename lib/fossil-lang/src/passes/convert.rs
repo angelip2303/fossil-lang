@@ -80,8 +80,9 @@ impl AstToIrConverter {
 
             ast::ExprKind::Literal(lit) => ExprKind::Literal(lit.clone()),
 
-            ast::ExprKind::RecordInstance { type_path, ctor_args, fields } => {
+            ast::ExprKind::RecordInstance { type_path, ctor_args, spread, fields } => {
                 let ir_ctor_args = self.convert_args(ast, ctor_args);
+                let ir_spread = spread.map(|e| self.convert_expr(ast, e));
                 let ir_fields = fields
                     .iter()
                     .map(|(name, expr)| (*name, self.convert_expr(ast, *expr)))
@@ -89,6 +90,7 @@ impl AstToIrConverter {
                 ExprKind::RecordInstance {
                     type_name: type_path.clone(),
                     ctor_args: ir_ctor_args,
+                    spread: ir_spread,
                     fields: ir_fields,
                 }
             }

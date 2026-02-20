@@ -67,7 +67,7 @@ impl TypeChecker {
                 Ok((Subst::default(), ty))
             }
 
-            ExprKind::RecordInstance { ctor_args, fields, .. } => {
+            ExprKind::RecordInstance { ctor_args, spread, fields, .. } => {
                 let type_def_id = *self.resolutions.expr_defs.get(&expr_id).ok_or_else(|| {
                     FossilError::internal("typecheck", "Unresolved type in record instance", loc)
                 })?;
@@ -76,6 +76,11 @@ impl TypeChecker {
 
                 for arg in ctor_args {
                     let (s, _arg_ty) = self.infer(arg.value())?;
+                    subst = subst.compose(&s, &mut self.ir);
+                }
+
+                if let Some(spread_expr) = spread {
+                    let (s, _spread_ty) = self.infer(*spread_expr)?;
                     subst = subst.compose(&s, &mut self.ir);
                 }
 
