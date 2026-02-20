@@ -207,7 +207,7 @@ impl<'a> IrEvaluator<'a> {
         ctor_args: &[Argument],
         fields: &[(Symbol, ExprId)],
     ) -> Result<Value, FossilError> {
-        use crate::runtime::value::Plan;
+        use crate::runtime::value::{Plan, PendingOutput};
 
         let type_def_id = self.resolutions.expr_defs.get(&expr_id).copied();
 
@@ -236,9 +236,7 @@ impl<'a> IrEvaluator<'a> {
         };
 
         if fields.is_empty() && ctor_args.is_empty() {
-            let mut plan = Plan::empty(Schema::default());
-            plan.type_def_id = type_def_id;
-            return Ok(Value::Plan(plan));
+            return Ok(Value::Plan(Plan::empty(Schema::default())));
         }
 
         let select_exprs: Vec<Expr> = fields
@@ -260,14 +258,11 @@ impl<'a> IrEvaluator<'a> {
             .collect();
         let schema = build_schema(&all_exprs, type_def_id, self.gcx);
 
-        Ok(Value::Plan(Plan {
-            source: None,
-            transforms: Vec::new(),
-            type_def_id,
-            schema: std::sync::Arc::new(schema),
-            outputs: Vec::new(),
-            pending_exprs: Some(select_exprs),
+        Ok(Value::PendingOutput(PendingOutput {
+            type_def_id: type_def_id.expect("named record must resolve to a type"),
+            select_exprs,
             ctor_exprs,
+            schema: std::sync::Arc::new(schema),
         }))
     }
 
@@ -277,29 +272,23 @@ impl<'a> IrEvaluator<'a> {
         binding: Symbol,
         outputs: &[ExprId],
     ) -> Result<Value, FossilError> {
-        use crate::runtime::value::OutputSpec;
-
         let source_val = self.eval(source)?;
-        let Value::Plan(mut plan) = source_val else {
+        let Value::Plan(plan) = source_val else {
             return Err(self.make_error("Projection source must be a Plan"));
         };
 
         self.env.bind(binding, Value::Plan(plan.clone()));
 
-        for &output_expr in outputs {
-            let output_val = self.eval(output_expr)?;
-            if let Value::Plan(output_plan) = output_val {
-                if output_plan.is_pending() {
-                    plan.outputs.push(OutputSpec {
-                        type_def_id: output_plan.type_def_id.unwrap(),
-                        select_exprs: output_plan.pending_exprs.unwrap(),
-                        schema: output_plan.schema,
-                        ctor_args: output_plan.ctor_exprs,
-                    });
-                }
-            }
-        }
-        Ok(Value::Plan(plan))
+        let output_specs: Vec<_> = outputs
+            .iter()
+            .filter_map(|&expr| match self.eval(expr) {
+                Ok(Value::PendingOutput(po)) => Some(Ok(po.into_output_spec())),
+                Ok(_) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Value::Plan(plan.project(output_specs)))
     }
 
     fn eval_join(
@@ -311,8 +300,6 @@ impl<'a> IrEvaluator<'a> {
         how: crate::common::JoinHow,
         suffix: Option<crate::context::Symbol>,
     ) -> Result<Value, FossilError> {
-        use crate::runtime::value::{JoinTransform, Plan, Transform};
-
         let left_val = self.eval(left_id)?;
         let right_val = self.eval(right_id)?;
 
@@ -327,53 +314,22 @@ impl<'a> IrEvaluator<'a> {
             .map(|s| self.gcx.interner.resolve(s).to_string())
             .unwrap_or_else(|| "_right".to_string());
 
-        let left_on_exprs: Vec<Expr> = left_on.iter()
-            .map(|s| col(self.gcx.interner.resolve(*s)))
-            .collect();
-        let right_on_exprs: Vec<Expr> = right_on.iter()
-            .map(|s| col(self.gcx.interner.resolve(*s)))
-            .collect();
-
-        // Merge schemas (left + right with suffix on conflicts)
-        let mut schema_fields: Vec<Field> = left_plan.schema
+        let left_on_exprs: Vec<Expr> = left_on
             .iter()
-            .map(|(name, dtype)| Field::new(name.clone(), dtype.clone()))
+            .map(|s| col(self.gcx.interner.resolve(*s)))
+            .collect();
+        let right_on_exprs: Vec<Expr> = right_on
+            .iter()
+            .map(|s| col(self.gcx.interner.resolve(*s)))
             .collect();
 
-        let left_names: std::collections::HashSet<&str> =
-            left_plan.schema.iter_names().map(|n| n.as_str()).collect();
-
-        for (name, dtype) in right_plan.schema.iter() {
-            let final_name = if left_names.contains(name.as_str()) {
-                format!("{}{}", name, suffix_str)
-            } else {
-                name.to_string()
-            };
-            schema_fields.push(Field::new(final_name.into(), dtype.clone()));
-        }
-
-        let merged_schema = Schema::from_iter(schema_fields);
-
-        let mut result_plan = Plan {
-            source: left_plan.source,
-            transforms: left_plan.transforms,
-            type_def_id: None,
-            schema: Arc::new(merged_schema),
-            outputs: Vec::new(),
-            pending_exprs: None,
-            ctor_exprs: vec![],
-        };
-
-        result_plan.transforms.push(Transform::Join(JoinTransform {
-            right_source: right_plan.source,
-            right_transforms: right_plan.transforms,
-            left_on: left_on_exprs,
-            right_on: right_on_exprs,
+        Ok(Value::Plan(left_plan.join(
+            right_plan,
+            left_on_exprs,
+            right_on_exprs,
             how,
-            suffix: suffix_str,
-        }));
-
-        Ok(Value::Plan(result_plan))
+            suffix_str,
+        )))
     }
 
     fn check_recursion_depth(&self) -> Result<(), FossilError> {
@@ -437,7 +393,7 @@ impl<'a> IrEvaluator<'a> {
             }
 
             Value::RecordConstructor(ctor_def_id) => {
-                use crate::runtime::value::Plan;
+                use crate::runtime::value::PendingOutput;
 
                 let ctor_def = self.gcx.definitions.get(ctor_def_id);
                 let type_def_id = ctor_def.parent().unwrap_or(ctor_def_id);
@@ -472,11 +428,12 @@ impl<'a> IrEvaluator<'a> {
 
                 let schema = build_schema(&select_exprs, Some(type_def_id), self.gcx);
 
-                Ok(Value::Plan(Plan::pending(
-                    select_exprs,
+                Ok(Value::PendingOutput(PendingOutput {
                     type_def_id,
-                    schema,
-                )))
+                    select_exprs,
+                    ctor_exprs: vec![],
+                    schema: std::sync::Arc::new(schema),
+                }))
             }
 
             _ => Err(self.make_error("Attempt to call non-function value")),

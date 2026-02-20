@@ -145,24 +145,7 @@ impl FunctionImpl for IfcLoadFunction {
     fn call(&self, _args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, FossilError> {
         use fossil_lang::runtime::value::Plan;
 
-        let type_def_id = _ctx
-            .gcx
-            .interner
-            .lookup(&self.type_name)
-            .and_then(|sym| {
-                _ctx.gcx
-                    .definitions
-                    .find_by_symbol(sym, |k| matches!(k, DefKind::Type))
-                    .map(|d| d.id())
-            });
-
-        let plan = match type_def_id {
-            Some(def_id) => {
-                Plan::from_source_with_type(self.source.box_clone(), self.schema.clone(), def_id)
-            }
-            None => Plan::from_source(self.source.box_clone(), self.schema.clone()),
-        };
-
+        let plan = Plan::from_source(self.source.box_clone(), self.schema.clone());
         Ok(Value::Plan(plan))
     }
 }

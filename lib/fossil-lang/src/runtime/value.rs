@@ -29,11 +29,8 @@ pub enum Transform {
 pub struct Plan {
     pub source: Option<Box<dyn Source>>,
     pub transforms: Vec<Transform>,
-    pub type_def_id: Option<DefId>,
     pub schema: Arc<Schema>,
     pub outputs: Vec<OutputSpec>,
-    pub pending_exprs: Option<Vec<Expr>>,
-    pub ctor_exprs: Vec<Expr>,
 }
 
 impl Plan {
@@ -41,39 +38,8 @@ impl Plan {
         Self {
             source: Some(source),
             transforms: Vec::new(),
-            type_def_id: None,
             schema: Arc::new(schema),
             outputs: Vec::new(),
-            pending_exprs: None,
-            ctor_exprs: vec![],
-        }
-    }
-
-    pub fn from_source_with_type(
-        source: Box<dyn Source>,
-        schema: Schema,
-        type_def_id: DefId,
-    ) -> Self {
-        Self {
-            source: Some(source),
-            transforms: Vec::new(),
-            type_def_id: Some(type_def_id),
-            schema: Arc::new(schema),
-            outputs: Vec::new(),
-            pending_exprs: None,
-            ctor_exprs: vec![],
-        }
-    }
-
-    pub fn pending(select_exprs: Vec<Expr>, type_def_id: DefId, schema: Schema) -> Self {
-        Self {
-            source: None,
-            transforms: Vec::new(),
-            type_def_id: Some(type_def_id),
-            schema: Arc::new(schema),
-            outputs: Vec::new(),
-            pending_exprs: Some(select_exprs),
-            ctor_exprs: vec![],
         }
     }
 
@@ -81,20 +47,123 @@ impl Plan {
         Self {
             source: None,
             transforms: Vec::new(),
-            type_def_id: None,
             schema: Arc::new(schema),
             outputs: Vec::new(),
-            pending_exprs: None,
-            ctor_exprs: vec![],
         }
     }
 
-    pub fn is_pending(&self) -> bool {
-        self.pending_exprs.is_some()
+    /// Column selection/transformation — like lf.select([...])
+    pub fn select(mut self, exprs: Vec<Expr>) -> Self {
+        self.schema = Arc::new(schema_from_exprs(&exprs));
+        self.transforms.push(Transform::Select(exprs));
+        self.outputs.clear();
+        self
+    }
+
+    /// Row filtering — like lf.filter(...)
+    pub fn filter(mut self, expr: Expr) -> Self {
+        self.transforms.push(Transform::Filter(expr));
+        self.outputs.clear();
+        self
+    }
+
+    /// Join — like lf.join(...)
+    pub fn join(
+        mut self,
+        right: Plan,
+        left_on: Vec<Expr>,
+        right_on: Vec<Expr>,
+        how: JoinHow,
+        suffix: String,
+    ) -> Self {
+        let merged = self.merge_schema(&right.schema, &suffix);
+        self.transforms.push(Transform::Join(JoinTransform {
+            right_source: right.source,
+            right_transforms: right.transforms,
+            left_on,
+            right_on,
+            how,
+            suffix,
+        }));
+        self.schema = Arc::new(merged);
+        self.outputs.clear();
+        self
+    }
+
+    /// Projection: single-output with no ctor_args bakes Select into pipeline;
+    /// otherwise stores OutputSpecs for downstream consumers (e.g. RDF serializer).
+    pub fn project(self, outputs: Vec<OutputSpec>) -> Self {
+        let mut plan = if outputs.len() == 1 && outputs[0].ctor_args.is_empty() {
+            self.select(outputs[0].select_exprs.clone())
+        } else {
+            self
+        };
+        plan.outputs = outputs;
+        plan
     }
 
     pub fn has_outputs(&self) -> bool {
         !self.outputs.is_empty()
+    }
+
+    pub fn schema(&self) -> &Arc<Schema> {
+        &self.schema
+    }
+
+    fn merge_schema(&self, right: &Schema, suffix: &str) -> Schema {
+        let mut fields: Vec<Field> = self
+            .schema
+            .iter()
+            .map(|(name, dtype)| Field::new(name.clone(), dtype.clone()))
+            .collect();
+
+        let left_names: std::collections::HashSet<&str> =
+            self.schema.iter_names().map(|n| n.as_str()).collect();
+
+        for (name, dtype) in right.iter() {
+            let final_name = if left_names.contains(name.as_str()) {
+                format!("{}{}", name, suffix)
+            } else {
+                name.to_string()
+            };
+            fields.push(Field::new(final_name.into(), dtype.clone()));
+        }
+
+        Schema::from_iter(fields)
+    }
+}
+
+fn schema_from_exprs(exprs: &[Expr]) -> Schema {
+    Schema::from_iter(exprs.iter().filter_map(|expr| {
+        if let Expr::Alias(_, name) = expr {
+            Some(Field::new(
+                name.clone(),
+                DataType::Unknown(Default::default()),
+            ))
+        } else {
+            None
+        }
+    }))
+}
+
+/// Output specification not yet attached to a plan.
+/// Created by named record constructors inside projections.
+#[derive(Clone, Debug)]
+pub struct PendingOutput {
+    pub type_def_id: DefId,
+    pub select_exprs: Vec<Expr>,
+    pub ctor_exprs: Vec<Expr>,
+    pub schema: Arc<Schema>,
+}
+
+impl PendingOutput {
+    pub fn into_output_spec(self) -> OutputSpec {
+        OutputSpec {
+            type_def_id: self.type_def_id,
+            select_exprs: self.select_exprs,
+            schema: self.schema,
+            ctor_args: self.ctor_exprs,
+        }
     }
 }
 
@@ -111,6 +180,7 @@ pub enum Value {
     Unit,
     Expr(Expr),
     Plan(Plan),
+    PendingOutput(PendingOutput),
     Function(DefId, Arc<dyn FunctionImpl>),
     RecordConstructor(DefId),
 }

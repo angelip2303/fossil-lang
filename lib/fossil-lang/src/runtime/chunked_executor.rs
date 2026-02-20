@@ -132,14 +132,6 @@ impl ChunkedExecutor {
     /// PRIVATE: This is internal to the executor. No external code should
     /// be able to get a LazyFrame from a Plan.
     fn build_safe_lazy_frame(&self, plan: &Plan) -> PolarsResult<SafeLazyFrame> {
-        // Pending plans cannot be executed directly
-        if plan.is_pending() {
-            return Err(PolarsError::ComputeError(
-                "Cannot execute a pending transformation - it must be applied to a source first"
-                    .into(),
-            ));
-        }
-
         // Build LazyFrame from source (or empty if None)
         let mut safe_lf = match &plan.source {
             Some(src) => SafeLazyFrame::new(src.to_lazy_frame()?),

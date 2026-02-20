@@ -201,9 +201,9 @@ let weather_observations =
         }
 
 passenger_efficiency
-|> join pothole_telemetry on (unit_identifier, recorded_at, geo_location_lon, geo_location_lat) = (bus_code, timestamp, pothole_longitude, pothole_latitude)
-|> join route_efficiency  on (unit_identifier, recorded_at, geo_location_lon, geo_location_lat, service_line) = (fleet_unit, event_time, coord_lng, coord_lat, line_number)
-|> join weather_observations on (recorded_at, geo_location_lon, geo_location_lat) = (observation_time, geo_point_longitude, geo_point_latitude)
+|> join pothole_telemetry on (unit_identifier, recorded_at) = (bus_code, timestamp)
+|> join route_efficiency  on (unit_identifier, recorded_at) = (fleet_unit, event_time)
+|> join weather_observations on (recorded_at) = (observation_time)
 |> each row -> WeatherObservation("WeatherObservation_${row.unit_identifier}") {
     DateTime = row.recorded_at,
     Temperature = row.air_temperature_c,
@@ -213,7 +213,11 @@ passenger_efficiency
     Visibility = row.visibility_km,
     WeatherCondition = row.weather_condition,
     RoadCondition = row.road_condition_estimated,
-    HasLocation = ref Location("Location_${row.geo_location_lon}_${row.geo_location_lat}"),
+    HasLocation = ref Location("Location_${row.geo_point_longitude}_${row.geo_point_latitude}"),
+}
++> each row -> Location("Location_${row.geo_point_longitude}_${row.geo_point_latitude}") {
+    Latitude = row.geo_point_latitude,
+    Longitude = row.geo_point_longitude
 }
 +> each row -> PassengerImpact("PassengerImpact_${row.unit_identifier}") {
     DateTime = row.recorded_at,
@@ -225,6 +229,10 @@ passenger_efficiency
     HasLocation = ref Location("Location_${row.geo_location_lon}_${row.geo_location_lat}"),
     RelatedTo = ref Route("Route_${row.service_line}"),
 }
++> each row -> Location("Location_${row.geo_location_lon}_${row.geo_location_lat}") {
+    Latitude = row.geo_location_lat,
+    Longitude = row.geo_location_lon
+}
 +> each row -> PotholeEvent("PotholeEvent_${row.unit_identifier}") {
     DateTime = row.recorded_at,
     Severity = row.severity,
@@ -232,28 +240,32 @@ passenger_efficiency
     SizeInMilimiters = row.size_mm,
     RoadSurfaceCondition = row.road_surface_condition,
     DetectedBy = ref Vehicle("Vehicle_${row.unit_identifier}"),
-    HasLocation = ref Location("Location_${row.geo_location_lon}_${row.geo_location_lat}"),
+    HasLocation = ref Location("Location_${row.pothole_longitude}_${row.pothole_latitude}"),
     OccursDuring = ref WeatherObservation("WeatherObservation_${row.unit_identifier}"),
     RelatedTo = ref Route("Route_${row.service_line}")
+}
++> each row -> Location("Location_${row.pothole_longitude}_${row.pothole_latitude}") {
+    Latitude = row.pothole_latitude,
+    Longitude = row.pothole_longitude
 }
 +> each row -> RouteEfficiency("RouteEfficiency_${row.unit_identifier}") {
     DateTime = row.recorded_at,
     AltRouteFlag = row.fuel_extra_pct,
     DelayMinutes = row.detour_km,
-    FuelExtractPercentage = row.fuel_extra_pct,
+    FuelExtraPercentage = row.fuel_extra_pct,
     DetourDistanceInKilometers = row.detour_km,
     PerformedBy = ref Vehicle("Vehicle_${row.unit_identifier}"),
-    HasLocation = ref Location("Location_${row.geo_location_lon}_${row.geo_location_lat}"),
+    HasLocation = ref Location("Location_${row.coord_lng}_${row.coord_lat}"),
     RelatedTo = ref Route("Route_${row.service_line}"),
+}
++> each row -> Location("Location_${row.coord_lng}_${row.coord_lat}") {
+    Latitude = row.coord_lat,
+    Longitude = row.coord_lng
 }
 +> each row -> Vehicle("Vehicle_${row.unit_identifier}") {
     Identifier = row.unit_identifier,
 }
 +> each row -> Route("Route_${row.service_line}") {
     Identifier = row.service_line,
-}
-+> each row -> Location("Location_${row.geo_location_lon}_${row.geo_location_lat}") {
-    Latitude = row.geo_location_lon,
-    Longitude = row.geo_location_lat
 }
 |> Rdf.serialize("mobility.nq")

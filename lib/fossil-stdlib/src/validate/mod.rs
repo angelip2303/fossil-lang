@@ -7,7 +7,7 @@ use fossil_lang::context::global::TypeInfo;
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
-use fossil_lang::runtime::value::{Plan, Transform, Value};
+use fossil_lang::runtime::value::{Plan, Value};
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 use fossil_lang::traits::provider::{FunctionDef, ModuleSpec};
 use fossil_macros::FromAttrs;
@@ -157,12 +157,14 @@ impl ValidateFunction {
     }
 
     fn call_validate(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
-        let mut plan = Self::take_plan(args, "validate")?;
+        let plan = Self::take_plan(args, "validate")?;
         let constraints = extract_constraints(ctx, self.type_name);
 
-        if let Some(filter) = combine_valid_filter(&constraints) {
-            plan.transforms.push(Transform::Filter(filter));
-        }
+        let plan = if let Some(filter) = combine_valid_filter(&constraints) {
+            plan.filter(filter)
+        } else {
+            plan
+        };
 
         Ok(Value::Plan(plan))
     }
@@ -197,19 +199,9 @@ impl ValidateFunction {
             actual_expr.alias("actual"),
         ];
 
-        let schema = validation_error_schema();
-        let mut error_plan = Plan {
-            source: plan.source,
-            transforms: plan.transforms,
-            type_def_id: Some(self.validation_error_def_id),
-            schema: Arc::new(schema),
-            outputs: Vec::new(),
-            pending_exprs: None,
-            ctor_exprs: vec![],
-        };
-
-        error_plan.transforms.push(Transform::Filter(valid_filter.not()));
-        error_plan.transforms.push(Transform::Select(select_exprs));
+        let error_plan = plan
+            .filter(valid_filter.not())
+            .select(select_exprs);
 
         Ok(Value::Plan(error_plan))
     }

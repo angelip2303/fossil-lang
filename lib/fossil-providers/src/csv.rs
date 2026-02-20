@@ -171,17 +171,7 @@ impl FunctionImpl for CsvLoadFunction {
             .infer_schema()
             .map_err(|e| FossilError::data_error(e.to_string(), self.loc))?;
 
-        let type_def_id = ctx
-            .gcx
-            .interner
-            .lookup(&self.type_name)
-            .and_then(|sym| ctx.gcx.definitions.get_by_symbol(sym).map(|d| d.id()));
-
-        let plan = match type_def_id {
-            Some(def_id) => Plan::from_source_with_type(source.box_clone(), schema, def_id),
-            None => Plan::from_source(source.box_clone(), schema),
-        };
-
+        let plan = Plan::from_source(source.box_clone(), schema);
         Ok(Value::Plan(plan))
     }
 }
