@@ -1,0 +1,10 @@
+PREFIX urban: <http://example.org/urban#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+BASE <http://example.org/urban#>
+
+start = @<Vehicle>
+
+<Vehicle> {
+    a [urban:Vehicle] ;
+    urban:identifier xsd:string
+}

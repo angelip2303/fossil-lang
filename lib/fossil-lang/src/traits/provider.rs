@@ -29,6 +29,7 @@ pub struct ProviderInfo {
 pub enum FieldType {
     Primitive(PrimitiveType),
     Optional(Box<FieldType>),
+    Named(String),
 }
 
 #[derive(Debug, Clone)]

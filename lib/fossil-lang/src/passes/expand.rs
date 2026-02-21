@@ -21,29 +21,36 @@ pub struct ProviderExpander {
     warnings: FossilWarnings,
 }
 
-fn field_type_to_ast(ft: &FieldType, ast: &mut Ast, loc: Loc) -> TypeId {
+fn field_type_to_ast(ft: &FieldType, ast: &mut Ast, interner: &mut Interner, loc: Loc) -> TypeId {
     match ft {
         FieldType::Primitive(p) => ast.types.alloc(Type {
             loc,
             kind: TypeKind::Primitive(*p),
         }),
         FieldType::Optional(inner) => {
-            let inner_id = field_type_to_ast(inner, ast, loc);
+            let inner_id = field_type_to_ast(inner, ast, interner, loc);
             ast.types.alloc(Type {
                 loc,
                 kind: TypeKind::Optional(inner_id),
             })
         }
+        FieldType::Named(name) => {
+            let sym = interner.intern(name);
+            ast.types.alloc(Type {
+                loc,
+                kind: TypeKind::Named(Path::simple(sym)),
+            })
+        }
     }
 }
 
-fn schema_to_ast(schema: &ProviderSchema, ast: &mut Ast, loc: Loc) -> TypeId {
+fn schema_to_ast(schema: &ProviderSchema, ast: &mut Ast, interner: &mut Interner, loc: Loc) -> TypeId {
     let fields = schema
         .fields
         .iter()
         .map(|f| RecordField {
             name: f.name,
-            ty: field_type_to_ast(&f.ty, ast, loc),
+            ty: field_type_to_ast(&f.ty, ast, interner, loc),
             attrs: f.attrs.clone(),
         })
         .collect();
@@ -225,7 +232,7 @@ impl ProviderExpander {
 
         self.warnings.extend(provider_output.warnings);
 
-        let generated_type_id = schema_to_ast(&provider_output.schema, &mut self.ast, loc);
+        let generated_type_id = schema_to_ast(&provider_output.schema, &mut self.ast, &mut self.gcx.interner, loc);
         let generated_kind = self.ast.types.get(generated_type_id).kind.clone();
 
         let ty_mut = self.ast.types.get_mut(type_id);
@@ -315,7 +322,7 @@ impl ProviderExpander {
 
         self.warnings.extend(provider_output.warnings);
 
-        let generated_type_id = schema_to_ast(&provider_output.schema, &mut self.ast, loc);
+        let generated_type_id = schema_to_ast(&provider_output.schema, &mut self.ast, &mut self.gcx.interner, loc);
         let generated_kind = self.ast.types.get(generated_type_id).kind.clone();
 
         let synth_type_id = self.ast.types.alloc(Type {

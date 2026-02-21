@@ -1,0 +1,69 @@
+PREFIX urban: <http://example.org/urban#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+BASE <http://example.org/urban#>
+
+<Vehicle> {
+    a [urban:Vehicle] ;
+    urban:identifier xsd:string
+}
+
+<Route> {
+    a [urban:Route] ;
+    urban:identifier xsd:string
+}
+
+<Location> {
+    a [urban:Location] ;
+    urban:latitude xsd:double ;
+    urban:longitude xsd:double
+}
+
+<WeatherObservation> {
+    a [urban:WeatherObservation] ;
+    urban:dateTime xsd:string ;
+    urban:temperature xsd:double ;
+    urban:humidityPercentage xsd:integer ;
+    urban:precipitation xsd:double ;
+    urban:windSpeed xsd:double ;
+    urban:visibility xsd:double ;
+    urban:weatherCondition xsd:string ;
+    urban:roadCondition xsd:string ;
+    urban:hasLocation @<Location>
+}
+
+<PassengerImpact> {
+    a [urban:PassengerImpact] ;
+    urban:dateTime xsd:string ;
+    urban:comfortScore xsd:double ;
+    urban:complaintCount xsd:integer ;
+    urban:ridershipImpact xsd:double ;
+    urban:passengerSatisfaction xsd:double ;
+    urban:reportedBy @<Vehicle> ;
+    urban:hasLocation @<Location> ;
+    urban:relatedTo @<Route>
+}
+
+<PotholeEvent> {
+    a [urban:PotholeEvent] ;
+    urban:dateTime xsd:string ;
+    urban:severity xsd:string ;
+    urban:confidence xsd:double ;
+    urban:SizeInMilimiters xsd:double ;
+    urban:roadSurfaceCondition xsd:double ;
+    urban:detectedBy @<Vehicle> ;
+    urban:hasLocation @<Location> ;
+    urban:occursAt @<WeatherObservation> ;
+    urban:relatedTo @<Route>
+}
+
+<RouteEfficiency> {
+    a [urban:RouteEfficiency] ;
+    urban:dateTime xsd:string ;
+    urban:altRouteFlag xsd:boolean ;
+    urban:delayMinutes xsd:double ;
+    urban:fuelExtraPercentage xsd:double ;
+    urban:detourDistanceInKilometers xsd:double ;
+    urban:performedBy @<Vehicle> ;
+    urban:hasLocation @<Location> ;
+    urban:relatedTo @<Route>
+}
