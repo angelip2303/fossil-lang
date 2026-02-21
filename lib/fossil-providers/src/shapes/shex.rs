@@ -239,7 +239,7 @@ fn extract_fields_from_triple_expr(
             if predicate_uri == RDF_TYPE {
                 *rdf_type = value_expr
                     .as_ref()
-                    .and_then(|ve| extract_rdf_type_value(ve.as_ref()));
+                    .and_then(|ve| extract_iri_from_shape_expr(ve.as_ref()));
                 if rdf_type.is_none() {
                     warnings.push(FossilWarning::generic(
                         format!("shape '{}': rdf:type constraint found but could not extract type IRI", shape_name),
@@ -290,19 +290,24 @@ fn extract_fields_from_triple_expr(
     }
 }
 
-/// Extract the rdf:type IRI value from a value expression (e.g. `a [urban:Vehicle]`).
-/// The value appears as a NodeConstraint with a `values` list containing ObjectValue::IriRef.
-fn extract_rdf_type_value(shape_expr: &ShapeExpr) -> Option<String> {
+/// Extract an IRI from a ShapeExpr value expression.
+///
+/// Supports both syntactic forms of rdf:type constraints in ShEx:
+/// - `a [ex:Vehicle]` → `NodeConstraint` with a value set containing the IRI
+/// - `a ex:Vehicle`   → `Ref` pointing to a shape label IRI
+fn extract_iri_from_shape_expr(shape_expr: &ShapeExpr) -> Option<String> {
     match shape_expr {
         ShapeExpr::NodeConstraint(nc) => {
-            let values = nc.values()?;
-            for vsv in &values {
-                if let ValueSetValue::ObjectValue(ObjectValue::IriRef(iri)) = vsv {
-                    return Some(iri.to_string());
-                }
-            }
-            None
+            nc.values()?
+                .iter()
+                .find_map(|vsv| match vsv {
+                    ValueSetValue::ObjectValue(ObjectValue::IriRef(iri)) => {
+                        Some(iri.to_string())
+                    }
+                    _ => None,
+                })
         }
+        ShapeExpr::Ref(ShapeExprLabel::IriRef { value }) => Some(value.to_string()),
         _ => None,
     }
 }

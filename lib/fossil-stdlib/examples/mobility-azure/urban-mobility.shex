@@ -48,7 +48,7 @@ BASE <http://example.org/urban#>
     urban:dateTime xsd:string ;
     urban:severity xsd:string ;
     urban:confidence xsd:double ;
-    urban:SizeInMilimiters xsd:double ;
+    urban:sizeInMilimiters xsd:double ;
     urban:roadSurfaceCondition xsd:double ;
     urban:detectedBy @<Vehicle> ;
     urban:hasLocation @<Location> ;
