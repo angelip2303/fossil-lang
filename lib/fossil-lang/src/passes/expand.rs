@@ -259,6 +259,7 @@ impl ProviderExpander {
             let mut ctx = ProviderContext {
                 interner: &mut self.gcx.interner,
                 storage: &self.gcx.storage,
+                file_reader: self.gcx.file_reader.as_ref(),
             };
             resolved.imp.provide(&resolved.args, &mut ctx, &type_name_str, loc)?
         };
@@ -341,6 +342,7 @@ impl ProviderExpander {
             let mut ctx = ProviderContext {
                 interner: &mut self.gcx.interner,
                 storage: &self.gcx.storage,
+                file_reader: self.gcx.file_reader.as_ref(),
             };
             resolved.imp.provide(&resolved.args, &mut ctx, &binding_name_str, loc)?
         };
@@ -438,7 +440,7 @@ impl ProviderExpander {
             Err(_) => return,
         };
 
-        if let Some(identity) = resolved.imp.type_identity(&resolved.args) {
+        if let Some(identity) = resolved.imp.type_identity(&resolved.args, self.gcx.file_reader.as_ref()) {
             let name = self.gcx.interner.resolve(fossil_name).to_string();
             self.type_registry.register(identity, name);
         }

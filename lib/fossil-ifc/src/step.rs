@@ -1,5 +1,4 @@
-use std::fs;
-use std::path::Path;
+use fossil_lang::traits::provider::FileReader;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -62,9 +61,10 @@ pub struct StepFile {
 }
 
 impl StepFile {
-    pub fn open(path: &Path) -> Result<Self, String> {
-        let content =
-            fs::read_to_string(path).map_err(|e| format!("failed to read IFC file: {}", e))?;
+    pub fn open(url: &str, reader: &dyn FileReader) -> Result<Self, String> {
+        let content = reader
+            .read_to_string(url)
+            .map_err(|e| format!("failed to read IFC file: {}", e))?;
         Ok(Self { content })
     }
 

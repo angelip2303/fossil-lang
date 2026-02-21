@@ -1,7 +1,8 @@
 //! IFC data source with generic entity extraction
 
-use std::path::PathBuf;
+use std::sync::Arc;
 
+use fossil_lang::traits::provider::FileReader;
 use fossil_lang::traits::source::Source;
 use polars::prelude::*;
 
@@ -61,21 +62,40 @@ fn build_dataframe(entities: &[StepEntity], entity_def: &IfcEntityDef) -> Polars
     DataFrame::new(polars_columns)
 }
 
-#[derive(Debug, Clone)]
 pub struct IfcSource {
-    path: PathBuf,
-    entity_def: &'static IfcEntityDef,
+    pub path: String,
+    pub entity_def: &'static IfcEntityDef,
+    file_reader: Arc<dyn FileReader>,
+}
+
+impl std::fmt::Debug for IfcSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IfcSource")
+            .field("path", &self.path)
+            .field("entity_def", &self.entity_def.fossil_name)
+            .finish()
+    }
+}
+
+impl Clone for IfcSource {
+    fn clone(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            entity_def: self.entity_def,
+            file_reader: self.file_reader.clone(),
+        }
+    }
 }
 
 impl IfcSource {
-    pub fn new(path: PathBuf, entity_def: &'static IfcEntityDef) -> Self {
-        Self { path, entity_def }
+    pub fn new(path: String, entity_def: &'static IfcEntityDef, file_reader: Arc<dyn FileReader>) -> Self {
+        Self { path, entity_def, file_reader }
     }
 }
 
 impl Source for IfcSource {
     fn to_lazy_frame(&self) -> PolarsResult<LazyFrame> {
-        let step_file = StepFile::open(&self.path).map_err(|e| {
+        let step_file = StepFile::open(&self.path, self.file_reader.as_ref()).map_err(|e| {
             PolarsError::ComputeError(format!("failed to parse IFC file: {}", e).into())
         })?;
 

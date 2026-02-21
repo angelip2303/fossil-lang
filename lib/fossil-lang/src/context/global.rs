@@ -6,7 +6,7 @@ use crate::common::PrimitiveType;
 use crate::context::{DefId, DefKind, Definitions, Interner, Symbol, TypeMetadata};
 use crate::runtime::storage::StorageConfig;
 
-use crate::traits::provider::{ModuleSpec, ProviderInfo, TypeProviderImpl};
+use crate::traits::provider::{FileReader, LocalFileReader, ModuleSpec, ProviderInfo, TypeProviderImpl};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltInFieldType {
@@ -36,6 +36,7 @@ pub struct GlobalContext {
     pub module_generators: Vec<ModuleGeneratorFn>,
     pub ref_resolver: Option<RefResolverFn>,
     pub storage: StorageConfig,
+    pub file_reader: Arc<dyn FileReader>,
 }
 
 impl GlobalContext {
@@ -104,6 +105,7 @@ impl Default for GlobalContext {
             module_generators: Vec::new(),
             ref_resolver: None,
             storage: StorageConfig::default(),
+            file_reader: Arc::new(LocalFileReader),
         }
     }
 }

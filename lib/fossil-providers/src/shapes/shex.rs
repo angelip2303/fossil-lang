@@ -1,11 +1,9 @@
-use std::fs;
-
 use fossil_lang::ast::Loc;
 use fossil_lang::ast::{Attribute, AttributeArg, Literal, PrimitiveType};
 use fossil_lang::context::Interner;
 use fossil_lang::error::{FossilError, FossilWarning, FossilWarnings};
 use fossil_lang::traits::provider::{
-    FieldSpec, FieldType, ProviderArgs, ProviderContext, ProviderInfo, ProviderKind,
+    FieldSpec, FieldType, FileReader, ProviderArgs, ProviderContext, ProviderInfo, ProviderKind,
     ProviderOutput, ProviderParamInfo, ProviderSchema, TypeProviderImpl,
 };
 
@@ -40,11 +38,11 @@ impl TypeProviderImpl for ShexProvider {
         ]
     }
 
-    fn type_identity(&self, args: &ProviderArgs) -> Option<String> {
+    fn type_identity(&self, args: &ProviderArgs, reader: &dyn FileReader) -> Option<String> {
         let path_str = args.get_string("path")?;
         let shape_name = args.get_string("shape")?;
         let path = resolve_path(path_str);
-        let content = fs::read_to_string(path.to_str()).ok()?;
+        let content = reader.read_to_string(path.to_str()).ok()?;
         let schema = parse_shex_schema(&content, Loc::generated()).ok()?;
         let shapes = schema.shapes()?;
         for shape_decl in shapes {
@@ -74,8 +72,8 @@ impl TypeProviderImpl for ShexProvider {
         let shape_name = args.require_string("shape", "shex", loc)?;
 
         let path_str = path.to_str().to_string();
-        let shex_content = fs::read_to_string(&path_str)
-            .map_err(|e| FossilError::read_error(path_str.clone(), e.to_string(), loc))?;
+        let shex_content = ctx.file_reader.read_to_string(&path_str)
+            .map_err(|e| FossilError::read_error(path_str.clone(), e, loc))?;
 
         let schema = parse_shex_schema(&shex_content, loc)?;
         let mut type_attrs = extract_base_attribute(&schema, ctx.interner, loc);

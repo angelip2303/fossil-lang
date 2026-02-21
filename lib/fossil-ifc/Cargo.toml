@@ -18,7 +18,7 @@ polars.workspace = true
 
 # internal dependencies
 fossil-lang.workspace = true
+fossil-providers.workspace = true
 
 [dev-dependencies]
-fossil-providers.workspace = true
 fossil-stdlib.workspace = true

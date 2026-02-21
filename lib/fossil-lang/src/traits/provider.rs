@@ -8,6 +8,19 @@ use crate::error::{FossilError, FossilWarnings};
 use crate::runtime::storage::StorageConfig;
 use crate::traits::function::FunctionImpl;
 
+pub trait FileReader: Send + Sync + std::fmt::Debug {
+    fn read_to_string(&self, url: &str) -> Result<String, String>;
+}
+
+#[derive(Debug)]
+pub struct LocalFileReader;
+
+impl FileReader for LocalFileReader {
+    fn read_to_string(&self, path: &str) -> Result<String, String> {
+        std::fs::read_to_string(path).map_err(|e| e.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
@@ -227,6 +240,7 @@ impl TypeRegistry {
 pub struct ProviderContext<'a> {
     pub interner: &'a mut Interner,
     pub storage: &'a StorageConfig,
+    pub file_reader: &'a dyn FileReader,
 }
 
 pub trait TypeProviderImpl: Send + Sync {
@@ -238,7 +252,7 @@ pub trait TypeProviderImpl: Send + Sync {
 
     /// Returns the external identity (e.g. full IRI) for the type this provider generates.
     /// Used during pre-scan to build the TypeRegistry for cross-reference resolution.
-    fn type_identity(&self, _args: &ProviderArgs) -> Option<String> {
+    fn type_identity(&self, _args: &ProviderArgs, _reader: &dyn FileReader) -> Option<String> {
         None
     }
 

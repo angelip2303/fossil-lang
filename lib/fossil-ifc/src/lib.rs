@@ -2,8 +2,6 @@ pub mod schema;
 pub mod source;
 pub(crate) mod step;
 
-use std::path::PathBuf;
-
 use fossil_lang::ast::Loc;
 use fossil_lang::context::DefKind;
 use fossil_lang::error::FossilError;
@@ -16,6 +14,7 @@ use fossil_lang::traits::provider::{
     ProviderKind, ProviderOutput, ProviderParamInfo, ProviderSchema, TypeProviderImpl,
 };
 use fossil_lang::traits::source::Source;
+use fossil_providers::utils::{resolve_path, validate_extension, validate_path};
 
 use polars::prelude::*;
 
@@ -66,28 +65,9 @@ impl TypeProviderImpl for IfcProvider {
         let path_str = args.require_string("path", "ifc", loc)?;
         let entity_str = args.require_string("entity", "ifc", loc)?;
 
-        let path = PathBuf::from(path_str);
-
-        match path.extension().and_then(|e| e.to_str()) {
-            Some("ifc") => {}
-            Some(other) => {
-                return Err(FossilError::invalid_extension(other, "ifc".to_string(), loc));
-            }
-            None => {
-                return Err(FossilError::invalid_extension(
-                    "(none)",
-                    "ifc".to_string(),
-                    loc,
-                ));
-            }
-        }
-
-        if !path.exists() {
-            return Err(FossilError::file_not_found(path.display().to_string(), loc));
-        }
-        if !path.is_file() {
-            return Err(FossilError::not_a_file(path.display().to_string(), loc));
-        }
+        let path = resolve_path(path_str);
+        validate_extension(path.as_ref(), &["ifc"], loc)?;
+        validate_path(path.as_ref(), loc)?;
 
         let entity_def = ALL_ENTITIES
             .iter()
@@ -114,7 +94,8 @@ impl TypeProviderImpl for IfcProvider {
 
         let module_spec = ModuleSpec {
             functions: vec![FunctionDef::new("load", IfcLoadFunction {
-                source: IfcSource::new(path, entity_def),
+                path: path.to_str().to_string(),
+                entity_def,
                 schema: polars_schema,
                 type_name: type_name.to_string(),
             })],
@@ -126,7 +107,8 @@ impl TypeProviderImpl for IfcProvider {
 }
 
 struct IfcLoadFunction {
-    source: IfcSource,
+    path: String,
+    entity_def: &'static IfcEntityDef,
     schema: Schema,
     type_name: String,
 }
@@ -145,10 +127,15 @@ impl FunctionImpl for IfcLoadFunction {
         Polytype::mono(ir.fn_type(vec![], result_ty))
     }
 
-    fn call(&self, _args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, FossilError> {
+    fn call(&self, _args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
         use fossil_lang::runtime::value::Plan;
 
-        let plan = Plan::from_source(self.source.box_clone(), self.schema.clone());
+        let source = IfcSource::new(
+            self.path.clone(),
+            self.entity_def,
+            ctx.gcx.file_reader.clone(),
+        );
+        let plan = Plan::from_source(source.box_clone(), self.schema.clone());
         Ok(Value::Plan(plan))
     }
 }
