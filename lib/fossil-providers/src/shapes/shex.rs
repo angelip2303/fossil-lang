@@ -40,6 +40,25 @@ impl TypeProviderImpl for ShexProvider {
         ]
     }
 
+    fn type_identity(&self, args: &ProviderArgs) -> Option<String> {
+        let path_str = args.get_string("path")?;
+        let shape_name = args.get_string("shape")?;
+        let path = resolve_path(path_str);
+        let content = fs::read_to_string(path.to_str()).ok()?;
+        let schema = parse_shex_schema(&content, Loc::generated()).ok()?;
+        let shapes = schema.shapes()?;
+        for shape_decl in shapes {
+            if shape_label_matches(shape_decl.id(), shape_name) {
+                return match shape_decl.id() {
+                    ShapeExprLabel::IriRef { value } => Some(value.to_string()),
+                    ShapeExprLabel::BNode { value } => Some(value.to_string()),
+                    ShapeExprLabel::Start => Some("Start".to_string()),
+                };
+            }
+        }
+        None
+    }
+
     fn provide(
         &self,
         args: &ProviderArgs,
@@ -339,9 +358,7 @@ fn extract_value_expr_info(shape_expr: &ShapeExpr) -> ValueExprInfo {
         }
         ShapeExpr::Ref(label) => {
             let name = match label {
-                ShapeExprLabel::IriRef { value } => {
-                    extract_local_name(&value.to_string())
-                }
+                ShapeExprLabel::IriRef { value } => value.to_string(),
                 ShapeExprLabel::BNode { value } => value.to_string(),
                 ShapeExprLabel::Start => "Start".to_string(),
             };

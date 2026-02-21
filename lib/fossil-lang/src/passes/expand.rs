@@ -6,7 +6,8 @@ use crate::context::global::TypeInfo;
 use crate::error::{FossilError, FossilErrors, FossilWarnings};
 use crate::passes::GlobalContext;
 use crate::traits::provider::{
-    FieldType, ModuleSpec, ProviderContext, ProviderKind, ProviderSchema, resolve_to_provider_args,
+    FieldType, ModuleSpec, ProviderArgs, ProviderContext, ProviderKind, ProviderSchema,
+    TypeRegistry, resolve_to_provider_args,
 };
 
 pub struct ExpandResult {
@@ -15,10 +16,18 @@ pub struct ExpandResult {
     pub warnings: FossilWarnings,
 }
 
+struct ResolvedProvider {
+    imp: std::sync::Arc<dyn crate::traits::provider::TypeProviderImpl>,
+    args: ProviderArgs,
+    name: String,
+    kind: ProviderKind,
+}
+
 pub struct ProviderExpander {
     ast: Ast,
     gcx: GlobalContext,
     warnings: FossilWarnings,
+    type_registry: TypeRegistry,
 }
 
 fn field_type_to_ast(ft: &FieldType, ast: &mut Ast, interner: &mut Interner, loc: Loc) -> TypeId {
@@ -60,6 +69,22 @@ fn schema_to_ast(schema: &ProviderSchema, ast: &mut Ast, interner: &mut Interner
     })
 }
 
+fn resolve_schema_types(schema: &mut ProviderSchema, registry: &TypeRegistry) {
+    for field in &mut schema.fields {
+        field.ty = resolve_field_type(&field.ty, registry);
+    }
+}
+
+fn resolve_field_type(ty: &FieldType, registry: &TypeRegistry) -> FieldType {
+    match ty {
+        FieldType::Named(identity) => FieldType::Named(registry.resolve_name(identity)),
+        FieldType::Optional(inner) => {
+            FieldType::Optional(Box::new(resolve_field_type(inner, registry)))
+        }
+        FieldType::Primitive(_) => ty.clone(),
+    }
+}
+
 fn build_provider_attribute(
     interner: &mut Interner,
     provider_name: &str,
@@ -91,6 +116,7 @@ impl ProviderExpander {
             ast,
             gcx,
             warnings: FossilWarnings::new(),
+            type_registry: TypeRegistry::new(),
         }
     }
 
@@ -128,6 +154,8 @@ impl ProviderExpander {
                 }
             })
             .collect();
+
+        self.build_type_registry(&type_stmts, &let_stmts);
 
         let mut errors = FossilErrors::new();
 
@@ -178,6 +206,25 @@ impl ProviderExpander {
         }
     }
 
+    fn resolve_provider_with_args(
+        &self,
+        provider_path: &Path,
+        raw_args: &[ProviderArgument],
+        loc: Loc,
+    ) -> Result<ResolvedProvider, FossilError> {
+        let imp = self.resolve_provider(provider_path, loc)?;
+        let args = resolve_to_provider_args(
+            raw_args,
+            &imp.param_info(),
+            &self.gcx.interner,
+            leak_provider_name(provider_path, &self.gcx.interner),
+            loc,
+        )?;
+        let name = provider_path.display(&self.gcx.interner);
+        let kind = imp.info().kind;
+        Ok(ResolvedProvider { imp, args, name, kind })
+    }
+
     /// Expand `type Name = provider!(args)` — only for Schema providers
     fn expand_type_provider_stmt(&mut self, stmt_id: StmtId) -> Result<(), FossilError> {
         let (type_name, type_id) = {
@@ -196,38 +243,30 @@ impl ProviderExpander {
             }
         };
 
-        let provider_impl = self.resolve_provider(&provider_path, loc)?;
+        let resolved = self.resolve_provider_with_args(&provider_path, &args, loc)?;
 
-        let provider_args = resolve_to_provider_args(
-            &args,
-            &provider_impl.param_info(),
-            &self.gcx.interner,
-            leak_provider_name(&provider_path, &self.gcx.interner),
-            loc,
-        )?;
-
-        let type_name_str = self.gcx.interner.resolve(type_name).to_string();
-        let provider_name_str = provider_path.display(&self.gcx.interner);
-        let provider_kind = provider_impl.info().kind;
-
-        if provider_kind == ProviderKind::Data {
+        if resolved.kind == ProviderKind::Data {
             return Err(FossilError::provider_kind_mismatch(
-                provider_name_str,
+                resolved.name,
                 "loads data, use `let` instead of `type`",
                 loc,
             ));
         }
 
-        let provider_output = {
+        let type_name_str = self.gcx.interner.resolve(type_name).to_string();
+
+        let mut provider_output = {
             let mut ctx = ProviderContext {
                 interner: &mut self.gcx.interner,
                 storage: &self.gcx.storage,
             };
-            provider_impl.provide(&provider_args, &mut ctx, &type_name_str, loc)?
+            resolved.imp.provide(&resolved.args, &mut ctx, &type_name_str, loc)?
         };
 
+        resolve_schema_types(&mut provider_output.schema, &self.type_registry);
+
         let provider_attr = build_provider_attribute(
-            &mut self.gcx.interner, &provider_name_str, provider_kind, loc,
+            &mut self.gcx.interner, &resolved.name, resolved.kind, loc,
         );
 
         self.warnings.extend(provider_output.warnings);
@@ -286,38 +325,30 @@ impl ProviderExpander {
             }
         };
 
-        let provider_impl = self.resolve_provider(&provider_path, loc)?;
+        let resolved = self.resolve_provider_with_args(&provider_path, &args, loc)?;
 
-        let provider_args = resolve_to_provider_args(
-            &args,
-            &provider_impl.param_info(),
-            &self.gcx.interner,
-            leak_provider_name(&provider_path, &self.gcx.interner),
-            loc,
-        )?;
-
-        let binding_name_str = self.gcx.interner.resolve(binding_name).to_string();
-        let provider_name_str = provider_path.display(&self.gcx.interner);
-        let provider_kind = provider_impl.info().kind;
-
-        if provider_kind == ProviderKind::Schema {
+        if resolved.kind == ProviderKind::Schema {
             return Err(FossilError::provider_kind_mismatch(
-                provider_name_str,
+                resolved.name,
                 "is schema-only, use `type` instead of `let`",
                 loc,
             ));
         }
 
-        let provider_output = {
+        let binding_name_str = self.gcx.interner.resolve(binding_name).to_string();
+
+        let mut provider_output = {
             let mut ctx = ProviderContext {
                 interner: &mut self.gcx.interner,
                 storage: &self.gcx.storage,
             };
-            provider_impl.provide(&provider_args, &mut ctx, &binding_name_str, loc)?
+            resolved.imp.provide(&resolved.args, &mut ctx, &binding_name_str, loc)?
         };
 
+        resolve_schema_types(&mut provider_output.schema, &self.type_registry);
+
         let provider_attr = build_provider_attribute(
-            &mut self.gcx.interner, &provider_name_str, provider_kind, loc,
+            &mut self.gcx.interner, &resolved.name, resolved.kind, loc,
         );
 
         self.warnings.extend(provider_output.warnings);
@@ -371,6 +402,46 @@ impl ProviderExpander {
         }
 
         Ok(())
+    }
+
+    fn build_type_registry(&mut self, type_stmts: &[StmtId], let_stmts: &[StmtId]) {
+        for &stmt_id in type_stmts {
+            let stmt = self.ast.stmts.get(stmt_id);
+            if let StmtKind::Type { name, ty, .. } = &stmt.kind {
+                let type_node = self.ast.types.get(*ty);
+                if let TypeKind::Provider { provider, args } = &type_node.kind {
+                    self.try_register_identity(*name, provider.clone(), args.clone(), type_node.loc);
+                }
+            }
+        }
+
+        for &stmt_id in let_stmts {
+            let stmt = self.ast.stmts.get(stmt_id);
+            if let StmtKind::Let { name, value } = &stmt.kind {
+                let expr = self.ast.exprs.get(*value);
+                if let ExprKind::ProviderInvocation { provider, args } = &expr.kind {
+                    self.try_register_identity(*name, provider.clone(), args.clone(), expr.loc);
+                }
+            }
+        }
+    }
+
+    fn try_register_identity(
+        &mut self,
+        fossil_name: Symbol,
+        provider_path: Path,
+        args: Vec<ProviderArgument>,
+        loc: Loc,
+    ) {
+        let resolved = match self.resolve_provider_with_args(&provider_path, &args, loc) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        if let Some(identity) = resolved.imp.type_identity(&resolved.args) {
+            let name = self.gcx.interner.resolve(fossil_name).to_string();
+            self.type_registry.register(identity, name);
+        }
     }
 
     fn register_generated_module(

@@ -191,6 +191,39 @@ fn literal_to_provider_literal(lit: &Literal, interner: &Interner) -> ProviderLi
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct TypeRegistry {
+    identity_to_name: HashMap<String, String>,
+}
+
+impl TypeRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&mut self, identity: String, fossil_name: String) {
+        self.identity_to_name.insert(identity, fossil_name);
+    }
+
+    pub fn resolve(&self, identity: &str) -> Option<&str> {
+        self.identity_to_name.get(identity).map(|s| s.as_str())
+    }
+
+    pub fn resolve_name(&self, identity: &str) -> String {
+        if let Some(name) = self.identity_to_name.get(identity) {
+            return name.clone();
+        }
+        let s = identity.trim_start_matches('<').trim_end_matches('>');
+        if let Some(pos) = s.rfind('#') {
+            return s[pos + 1..].to_string();
+        }
+        if let Some(pos) = s.rfind('/') {
+            return s[pos + 1..].to_string();
+        }
+        s.to_string()
+    }
+}
+
 pub struct ProviderContext<'a> {
     pub interner: &'a mut Interner,
     pub storage: &'a StorageConfig,
@@ -201,6 +234,12 @@ pub trait TypeProviderImpl: Send + Sync {
 
     fn param_info(&self) -> Vec<ProviderParamInfo> {
         vec![]
+    }
+
+    /// Returns the external identity (e.g. full IRI) for the type this provider generates.
+    /// Used during pre-scan to build the TypeRegistry for cross-reference resolution.
+    fn type_identity(&self, _args: &ProviderArgs) -> Option<String> {
+        None
     }
 
     fn provide(
