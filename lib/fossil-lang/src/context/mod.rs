@@ -301,7 +301,8 @@ mod tests {
     use crate::runtime::value::Value;
     use crate::traits::function::{FunctionImpl, RuntimeContext};
     use crate::traits::provider::{
-        FunctionDef, ModuleSpec, ProviderArgs, ProviderOutput, ProviderSchema, TypeProviderImpl,
+        FunctionDef, ModuleSpec, ProviderArgs, ProviderInfo, ProviderKind, ProviderOutput,
+        ProviderSchema, TypeProviderImpl,
     };
 
     struct MockFunction;
@@ -325,6 +326,10 @@ mod tests {
     struct MockProvider;
 
     impl TypeProviderImpl for MockProvider {
+        fn info(&self) -> ProviderInfo {
+            ProviderInfo { extensions: &[], kind: ProviderKind::Schema }
+        }
+
         fn provide(
             &self,
             _args: &ProviderArgs,

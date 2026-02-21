@@ -201,6 +201,16 @@ impl ProviderExpander {
 
         let type_name_str = self.gcx.interner.resolve(type_name).to_string();
         let provider_name_str = provider_path.display(&self.gcx.interner);
+        let provider_kind = provider_impl.info().kind;
+
+        if provider_kind == ProviderKind::Data {
+            return Err(FossilError::provider_kind_mismatch(
+                provider_name_str,
+                "loads data, use `let` instead of `type`",
+                loc,
+            ));
+        }
+
         let provider_output = {
             let mut ctx = ProviderContext {
                 interner: &mut self.gcx.interner,
@@ -209,16 +219,8 @@ impl ProviderExpander {
             provider_impl.provide(&provider_args, &mut ctx, &type_name_str, loc)?
         };
 
-        if provider_output.kind == ProviderKind::Data {
-            return Err(FossilError::provider_kind_mismatch(
-                provider_name_str,
-                "loads data, use `let` instead of `type`",
-                loc,
-            ));
-        }
-
         let provider_attr = build_provider_attribute(
-            &mut self.gcx.interner, &provider_name_str, provider_output.kind, loc,
+            &mut self.gcx.interner, &provider_name_str, provider_kind, loc,
         );
 
         self.warnings.extend(provider_output.warnings);
@@ -289,6 +291,16 @@ impl ProviderExpander {
 
         let binding_name_str = self.gcx.interner.resolve(binding_name).to_string();
         let provider_name_str = provider_path.display(&self.gcx.interner);
+        let provider_kind = provider_impl.info().kind;
+
+        if provider_kind == ProviderKind::Schema {
+            return Err(FossilError::provider_kind_mismatch(
+                provider_name_str,
+                "is schema-only, use `type` instead of `let`",
+                loc,
+            ));
+        }
+
         let provider_output = {
             let mut ctx = ProviderContext {
                 interner: &mut self.gcx.interner,
@@ -297,16 +309,8 @@ impl ProviderExpander {
             provider_impl.provide(&provider_args, &mut ctx, &binding_name_str, loc)?
         };
 
-        if provider_output.kind == ProviderKind::Schema {
-            return Err(FossilError::provider_kind_mismatch(
-                provider_name_str,
-                "is schema-only, use `type` instead of `let`",
-                loc,
-            ));
-        }
-
         let provider_attr = build_provider_attribute(
-            &mut self.gcx.interner, &provider_name_str, provider_output.kind, loc,
+            &mut self.gcx.interner, &provider_name_str, provider_kind, loc,
         );
 
         self.warnings.extend(provider_output.warnings);

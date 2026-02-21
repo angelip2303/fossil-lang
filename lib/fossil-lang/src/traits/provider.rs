@@ -8,7 +8,8 @@ use crate::error::{FossilError, FossilWarnings};
 use crate::runtime::storage::StorageConfig;
 use crate::traits::function::FunctionImpl;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     /// Only generates a type definition (e.g. ShEx). Use with `type X = provider!(...)`.
     Schema,
@@ -16,6 +17,12 @@ pub enum ProviderKind {
     Data,
     /// Works in both positions: `type X = provider!(...)` or `let x = provider!(...)`.
     Both,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProviderInfo {
+    pub extensions: &'static [&'static str],
+    pub kind: ProviderKind,
 }
 
 #[derive(Debug, Clone)]
@@ -43,7 +50,6 @@ pub struct ProviderOutput {
     /// Provider-generated type-level attributes (e.g., base IRI from ShEx).
     /// These are merged with user attributes during expansion; user attrs override.
     pub type_attributes: Vec<Attribute>,
-    pub kind: ProviderKind,
 }
 
 impl ProviderOutput {
@@ -53,18 +59,7 @@ impl ProviderOutput {
             module_spec: None,
             warnings: FossilWarnings::new(),
             type_attributes: Vec::new(),
-            kind: ProviderKind::Schema,
         }
-    }
-
-    pub fn as_data(mut self) -> Self {
-        self.kind = ProviderKind::Data;
-        self
-    }
-
-    pub fn as_both(mut self) -> Self {
-        self.kind = ProviderKind::Both;
-        self
     }
 
     pub fn with_module(mut self, module_spec: ModuleSpec) -> Self {
@@ -201,6 +196,8 @@ pub struct ProviderContext<'a> {
 }
 
 pub trait TypeProviderImpl: Send + Sync {
+    fn info(&self) -> ProviderInfo;
+
     fn param_info(&self) -> Vec<ProviderParamInfo> {
         vec![]
     }

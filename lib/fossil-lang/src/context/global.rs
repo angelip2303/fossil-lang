@@ -6,7 +6,7 @@ use crate::common::PrimitiveType;
 use crate::context::{DefId, DefKind, Definitions, Interner, Symbol, TypeMetadata};
 use crate::runtime::storage::StorageConfig;
 
-use crate::traits::provider::{ModuleSpec, TypeProviderImpl};
+use crate::traits::provider::{ModuleSpec, ProviderInfo, TypeProviderImpl};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltInFieldType {
@@ -65,6 +65,15 @@ impl GlobalContext {
                 DefKind::Func(func_def.implementation),
             );
         }
+    }
+
+    pub fn list_providers(&self) -> Vec<(String, ProviderInfo)> {
+        self.definitions.iter()
+            .filter_map(|def| match &def.kind {
+                DefKind::Provider(p) => Some((self.interner.resolve(def.name).to_string(), p.info())),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn register_record_type_with_optionality(

@@ -6,8 +6,8 @@ use fossil_lang::runtime::storage::StorageConfig;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 use fossil_lang::traits::provider::{
-    FunctionDef, ModuleSpec, ProviderArgs, ProviderContext, ProviderOutput, ProviderParamInfo,
-    ProviderSchema, TypeProviderImpl,
+    FunctionDef, ModuleSpec, ProviderArgs, ProviderContext, ProviderInfo, ProviderKind,
+    ProviderOutput, ProviderParamInfo, ProviderSchema, TypeProviderImpl,
 };
 use fossil_lang::traits::source::Source;
 
@@ -74,6 +74,10 @@ impl Source for CsvSource {
 pub struct CsvProvider;
 
 impl TypeProviderImpl for CsvProvider {
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo { extensions: &["csv"], kind: ProviderKind::Both }
+    }
+
     fn param_info(&self) -> Vec<ProviderParamInfo> {
         vec![
             ProviderParamInfo {
@@ -132,8 +136,7 @@ impl TypeProviderImpl for CsvProvider {
         };
 
         Ok(ProviderOutput::new(ProviderSchema { fields })
-            .with_module(module_spec)
-            .as_both())
+            .with_module(module_spec))
     }
 }
 

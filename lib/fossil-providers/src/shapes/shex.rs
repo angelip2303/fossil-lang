@@ -5,8 +5,8 @@ use fossil_lang::ast::{Attribute, AttributeArg, Literal, PrimitiveType};
 use fossil_lang::context::Interner;
 use fossil_lang::error::{FossilError, FossilWarning, FossilWarnings};
 use fossil_lang::traits::provider::{
-    FieldSpec, FieldType, ProviderArgs, ProviderContext, ProviderOutput, ProviderParamInfo,
-    ProviderSchema, TypeProviderImpl,
+    FieldSpec, FieldType, ProviderArgs, ProviderContext, ProviderInfo, ProviderKind,
+    ProviderOutput, ProviderParamInfo, ProviderSchema, TypeProviderImpl,
 };
 
 use iri_s::IriS;
@@ -21,6 +21,10 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 pub struct ShexProvider;
 
 impl TypeProviderImpl for ShexProvider {
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo { extensions: &["shex"], kind: ProviderKind::Schema }
+    }
+
     fn param_info(&self) -> Vec<ProviderParamInfo> {
         vec![
             ProviderParamInfo {

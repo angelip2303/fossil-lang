@@ -12,8 +12,8 @@ use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 use fossil_lang::traits::provider::{
-    FieldSpec, FieldType, FunctionDef, ModuleSpec, ProviderArgs, ProviderContext, ProviderOutput,
-    ProviderParamInfo, ProviderSchema, TypeProviderImpl,
+    FieldSpec, FieldType, FunctionDef, ModuleSpec, ProviderArgs, ProviderContext, ProviderInfo,
+    ProviderKind, ProviderOutput, ProviderParamInfo, ProviderSchema, TypeProviderImpl,
 };
 use fossil_lang::traits::source::Source;
 
@@ -37,6 +37,10 @@ pub fn init(gcx: &mut GlobalContext) {
 pub struct IfcProvider;
 
 impl TypeProviderImpl for IfcProvider {
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo { extensions: &["ifc"], kind: ProviderKind::Data }
+    }
+
     fn param_info(&self) -> Vec<ProviderParamInfo> {
         vec![
             ProviderParamInfo {
@@ -117,8 +121,7 @@ impl TypeProviderImpl for IfcProvider {
         };
 
         Ok(ProviderOutput::new(ProviderSchema { fields })
-            .with_module(module_spec)
-            .as_data())
+            .with_module(module_spec))
     }
 }
 
