@@ -18,7 +18,7 @@ use fossil_providers::utils::{resolve_path, validate_extension, validate_path};
 
 use polars::prelude::*;
 
-use schema::{datatype_to_primitive, IfcFieldDef, Optionality, ALL_ENTITIES};
+use schema::{datatype_to_primitive, IfcEntityDef, IfcFieldDef, Optionality, ALL_ENTITIES};
 use source::IfcSource;
 
 fn ifc_field_to_field_type(f: &IfcFieldDef) -> FieldType {
