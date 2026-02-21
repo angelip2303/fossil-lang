@@ -281,15 +281,9 @@ impl ProviderExpander {
         {
             let stmt_mut = self.ast.stmts.get_mut(stmt_id);
             if let StmtKind::Type { attrs, .. } = &mut stmt_mut.kind {
-                let user_names: HashSet<Symbol> = attrs.iter().map(|a| a.name).collect();
-                if !user_names.contains(&provider_attr.name) {
-                    attrs.push(provider_attr);
-                }
-                let new_attrs: Vec<_> = provider_output.type_attributes
-                    .into_iter()
-                    .filter(|a| !user_names.contains(&a.name))
-                    .collect();
-                attrs.extend(new_attrs);
+                let mut all_provider_attrs = provider_output.type_attributes;
+                all_provider_attrs.push(provider_attr);
+                merge_provider_attributes(attrs, all_provider_attrs);
             }
         }
 
@@ -505,6 +499,32 @@ impl ProviderExpander {
 
         for (type_name, spec) in to_register {
             let _ = self.register_generated_module(type_name, spec);
+        }
+    }
+}
+
+/// Merge provider-generated attributes into the user's attribute list.
+///
+/// When names collide (e.g. both user and provider have `#[rdf(...)]`),
+/// the provider's args are folded into the existing attribute — but
+/// user-supplied keys always take precedence.
+fn merge_provider_attributes(attrs: &mut Vec<Attribute>, provider_attrs: Vec<Attribute>) {
+    for prov in provider_attrs {
+        match attrs.iter_mut().find(|a| a.name == prov.name) {
+            Some(existing) => {
+                let user_keys: HashSet<Symbol> = existing
+                    .args
+                    .iter()
+                    .filter_map(|a| match a {
+                        AttributeArg::Named { key, .. } => Some(*key),
+                        _ => None,
+                    })
+                    .collect();
+                existing.args.extend(prov.args.into_iter().filter(|a| {
+                    !matches!(a, AttributeArg::Named { key, .. } if user_keys.contains(key))
+                }));
+            }
+            None => attrs.push(prov),
         }
     }
 }

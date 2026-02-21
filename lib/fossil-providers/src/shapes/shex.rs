@@ -76,13 +76,11 @@ impl TypeProviderImpl for ShexProvider {
             .map_err(|e| FossilError::read_error(path_str.clone(), e, loc))?;
 
         let schema = parse_shex_schema(&shex_content, loc)?;
-        let mut type_attrs = extract_base_attribute(&schema, ctx.interner, loc);
         let extraction = extract_shape_fields(&schema, shape_name, loc)?;
         let fields = shex_fields_to_field_specs(extraction.fields, ctx.interner, loc);
-
-        if let Some(rdf_type_iri) = &extraction.rdf_type {
-            type_attrs.push(rdf_attribute(ctx.interner, "type", rdf_type_iri, loc));
-        }
+        let type_attrs = build_rdf_type_attribute(
+            &schema, &extraction.rdf_type, ctx.interner, loc,
+        );
 
         Ok(ProviderOutput::new(ProviderSchema { fields })
             .with_warnings(extraction.warnings)
@@ -111,11 +109,36 @@ fn rdf_attribute(interner: &mut Interner, key: &str, value: &str, loc: Loc) -> A
     }
 }
 
-fn extract_base_attribute(schema: &Schema, interner: &mut Interner, loc: Loc) -> Vec<Attribute> {
-    let Some(base_iri) = schema.base() else {
+/// Build a single `#[rdf(base = "...", type = "...")]` attribute from the
+/// schema's BASE declaration and the extracted rdf:type IRI.  Returns an
+/// empty vec when neither is present.
+fn build_rdf_type_attribute(
+    schema: &Schema,
+    rdf_type: &Option<String>,
+    interner: &mut Interner,
+    loc: Loc,
+) -> Vec<Attribute> {
+    let mut args = Vec::new();
+
+    if let Some(base_iri) = schema.base() {
+        args.push(AttributeArg::Named {
+            key: interner.intern("base"),
+            value: Literal::String(interner.intern(&base_iri.to_string())),
+        });
+    }
+
+    if let Some(rdf_type_iri) = rdf_type {
+        args.push(AttributeArg::Named {
+            key: interner.intern("type"),
+            value: Literal::String(interner.intern(rdf_type_iri)),
+        });
+    }
+
+    if args.is_empty() {
         return Vec::new();
-    };
-    vec![rdf_attribute(interner, "base", &base_iri.to_string(), loc)]
+    }
+
+    vec![Attribute { name: interner.intern("rdf"), args, loc }]
 }
 
 struct ShapeExtractionResult {
