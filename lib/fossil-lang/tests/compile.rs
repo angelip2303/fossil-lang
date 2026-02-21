@@ -260,3 +260,11 @@ fn error_duplicate_type() {
          type T do B: string end",
     ).is_err());
 }
+
+#[test]
+fn error_unknown_field_in_record_construction() {
+    assert!(compile(
+        "type T do Name: string end\n\
+         let t = T { BadField = \"hi\" }",
+    ).is_err());
+}

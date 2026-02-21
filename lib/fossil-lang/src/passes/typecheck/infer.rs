@@ -91,6 +91,16 @@ impl TypeChecker {
 
                 self.check_ctor_arg_count(type_def_id, ctor_args.len(), loc)?;
 
+                if let Some(info) = self.lookup_type_info(type_def_id) {
+                    let valid_fields = &info.field_names;
+                    for (field_name, _) in fields {
+                        if !valid_fields.contains(field_name) {
+                            let name = self.gcx.interner.resolve(*field_name).to_string();
+                            return Err(FossilError::field_not_found(name, loc));
+                        }
+                    }
+                }
+
                 let named_ty = self.ir.named_type(type_def_id);
                 Ok((subst, named_ty))
             }
