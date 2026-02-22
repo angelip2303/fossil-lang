@@ -101,7 +101,9 @@ fn serialize_rdf(
 
     let ext = dest
         .extension()
-        .unwrap_or_else(|| "ttl".to_string());
+        .ok_or_else(|| RdfError::UnsupportedFormat(
+            "no file extension; use .ttl, .nt, .nq, or .jsonld".to_string()
+        ))?;
 
     let format =
         RdfFormat::from_extension(&ext).ok_or_else(|| RdfError::UnsupportedFormat(ext.clone()))?;

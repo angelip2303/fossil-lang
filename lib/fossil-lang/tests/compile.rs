@@ -295,6 +295,60 @@ fn compile_inline_constructor_in_projection_field() {
 }
 
 #[test]
+fn compile_ctor_params_equal_field_count() {
+    // When ctor param count equals field count, Application inference
+    // should use the ctor param types (not fall through to field types).
+    let prog = compile(
+        "type T(x: int) do x: int end\n\
+         let t = T(42)",
+    )
+    .unwrap();
+    // let_value_type asserts the let produced a typed value in typeck_results.
+    let ty = let_value_type(&prog, 1);
+    assert!(matches!(ty, TypeKind::Record(_)), "expected Record, got {:?}", ty);
+}
+
+#[test]
+fn compile_ctor_param_type_differs_from_field() {
+    // Ctor param type (int) differs from field type (string).
+    // The Application path must use the ctor param type, so T(42) compiles.
+    // Previously this failed: "Expected `String`, found `Int`".
+    let prog = compile(
+        "type T(id: int) do id: string end\n\
+         let t = T(42)",
+    )
+    .unwrap();
+    let ty = let_value_type(&prog, 1);
+    assert!(matches!(ty, TypeKind::Record(_)), "expected Record, got {:?}", ty);
+
+    // Passing a string (the field type) must fail — proves we use ctor param types.
+    assert!(compile(
+        "type T(id: int) do id: string end\n\
+         let t = T(\"wrong\")",
+    ).is_err());
+
+    // RecordInstance syntax T(ctor_args) { fields } still works independently.
+    let prog2 = compile(
+        "type T(id: int) do Name: string end\n\
+         let t = T(42) { Name = \"hi\" }",
+    )
+    .unwrap();
+    assert!(matches!(let_value_type(&prog2, 1), TypeKind::Named(_)));
+}
+
+#[test]
+fn error_optional_narrowing() {
+    // T? → T narrowing is unsound and should be rejected.
+    // Use constructor-call syntax (Application) which unifies arg types against param types.
+    assert!(compile(
+        "type A do Val: int? end\n\
+         type B(x: int) do x: int end\n\
+         let a = A { Val = 42 }\n\
+         let b = B(a.Val)"
+    ).is_err());
+}
+
+#[test]
 fn error_ref_keyword_removed() {
     // `ref T("abc")` should produce a syntax error (no longer valid)
     assert!(compile(

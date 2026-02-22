@@ -30,14 +30,28 @@ pub type ModuleGeneratorFn = Arc<dyn Fn(&TypeInfo) -> Option<ModuleSpec> + Send 
 /// layer provides the implementation (e.g. generating subject IRIs).
 pub type IdentityResolverFn = Arc<dyn Fn(DefId, &[Value], &GlobalContext) -> Option<Value> + Send + Sync>;
 
+/// Global compilation context shared across all compiler passes and runtime.
+///
+/// Fields are grouped into four concerns:
+/// - **Core identity**: `interner` and `definitions` — symbol table and definition registry
+/// - **Type metadata**: `type_metadata` and `registered_types` — type attributes and field type info
+/// - **Extension points**: `module_generators` and `identity_resolver` — stdlib hooks
+/// - **I/O configuration**: `storage` and `file_reader` — file access and cloud storage
 #[derive(Clone)]
 pub struct GlobalContext {
+    // -- Core identity --
     pub interner: Interner,
     pub definitions: Definitions,
+
+    // -- Type metadata --
     pub type_metadata: HashMap<DefId, Arc<TypeMetadata>>,
     pub registered_types: HashMap<DefId, Vec<(Symbol, BuiltInFieldType)>>,
+
+    // -- Extension points --
     pub module_generators: Vec<ModuleGeneratorFn>,
     pub identity_resolver: Option<IdentityResolverFn>,
+
+    // -- I/O configuration --
     pub storage: StorageConfig,
     pub file_reader: Arc<dyn FileReader>,
 }

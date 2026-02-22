@@ -450,6 +450,9 @@ impl ProviderExpander {
     }
 
     fn expand_generated_modules(&mut self) {
+        use std::collections::HashMap as StdHashMap;
+        use crate::error::FossilWarning;
+
         let generators = self.gcx.module_generators.clone();
         if generators.is_empty() {
             return;
@@ -473,6 +476,8 @@ impl ProviderExpander {
             .collect();
 
         let mut to_register: Vec<(Symbol, ModuleSpec)> = Vec::new();
+        // Track (type_name, function_name) pairs for conflict detection
+        let mut registered_fns: StdHashMap<(Symbol, String), bool> = StdHashMap::new();
 
         for (type_name, fields) in candidates {
             let type_def_id = self
@@ -492,6 +497,21 @@ impl ProviderExpander {
 
             for generator in &generators {
                 if let Some(spec) = generator(&info) {
+                    for func in &spec.functions {
+                        let key = (type_name, func.name.clone());
+                        if registered_fns.contains_key(&key) {
+                            let type_str = self.gcx.interner.resolve(type_name);
+                            self.warnings.push(FossilWarning::generic(
+                                format!(
+                                    "Module generator conflict: {}.{} registered by multiple generators",
+                                    type_str, func.name
+                                ),
+                                crate::ast::Loc::generated(),
+                            ));
+                        } else {
+                            registered_fns.insert(key, true);
+                        }
+                    }
                     to_register.push((type_name, spec));
                 }
             }

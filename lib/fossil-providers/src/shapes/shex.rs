@@ -29,11 +29,13 @@ impl TypeProviderImpl for ShexProvider {
                 name: "path",
                 required: true,
                 default: None,
+                expected_type: Some("string"),
             },
             ProviderParamInfo {
                 name: "shape",
                 required: true,
                 default: None,
+                expected_type: Some("string"),
             },
         ]
     }

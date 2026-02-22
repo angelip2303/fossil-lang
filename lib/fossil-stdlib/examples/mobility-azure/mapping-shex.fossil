@@ -1,7 +1,6 @@
 type PassengerComfortData = csv!(@mobility-data/passenger_comfort.csv)
 type PotholeTelemetryData = csv!(@mobility-data/pothole_telemetry.csv)
 type RouteEfficiencyData = csv!(@mobility-data/route_efficiency.csv)
-type WeatherObservationData = csv!(@mobility-data/weather_observations.csv)
 
 type Vehicle(identifier: string) = shex!(@mobility-vocab/urban-mobility.shex, shape: "Vehicle")
 type Route(identifier: string) = shex!(@mobility-vocab/urban-mobility.shex, shape: "Route")
@@ -32,10 +31,12 @@ let route_efficiency =
             fleet_unit = row.fleet_unit |> String.extract("(\d+)"),
         }
 
+let weather_observation = csv!(@mobility-data/weather_observations.csv)
+
 passenger_efficiency
-|> join pothole_telemetry on (unit_identifier, recorded_at) = (bus_code, timestamp)
-|> join route_efficiency  on (unit_identifier, recorded_at) = (fleet_unit, event_time)
-|> join WeatherObservationData.load() on (recorded_at) = (observation_time)
+|> join pothole_telemetry   on (unit_identifier, recorded_at) = (bus_code, timestamp)
+|> join route_efficiency    on (unit_identifier, recorded_at) = (fleet_unit, event_time)
+|> join weather_observation on (recorded_at) = (observation_time)
 |> each row -> WeatherObservation(row.unit_identifier) {
     dateTime = row.recorded_at,
     temperature = row.air_temperature_c,

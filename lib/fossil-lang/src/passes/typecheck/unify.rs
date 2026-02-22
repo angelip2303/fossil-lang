@@ -61,10 +61,7 @@ impl TypeChecker {
                 self.unify(inner1, inner2, loc)
             }
 
-            (_, TypeKind::Optional(inner2)) => {
-                let inner2 = *inner2;
-                self.unify(ty1_id, inner2, loc)
-            }
+            // T? expected, T provided → widening (safe: non-optional coerces to optional)
             (TypeKind::Optional(inner1), _) => {
                 let inner1 = *inner1;
                 self.unify(inner1, ty2_id, loc)

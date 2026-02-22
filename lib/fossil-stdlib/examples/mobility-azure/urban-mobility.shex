@@ -9,7 +9,7 @@ BASE <http://example.org/urban#>
 
 <Route> {
     a [urban:Route] ;
-    urban:identifier xsd:string
+    urban:identifier xsd:integer
 }
 
 <Location> {

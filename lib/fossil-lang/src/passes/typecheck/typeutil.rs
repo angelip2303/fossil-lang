@@ -221,7 +221,13 @@ impl TypeChecker {
             TypeKind::Unit => "()".to_string(),
             TypeKind::Named(def_id) => {
                 let def = self.gcx.definitions.get(*def_id);
-                self.gcx.interner.resolve(def.name).to_string()
+                let name = self.gcx.interner.resolve(def.name);
+                if let Some(parent_id) = def.parent() {
+                    let parent = self.gcx.definitions.get(parent_id);
+                    format!("{}.{}", self.gcx.interner.resolve(parent.name), name)
+                } else {
+                    name.to_string()
+                }
             }
             TypeKind::Unresolved(path) => path.display(&self.gcx.interner),
             TypeKind::Function(params, ret) => {

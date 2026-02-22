@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::context::DefId;
 use crate::context::global::BuiltInFieldType;
 use crate::error::{FossilError, FossilErrors};
-use crate::ir::{ExprId, Ir, Polytype, RecordFields, Resolutions, StmtId, StmtKind, Type, TypeDeclInfo, TypeId, TypeIndex, TypeKind, TypeVar, TypeckResults};
+use crate::ir::{ExprId, Ir, Polytype, PrimitiveType, RecordFields, Resolutions, StmtId, StmtKind, Type, TypeDeclInfo, TypeId, TypeIndex, TypeKind, TypeVar, TypeckResults};
 use crate::passes::{GlobalContext, IrProgram};
 
 pub mod typeutil;
@@ -160,23 +160,23 @@ impl TypeChecker {
             if let TypeKind::Record(fields) = &ty.kind {
                 // Clone field data to release immutable borrow before mutating ir
                 let field_types: Vec<_> = fields.fields.iter().map(|(_, ty)| *ty).collect();
-                let field_count = fields.len();
 
                 let return_ty = self.ir.types.alloc(Type {
                     loc,
                     kind: TypeKind::Named(type_def_id),
                 });
 
-                // When a type has ctor_params and they differ from field count,
-                // the Application-based constructor uses ctor_param types (identity construction).
-                // Full construction uses RecordInstance syntax: T(ctor_args) { fields }.
+                // The constructor fn_type registered in env is consumed exclusively by
+                // Application inference (infer.rs). RecordInstance inference resolves
+                // the type from expr_defs without consulting this signature.
+                //
+                // When ctor_params are declared, they define the constructor's public
+                // call interface. Their types must be used regardless of whether the
+                // count matches the field count — that distinction is a runtime concern
+                // (identity vs full construction), not a type-level concern.
                 let param_types: Vec<_> =
                     if let Some(ctor_params) = type_ctor_params.get(&type_def_id) {
-                        if ctor_params.len() != field_count {
-                            ctor_params.iter().map(|p| p.ty).collect()
-                        } else {
-                            field_types
-                        }
+                        ctor_params.iter().map(|p| p.ty).collect()
                     } else {
                         field_types
                     };
@@ -283,14 +283,19 @@ impl TypeChecker {
 }
 
 /// Extract BuiltInFieldType from an IR type node.
-/// Returns None for non-primitive types (e.g. functions, records, unresolved).
+/// Returns None for types without a clear runtime representation (e.g. functions, records).
+/// Named/Unresolved types map to String (at runtime, record references become string identifiers/IRIs).
 fn extract_field_type(ir: &Ir, ty_id: TypeId) -> Option<BuiltInFieldType> {
     match &ir.types.get(ty_id).kind {
         TypeKind::Primitive(p) => Some(BuiltInFieldType::Required(*p)),
         TypeKind::Optional(inner_id) => match &ir.types.get(*inner_id).kind {
             TypeKind::Primitive(p) => Some(BuiltInFieldType::Optional(*p)),
+            TypeKind::Named(_) | TypeKind::Unresolved(_) =>
+                Some(BuiltInFieldType::Optional(PrimitiveType::String)),
             _ => None,
         },
+        TypeKind::Named(_) | TypeKind::Unresolved(_) =>
+            Some(BuiltInFieldType::Required(PrimitiveType::String)),
         _ => None,
     }
 }

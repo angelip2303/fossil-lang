@@ -46,11 +46,13 @@ impl TypeProviderImpl for IfcProvider {
                 name: "path",
                 required: true,
                 default: None,
+                expected_type: Some("string"),
             },
             ProviderParamInfo {
                 name: "entity",
                 required: true,
                 default: None,
+                expected_type: Some("string"),
             },
         ]
     }

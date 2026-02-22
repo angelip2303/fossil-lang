@@ -80,10 +80,12 @@ impl<T> Arena<T> {
     }
 
     pub fn get(&self, id: NodeId<T>) -> &T {
+        debug_assert!(id.idx() < self.items.len(), "Arena::get out of bounds: index {} but len {}", id.idx(), self.items.len());
         &self.items[id.idx()]
     }
 
     pub fn get_mut(&mut self, id: NodeId<T>) -> &mut T {
+        debug_assert!(id.idx() < self.items.len(), "Arena::get_mut out of bounds: index {} but len {}", id.idx(), self.items.len());
         &mut self.items[id.idx()]
     }
 
@@ -172,6 +174,7 @@ impl Interner {
     }
 
     pub fn resolve(&self, sym: Symbol) -> &str {
+        debug_assert!((sym.0 as usize) < self.strings.len(), "Interner::resolve out of bounds: symbol {} but len {}", sym.0, self.strings.len());
         &self.strings[sym.0 as usize]
     }
 

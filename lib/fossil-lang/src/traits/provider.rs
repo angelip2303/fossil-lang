@@ -115,6 +115,9 @@ pub struct ProviderParamInfo {
     pub name: &'static str,
     pub required: bool,
     pub default: Option<Literal>,
+    /// Expected argument type for validation (e.g. "string", "bool", "int").
+    /// When set, `resolve_to_provider_args` will reject arguments of the wrong type.
+    pub expected_type: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +193,23 @@ pub fn resolve_to_provider_args(
     for (idx, param) in param_info.iter().enumerate() {
         if !filled[idx] && param.required {
             return Err(FossilError::missing_argument(param.name, provider_name, loc));
+        }
+
+        if filled[idx] {
+            if let Some(expected) = param.expected_type {
+                if let Some(value) = result.get(param.name) {
+                    let actual = match value {
+                        ProviderLiteral::String(_) => "string",
+                        ProviderLiteral::Integer(_) => "int",
+                        ProviderLiteral::Boolean(_) => "bool",
+                    };
+                    if actual != expected {
+                        return Err(FossilError::invalid_argument_type(
+                            param.name, expected, loc,
+                        ));
+                    }
+                }
+            }
         }
     }
 

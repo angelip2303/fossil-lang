@@ -84,16 +84,19 @@ impl TypeProviderImpl for CsvProvider {
                 name: "path",
                 required: true,
                 default: None,
+                expected_type: Some("string"),
             },
             ProviderParamInfo {
                 name: "delimiter",
                 required: false,
                 default: None,
+                expected_type: Some("string"),
             },
             ProviderParamInfo {
                 name: "has_header",
                 required: false,
                 default: None,
+                expected_type: Some("bool"),
             },
         ]
     }
@@ -113,7 +116,13 @@ impl TypeProviderImpl for CsvProvider {
         let mut options = CsvOptions::default();
         if let Some(delim_str) = args.get_string("delimiter") {
             if !delim_str.is_empty() {
-                options.delimiter = delim_str.as_bytes()[0];
+                let bytes = delim_str.as_bytes();
+                if bytes.len() != 1 || !bytes[0].is_ascii() {
+                    return Err(FossilError::invalid_argument_type(
+                        "delimiter", "a single ASCII character", loc,
+                    ));
+                }
+                options.delimiter = bytes[0];
             }
         }
         if let Some(has_header) = args.get_bool("has_header") {

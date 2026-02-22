@@ -201,7 +201,7 @@ impl<'a> IrEvaluator<'a> {
         let type_def_id = self.resolutions.expr_defs.get(&expr_id).copied();
 
         let ctor_exprs: Vec<Expr> = if !ctor_args.is_empty() {
-            let type_def_id = type_def_id.unwrap();
+            let type_def_id = type_def_id.ok_or_else(|| self.make_error("Record constructor arguments require a resolved type definition"))?;
             let info = self.type_index.get(type_def_id);
             let ctor_param_names = info.map(|i| &i.ctor_param_names[..]).unwrap_or(&[]);
 
@@ -297,8 +297,10 @@ impl<'a> IrEvaluator<'a> {
             .collect();
         let schema = build_schema(&all_exprs, type_def_id, self.gcx);
 
+        let resolved_type_def_id = type_def_id.ok_or_else(|| self.make_error("Named record must resolve to a type definition"))?;
+
         Ok(Value::PendingOutput(PendingOutput {
-            type_def_id: type_def_id.expect("named record must resolve to a type"),
+            type_def_id: resolved_type_def_id,
             select_exprs,
             ctor_exprs,
             schema: std::sync::Arc::new(schema),
@@ -610,7 +612,11 @@ fn build_schema(
                 let dtype = type_map
                     .get(name.as_str())
                     .cloned()
-                    .unwrap_or(DataType::Unknown(Default::default()));
+                    .unwrap_or_else(|| {
+                        #[cfg(debug_assertions)]
+                        eprintln!("[fossil] field '{}' not found in type_map, using Unknown", name);
+                        DataType::Unknown(Default::default())
+                    });
                 Some(Field::new(name.clone(), dtype))
             } else {
                 None
