@@ -6,8 +6,8 @@ use crate::context::global::TypeInfo;
 use crate::error::{FossilError, FossilErrors, FossilWarnings};
 use crate::passes::GlobalContext;
 use crate::traits::provider::{
-    FieldType, ModuleSpec, ProviderArgs, ProviderContext, ProviderKind, ProviderSchema,
-    TypeRegistry, resolve_to_provider_args,
+    CachingFileReader, FieldType, ModuleSpec, ProviderArgs, ProviderContext, ProviderKind,
+    ProviderSchema, resolve_to_provider_args,
 };
 
 pub struct ExpandResult {
@@ -27,7 +27,6 @@ pub struct ProviderExpander {
     ast: Ast,
     gcx: GlobalContext,
     warnings: FossilWarnings,
-    type_registry: TypeRegistry,
 }
 
 fn field_type_to_ast(ft: &FieldType, ast: &mut Ast, interner: &mut Interner, loc: Loc) -> TypeId {
@@ -69,22 +68,6 @@ fn schema_to_ast(schema: &ProviderSchema, ast: &mut Ast, interner: &mut Interner
     })
 }
 
-fn resolve_schema_types(schema: &mut ProviderSchema, registry: &TypeRegistry) {
-    for field in &mut schema.fields {
-        field.ty = resolve_field_type(&field.ty, registry);
-    }
-}
-
-fn resolve_field_type(ty: &FieldType, registry: &TypeRegistry) -> FieldType {
-    match ty {
-        FieldType::Named(identity) => FieldType::Named(registry.resolve_name(identity)),
-        FieldType::Optional(inner) => {
-            FieldType::Optional(Box::new(resolve_field_type(inner, registry)))
-        }
-        FieldType::Primitive(_) => ty.clone(),
-    }
-}
-
 fn build_provider_attribute(
     interner: &mut Interner,
     provider_name: &str,
@@ -116,25 +99,17 @@ impl ProviderExpander {
             ast,
             gcx,
             warnings: FossilWarnings::new(),
-            type_registry: TypeRegistry::new(),
         }
     }
 
     pub fn expand(mut self) -> Result<ExpandResult, FossilErrors> {
-        let type_stmts: Vec<StmtId> = self
+        let provider_stmts: Vec<StmtId> = self
             .ast
             .root
             .iter()
             .copied()
             .filter(|&stmt_id| {
-                let stmt = self.ast.stmts.get(stmt_id);
-                match &stmt.kind {
-                    StmtKind::Type { ty, .. } => {
-                        let type_node = self.ast.types.get(*ty);
-                        matches!(type_node.kind, TypeKind::Provider { .. })
-                    }
-                    _ => false,
-                }
+                matches!(self.ast.stmts.get(stmt_id).kind, StmtKind::ProviderType { .. })
             })
             .collect();
 
@@ -145,22 +120,21 @@ impl ProviderExpander {
             .copied()
             .filter(|&stmt_id| {
                 let stmt = self.ast.stmts.get(stmt_id);
-                match &stmt.kind {
-                    StmtKind::Let { value, .. } => {
-                        let expr = self.ast.exprs.get(*value);
-                        matches!(expr.kind, ExprKind::ProviderInvocation { .. })
-                    }
-                    _ => false,
-                }
+                matches!(stmt.kind, StmtKind::Let { .. })
+                    && matches!(
+                        self.ast.exprs.get(match &stmt.kind {
+                            StmtKind::Let { value, .. } => *value,
+                            _ => unreachable!(),
+                        }).kind,
+                        ExprKind::ProviderInvocation { .. }
+                    )
             })
             .collect();
 
-        self.build_type_registry(&type_stmts, &let_stmts);
-
         let mut errors = FossilErrors::new();
 
-        for stmt_id in type_stmts {
-            if let Err(e) = self.expand_type_provider_stmt(stmt_id) {
+        for stmt_id in provider_stmts {
+            if let Err(e) = self.expand_provider_type_stmt(stmt_id) {
                 errors.push(e);
             }
         }
@@ -225,25 +199,19 @@ impl ProviderExpander {
         Ok(ResolvedProvider { imp, args, name, kind })
     }
 
-    /// Expand `type Name = provider!(args)` — only for Schema providers
-    fn expand_type_provider_stmt(&mut self, stmt_id: StmtId) -> Result<(), FossilError> {
-        let (type_name, type_id) = {
+    /// Expand `type Name = provider!(args)` or `type { A, B } = provider!(args)`
+    fn expand_provider_type_stmt(&mut self, stmt_id: StmtId) -> Result<(), FossilError> {
+        let (entries, provider_path, raw_args, loc) = {
             let stmt = self.ast.stmts.get(stmt_id);
             match &stmt.kind {
-                StmtKind::Type { name, ty, .. } => (*name, *ty),
+                StmtKind::ProviderType { entries, provider, args, loc } => {
+                    (entries.clone(), provider.clone(), args.clone(), *loc)
+                }
                 _ => return Ok(()),
             }
         };
 
-        let (provider_path, args, loc) = {
-            let ty = self.ast.types.get(type_id);
-            match &ty.kind {
-                TypeKind::Provider { provider, args } => (provider.clone(), args.clone(), ty.loc),
-                _ => return Ok(()),
-            }
-        };
-
-        let resolved = self.resolve_provider_with_args(&provider_path, &args, loc)?;
+        let resolved = self.resolve_provider_with_args(&provider_path, &raw_args, loc)?;
 
         if resolved.kind == ProviderKind::Data {
             return Err(FossilError::provider_kind_mismatch(
@@ -253,54 +221,61 @@ impl ProviderExpander {
             ));
         }
 
-        let type_name_str = self.gcx.interner.resolve(type_name).to_string();
-
-        let mut provider_output = {
-            let mut ctx = ProviderContext {
-                interner: &mut self.gcx.interner,
-                storage: &self.gcx.storage,
-                file_reader: self.gcx.file_reader.as_ref(),
-            };
-            resolved.imp.provide(&resolved.args, &mut ctx, &type_name_str, loc)?
+        // Collect all provider outputs first (using caching reader for shared file reads)
+        let outputs: Vec<_> = {
+            let caching_reader = CachingFileReader::new(self.gcx.file_reader.as_ref());
+            entries
+                .iter()
+                .map(|entry| {
+                    let type_name_str = self.gcx.interner.resolve(entry.name).to_string();
+                    let ctor_params: Vec<Symbol> = entry.ctor_params.iter().map(|p| p.name).collect();
+                    let mut ctx = ProviderContext {
+                        interner: &mut self.gcx.interner,
+                        storage: &self.gcx.storage,
+                        file_reader: &caching_reader,
+                        ctor_params,
+                        expected_type_count: if entries.len() > 1 { Some(entries.len()) } else { None },
+                    };
+                    resolved.imp.provide(&resolved.args, &mut ctx, &type_name_str, loc)
+                })
+                .collect::<Result<Vec<_>, _>>()?
         };
 
-        resolve_schema_types(&mut provider_output.schema, &self.type_registry);
+        for (entry, provider_output) in entries.iter().zip(outputs) {
+            self.warnings.extend(provider_output.warnings);
 
-        let provider_attr = build_provider_attribute(
-            &mut self.gcx.interner, &resolved.name, resolved.kind, loc,
-        );
+            let generated_type_id = schema_to_ast(
+                &provider_output.schema, &mut self.ast, &mut self.gcx.interner, loc,
+            );
 
-        self.warnings.extend(provider_output.warnings);
+            let mut attrs = entry.attrs.clone();
+            let mut provider_attrs = provider_output.type_attributes;
+            provider_attrs.push(build_provider_attribute(
+                &mut self.gcx.interner, &resolved.name, resolved.kind, loc,
+            ));
+            merge_provider_attributes(&mut attrs, provider_attrs);
 
-        let generated_type_id = schema_to_ast(&provider_output.schema, &mut self.ast, &mut self.gcx.interner, loc);
-        let generated_kind = self.ast.types.get(generated_type_id).kind.clone();
+            let type_stmt = self.ast.stmts.alloc(Stmt {
+                loc,
+                kind: StmtKind::Type {
+                    name: entry.name,
+                    ty: generated_type_id,
+                    attrs,
+                    ctor_params: entry.ctor_params.clone(),
+                },
+            });
+            self.ast.root.push(type_stmt);
 
-        let ty_mut = self.ast.types.get_mut(type_id);
-        ty_mut.kind = generated_kind;
-
-        {
-            let stmt_mut = self.ast.stmts.get_mut(stmt_id);
-            if let StmtKind::Type { attrs, .. } = &mut stmt_mut.kind {
-                let mut all_provider_attrs = provider_output.type_attributes;
-                all_provider_attrs.push(provider_attr);
-                merge_provider_attributes(attrs, all_provider_attrs);
+            if let Some(module_spec) = provider_output.module_spec {
+                self.register_generated_module(entry.name, module_spec)?;
             }
         }
 
-        if let Some(module_spec) = provider_output.module_spec {
-            self.register_generated_module(type_name, module_spec)?;
-        }
-
+        self.ast.root.retain(|&id| id != stmt_id);
         Ok(())
     }
 
     /// Expand `let name = provider!(args)` — only for Data providers
-    ///
-    /// This:
-    /// 1. Calls the provider to get schema + module_spec
-    /// 2. Inserts a synthetic `type` statement into the AST root (before the let)
-    /// 3. Registers the provider's module (load(), etc.) under `name`
-    /// 4. Rewrites the let's value from ProviderInvocation to Application(name.load())
     fn expand_let_provider_stmt(&mut self, stmt_id: StmtId) -> Result<(), FossilError> {
         let (binding_name, value_id) = {
             let stmt = self.ast.stmts.get(stmt_id);
@@ -332,16 +307,16 @@ impl ProviderExpander {
 
         let binding_name_str = self.gcx.interner.resolve(binding_name).to_string();
 
-        let mut provider_output = {
+        let provider_output = {
             let mut ctx = ProviderContext {
                 interner: &mut self.gcx.interner,
                 storage: &self.gcx.storage,
                 file_reader: self.gcx.file_reader.as_ref(),
+                ctor_params: vec![],
+                expected_type_count: None,
             };
             resolved.imp.provide(&resolved.args, &mut ctx, &binding_name_str, loc)?
         };
-
-        resolve_schema_types(&mut provider_output.schema, &self.type_registry);
 
         let provider_attr = build_provider_attribute(
             &mut self.gcx.interner, &resolved.name, resolved.kind, loc,
@@ -350,12 +325,6 @@ impl ProviderExpander {
         self.warnings.extend(provider_output.warnings);
 
         let generated_type_id = schema_to_ast(&provider_output.schema, &mut self.ast, &mut self.gcx.interner, loc);
-        let generated_kind = self.ast.types.get(generated_type_id).kind.clone();
-
-        let synth_type_id = self.ast.types.alloc(Type {
-            loc,
-            kind: generated_kind,
-        });
 
         let mut attrs = provider_output.type_attributes;
         attrs.push(provider_attr);
@@ -364,7 +333,7 @@ impl ProviderExpander {
             loc,
             kind: StmtKind::Type {
                 name: binding_name,
-                ty: synth_type_id,
+                ty: generated_type_id,
                 attrs,
                 ctor_params: vec![],
             },
@@ -398,46 +367,6 @@ impl ProviderExpander {
         }
 
         Ok(())
-    }
-
-    fn build_type_registry(&mut self, type_stmts: &[StmtId], let_stmts: &[StmtId]) {
-        for &stmt_id in type_stmts {
-            let stmt = self.ast.stmts.get(stmt_id);
-            if let StmtKind::Type { name, ty, .. } = &stmt.kind {
-                let type_node = self.ast.types.get(*ty);
-                if let TypeKind::Provider { provider, args } = &type_node.kind {
-                    self.try_register_identity(*name, provider.clone(), args.clone(), type_node.loc);
-                }
-            }
-        }
-
-        for &stmt_id in let_stmts {
-            let stmt = self.ast.stmts.get(stmt_id);
-            if let StmtKind::Let { name, value } = &stmt.kind {
-                let expr = self.ast.exprs.get(*value);
-                if let ExprKind::ProviderInvocation { provider, args } = &expr.kind {
-                    self.try_register_identity(*name, provider.clone(), args.clone(), expr.loc);
-                }
-            }
-        }
-    }
-
-    fn try_register_identity(
-        &mut self,
-        fossil_name: Symbol,
-        provider_path: Path,
-        args: Vec<ProviderArgument>,
-        loc: Loc,
-    ) {
-        let resolved = match self.resolve_provider_with_args(&provider_path, &args, loc) {
-            Ok(r) => r,
-            Err(_) => return,
-        };
-
-        if let Some(identity) = resolved.imp.type_identity(&resolved.args, self.gcx.file_reader.as_ref()) {
-            let name = self.gcx.interner.resolve(fossil_name).to_string();
-            self.type_registry.register(identity, name);
-        }
     }
 
     fn register_generated_module(
@@ -476,7 +405,6 @@ impl ProviderExpander {
             .collect();
 
         let mut to_register: Vec<(Symbol, ModuleSpec)> = Vec::new();
-        // Track (type_name, function_name) pairs for conflict detection
         let mut registered_fns: StdHashMap<(Symbol, String), bool> = StdHashMap::new();
 
         for (type_name, fields) in candidates {
@@ -524,10 +452,6 @@ impl ProviderExpander {
 }
 
 /// Merge provider-generated attributes into the user's attribute list.
-///
-/// When names collide (e.g. both user and provider have `#[rdf(...)]`),
-/// the provider's args are folded into the existing attribute — but
-/// user-supplied keys always take precedence.
 fn merge_provider_attributes(attrs: &mut Vec<Attribute>, provider_attrs: Vec<Attribute>) {
     for prov in provider_attrs {
         match attrs.iter_mut().find(|a| a.name == prov.name) {
@@ -550,7 +474,6 @@ fn merge_provider_attributes(attrs: &mut Vec<Attribute>, provider_attrs: Vec<Att
 }
 
 /// Leak a provider name string for use in `&'static str` error contexts.
-/// Provider names are a small, bounded set so this is fine.
 fn leak_provider_name(path: &Path, interner: &crate::context::Interner) -> &'static str {
     let name = path.display(interner);
     Box::leak(name.into_boxed_str())
@@ -676,5 +599,29 @@ mod tests {
             }
             other => panic!("expected Let statement, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn single_provider_type_parses() {
+        let src = r#"type X(id: string) = unknown!("arg")"#;
+        let parsed = Parser::parse(src, 0).expect("parse failed");
+        let stmt = parsed.ast.stmts.get(parsed.ast.root[0]);
+        assert!(
+            matches!(&stmt.kind, StmtKind::ProviderType { entries, .. } if entries.len() == 1),
+            "expected ProviderType with 1 entry, got {:?}",
+            stmt.kind
+        );
+    }
+
+    #[test]
+    fn multi_provider_type_parses() {
+        let src = r#"type { A(id: string), B(id: int) } = unknown!("arg")"#;
+        let parsed = Parser::parse(src, 0).expect("parse failed");
+        let stmt = parsed.ast.stmts.get(parsed.ast.root[0]);
+        assert!(
+            matches!(&stmt.kind, StmtKind::ProviderType { entries, .. } if entries.len() == 2),
+            "expected ProviderType with 2 entries, got {:?}",
+            stmt.kind
+        );
     }
 }

@@ -138,33 +138,12 @@ fn schema_from_exprs(exprs: &[Expr]) -> Schema {
     }))
 }
 
-/// Output specification not yet attached to a plan.
-/// Created by named record constructors inside projections.
-#[derive(Clone, Debug)]
-pub struct PendingOutput {
-    pub type_def_id: DefId,
-    pub select_exprs: Vec<Expr>,
-    pub ctor_exprs: Vec<Expr>,
-    pub schema: Arc<Schema>,
-}
-
-impl PendingOutput {
-    pub fn into_output_spec(self) -> OutputSpec {
-        OutputSpec {
-            type_def_id: self.type_def_id,
-            select_exprs: self.select_exprs,
-            schema: self.schema,
-            ctor_args: self.ctor_exprs,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct OutputSpec {
     pub type_def_id: DefId,
     pub select_exprs: Vec<Expr>,
-    pub schema: Arc<Schema>,
     pub ctor_args: Vec<Expr>,
+    pub schema: Arc<Schema>,
 }
 
 #[derive(Clone)]
@@ -172,7 +151,11 @@ pub enum Value {
     Unit,
     Expr(Expr),
     Plan(Plan),
-    PendingOutput(PendingOutput),
+    PendingOutput(OutputSpec),
+    /// Ephemeral value produced by `ref Type(args)` or constructor-only calls.
+    /// Lives only during each-block evaluation; the serializer builds the
+    /// subject IRI via `build_subject_expr`.
+    Reference { def_id: DefId, args: Vec<Value> },
     Function(DefId, Arc<dyn FunctionImpl>),
     RecordConstructor(DefId),
 }
@@ -181,6 +164,13 @@ impl Value {
     pub fn as_literal_string(&self) -> Option<String> {
         match self {
             Value::Expr(expr) => extract_literal_string(expr),
+            _ => None,
+        }
+    }
+
+    pub fn as_expr(&self) -> Option<&Expr> {
+        match self {
+            Value::Expr(e) => Some(e),
             _ => None,
         }
     }

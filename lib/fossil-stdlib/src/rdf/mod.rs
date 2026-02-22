@@ -4,18 +4,18 @@ pub mod serializer;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Write;
-pub use metadata::{RdfFieldInfo, RdfMetadata, RdfMetadataResult};
 pub use serializer::RdfBatchWriter;
 
 use fossil_lang::common::PrimitiveType;
-use fossil_lang::context::global::BuiltInFieldType;
-use fossil_lang::context::Symbol;
+use fossil_lang::context::{DefId, Symbol};
 use fossil_lang::error::FossilError;
-use fossil_lang::ir::{Ir, Polytype, TypeVar};
+use fossil_lang::ir::{Ir, Polytype, TypeIndex, TypeKind as IrTypeKind, TypeVar};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::chunked_executor::{ChunkedExecutor, estimate_batch_size_from_plan};
 use fossil_lang::runtime::value::{Plan, Value};
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
+
+use metadata::{RdfFieldAttrs, RdfTypeAttrs, build_xsd_type_map, field_primitive_type};
 
 use oxrdfio::RdfFormat;
 use polars::prelude::*;
@@ -46,13 +46,6 @@ pub enum RdfError {
 impl From<RdfError> for FossilError {
     fn from(err: RdfError) -> Self {
         FossilError::evaluation(err.to_string(), fossil_lang::ast::Loc::generated())
-    }
-}
-
-/// Extract the `PrimitiveType` from a `BuiltInFieldType`, discarding optionality.
-fn primitive_of(ft: &BuiltInFieldType) -> PrimitiveType {
-    match ft {
-        BuiltInFieldType::Required(p) | BuiltInFieldType::Optional(p) => *p,
     }
 }
 
@@ -90,6 +83,98 @@ impl FunctionImpl for RdfSerializeFunction {
     }
 }
 
+/// Build a Polars Expr that generates the subject IRI for a given type.
+///
+/// Two cases:
+/// - With `#[rdf(subject = "http://example.org/Type_{param}")]`: template expansion
+/// - Without subject: `ctor_args[0]` directly (already a full IRI)
+///
+/// Templates use `{param}` placeholders matching ctor_param_names positionally.
+fn build_subject_expr(
+    def_id: DefId,
+    ctor_args: &[Expr],
+    gcx: &GlobalContext,
+    type_index: &TypeIndex,
+) -> Option<Expr> {
+    if ctor_args.is_empty() {
+        return None;
+    }
+
+    let subject_template = RdfTypeAttrs::from_def_id(def_id, gcx)
+        .and_then(|a| a.subject);
+
+    match subject_template {
+        Some(template) => {
+            let param_names = type_index.get(def_id)
+                .map(|info| &info.ctor_param_names[..])
+                .unwrap_or(&[]);
+            let parts = parse_template(&template, param_names, ctor_args, gcx);
+            Some(concat_str(parts, "", true))
+        }
+        None => Some(ctor_args[0].clone()),
+    }
+}
+
+/// Parse a subject template string, expanding `{param}` placeholders into
+/// Polars expressions from the positionally-matched ctor_args.
+fn parse_template(
+    template: &str,
+    param_names: &[Symbol],
+    ctor_args: &[Expr],
+    gcx: &GlobalContext,
+) -> Vec<Expr> {
+    let mut parts = Vec::new();
+    let mut literal = String::new();
+    let mut chars = template.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '{' {
+            if !literal.is_empty() {
+                parts.push(lit(std::mem::take(&mut literal)));
+            }
+            let mut name = String::new();
+            for c in chars.by_ref() {
+                if c == '}' { break; }
+                name.push(c);
+            }
+            if let Some(idx) = param_names.iter().position(|sym| gcx.interner.resolve(*sym) == name) {
+                if let Some(arg) = ctor_args.get(idx) {
+                    parts.push(arg.clone().cast(DataType::String));
+                }
+            }
+        } else {
+            literal.push(c);
+        }
+    }
+
+    if !literal.is_empty() {
+        parts.push(lit(literal));
+    }
+
+    parts
+}
+
+/// Check if a field's type is a reference to another record type.
+/// Returns the DefId of the referenced type if so.
+fn field_ref_type(
+    def_id: DefId,
+    field: Symbol,
+    ir: &Ir,
+    type_index: &TypeIndex,
+) -> Option<DefId> {
+    let info = type_index.get(def_id)?;
+    let IrTypeKind::Record(fields) = &ir.types.get(info.ty).kind else { return None };
+    let field_ty = ir.types.get(fields.lookup(field)?);
+    match &field_ty.kind {
+        IrTypeKind::Named(ref_id) => Some(*ref_id),
+        IrTypeKind::Optional(inner) => match &ir.types.get(*inner).kind {
+            IrTypeKind::Named(ref_id) => Some(*ref_id),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn serialize_rdf(
     plan: &Plan,
     destination: &str,
@@ -113,88 +198,75 @@ fn serialize_rdf(
     // Phase 1: Build combined selections and XSD type maps for each output type.
     //
     // For each output we:
-    //   1. Extract RDF metadata (predicates, rdf:type, base) from type attributes
-    //   2. Resolve XSD datatypes from Fossil's type registry (the plan schema
-    //      only contains DataType::Unknown, so it can't be used)
-    //   3. Build the Polars selection: _subject, _graph, _type, predicate columns
+    //   1. Read type-level attrs (#[rdf(subject, type)]) via RdfTypeAttrs
+    //   2. Read field-level attrs (#[rdf(uri)]) via RdfFieldAttrs
+    //   3. Build the Polars selection: _subject, _type, predicate columns
     //   4. Pre-compute the XSD type map (predicate URI → XSD IRI) once
     let output_configs: Vec<_> = plan
         .outputs
         .iter()
         .map(|output_spec| {
-            let type_name = ctx.gcx.definitions.get(output_spec.type_def_id).name;
-            let type_name_str = interner.resolve(type_name);
+            let def_id = output_spec.type_def_id;
 
-            // 1. Extract RDF metadata from #[rdf] attributes
-            let rdf_result = ctx
-                .gcx
-                .type_metadata
-                .get(&output_spec.type_def_id)
-                .map(|tm| {
-                    RdfMetadata::from_type_metadata_with_warnings(
-                        tm,
-                        &interner,
-                        Some(type_name_str),
-                    )
-                });
+            // 1. Type-level: rdf_type + subject template
+            let type_attrs = RdfTypeAttrs::from_def_id(def_id, ctx.gcx);
 
-            if let Some(ref result) = rdf_result {
-                for warning in &result.warnings.0 {
-                    eprintln!("warning: {:?}", warning);
+            // 2. Field-level: build field_sym → predicate URI map
+            let mut field_uris: HashMap<Symbol, String> = HashMap::new();
+            if let Some(tm) = ctx.gcx.type_metadata.get(&def_id) {
+                for (&field_sym, field_meta) in &tm.field_metadata {
+                    let attrs = RdfFieldAttrs::from_field_metadata(field_meta, &interner);
+                    if let Some(uri) = attrs.uri {
+                        field_uris.insert(field_sym, uri);
+                    }
                 }
-            }
-
-            let mut rdf_metadata = rdf_result
-                .map(|r| r.metadata)
-                .filter(|m| m.has_metadata())
-                .unwrap_or_default();
-
-            // 2. Resolve XSD datatypes from Fossil's type registry
-            if let Some(registered) = ctx.gcx.registered_types.get(&output_spec.type_def_id) {
-                let field_types: HashMap<Symbol, PrimitiveType> = registered
-                    .iter()
-                    .map(|(sym, ft)| (*sym, primitive_of(ft)))
-                    .collect();
-                rdf_metadata.resolve_xsd_types(&field_types);
             }
 
             // 3. Build Polars selection
             let mut selection: Vec<Expr> = Vec::new();
 
-            if let Some(subject_expr) = output_spec.ctor_args.first() {
-                let subject_expr = if let Some(ref base) = rdf_metadata.base {
-                    concat_str([lit(base.as_str()), subject_expr.clone()], "", true)
-                } else {
-                    subject_expr.clone()
-                };
+            if let Some(subject_expr) = build_subject_expr(
+                def_id, &output_spec.ctor_args, ctx.gcx, ctx.type_index,
+            ) {
                 selection.push(subject_expr.alias("_subject"));
             }
 
-            if let Some(graph_expr) = output_spec.ctor_args.get(1) {
-                selection.push(graph_expr.clone().alias("_graph"));
-            }
-
-            if let Some(ref rdf_type) = rdf_metadata.rdf_type {
-                selection.push(lit(rdf_type.as_str()).alias("_type"));
+            if let Some(ref attrs) = type_attrs {
+                if let Some(ref rdf_type) = attrs.rdf_type {
+                    selection.push(lit(rdf_type.as_str()).alias("_type"));
+                }
             }
 
             for transform_expr in &output_spec.select_exprs {
                 if let Expr::Alias(inner, field_name) = transform_expr
                     && let Some(field_sym) = interner.lookup(field_name)
-                    && let Some(field_info) = rdf_metadata.fields.get(&field_sym)
+                    && let Some(uri) = field_uris.get(&field_sym)
                 {
-                    let expr = match field_info.primitive_type {
-                        Some(prim) if prim != PrimitiveType::String => {
-                            inner.as_ref().clone().cast(prim.to_polars_dtype())
+                    // Reference field → build subject IRI for the referenced type
+                    if let Some(ref_def_id) = field_ref_type(
+                        def_id, field_sym, ctx.ir, ctx.type_index,
+                    ) {
+                        if let Some(ref_expr) = build_subject_expr(
+                            ref_def_id, &[inner.as_ref().clone()], ctx.gcx, ctx.type_index,
+                        ) {
+                            selection.push(ref_expr.alias(uri));
+                            continue;
+                        }
+                    }
+                    // Normal field — cast to registered type + alias to predicate URI
+                    let prim = field_primitive_type(def_id, field_sym, ctx.gcx);
+                    let expr = match prim {
+                        Some(p) if p != PrimitiveType::String => {
+                            inner.as_ref().clone().cast(p.to_polars_dtype())
                         }
                         _ => inner.as_ref().clone(),
                     };
-                    selection.push(expr.alias(&field_info.uri));
+                    selection.push(expr.alias(uri));
                 }
             }
 
-            // 4. Pre-compute XSD type map (done once, reused across all batches)
-            let xsd_types = rdf_metadata.xsd_type_map();
+            // 4. XSD type map (predicate URI → XSD IRI)
+            let xsd_types = build_xsd_type_map(def_id, &field_uris, ctx.gcx);
 
             (selection, xsd_types)
         })
@@ -208,7 +280,7 @@ fn serialize_oxigraph(
     writer: Box<dyn Write + Send>,
     format: RdfFormat,
     plan: &Plan,
-    output_configs: &[(Vec<Expr>, HashMap<String, String>)],
+    output_configs: &[(Vec<Expr>, HashMap<String, &'static str>)],
     batch_size: usize,
 ) -> Result<Value, FossilError> {
     let rdf_writer = RefCell::new(RdfBatchWriter::new(writer, format));

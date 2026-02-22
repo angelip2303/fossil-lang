@@ -256,6 +256,15 @@ impl IrResolver {
                 }
             }
 
+            ExprKind::Ref { type_name, args } => {
+                if let Some(def_id) = self.resolve_type_path(type_name, expr.loc, errors) {
+                    self.resolutions.expr_defs.insert(expr_id, def_id);
+                }
+                for &arg in args {
+                    self.resolve_expr(arg, errors);
+                }
+            }
+
             ExprKind::Unit | ExprKind::Literal(_) => {}
         }
     }

@@ -2,13 +2,15 @@ type PassengerComfortData = csv!(@mobility-data/passenger_comfort.csv)
 type PotholeTelemetryData = csv!(@mobility-data/pothole_telemetry.csv)
 type RouteEfficiencyData = csv!(@mobility-data/route_efficiency.csv)
 
-type Vehicle(identifier: string) = shex!(@mobility-vocab/urban-mobility.shex, shape: "Vehicle")
-type Route(identifier: string) = shex!(@mobility-vocab/urban-mobility.shex, shape: "Route")
-type Location(latitude: string, longitude: string) = shex!(@mobility-vocab/urban-mobility.shex, shape: "Location")
-type WeatherObservation(id: string) = shex!(@mobility-vocab/urban-mobility.shex, shape: "WeatherObservation")
-type PassengerImpact(id: string) = shex!(@mobility-vocab/urban-mobility.shex, shape: "PassengerImpact")
-type PotholeEvent(id: string) = shex!(@mobility-vocab/urban-mobility.shex, shape: "PotholeEvent")
-type RouteEfficiency(id: string) = shex!(@mobility-vocab/urban-mobility.shex, shape: "RouteEfficiency")
+type {
+    Vehicle(identifier: string),
+    Route(identifier: int),
+    Location(latitude: float, longitude: float),
+    WeatherObservation(id: string),
+    PassengerImpact(id: string),
+    PotholeEvent(id: string),
+    RouteEfficiency(id: string),
+} = shex!(@mobility-vocab/urban-mobility.shex)
 
 let passenger_efficiency =
     PassengerComfortData.load()
@@ -46,7 +48,7 @@ passenger_efficiency
     visibility = row.visibility_km,
     weatherCondition = row.weather_condition,
     roadCondition = row.road_condition_estimated,
-    hasLocation = Location(row.geo_point_latitude, row.geo_point_longitude),
+    hasLocation = ref Location(row.geo_point_latitude, row.geo_point_longitude),
 }
 +> each row -> PassengerImpact(row.unit_identifier) {
     dateTime = row.recorded_at,
@@ -54,9 +56,9 @@ passenger_efficiency
     complaintCount = row.complaint_count,
     ridershipImpact = row.ridership_impact,
     passengerSatisfaction = row.passenger_satisfaction,
-    reportedBy = Vehicle(row.unit_identifier),
-    hasLocation = Location(row.geo_location_lat, row.geo_location_lon),
-    relatedTo = Route(row.service_line),
+    reportedBy = ref Vehicle(row.unit_identifier),
+    hasLocation = ref Location(row.geo_location_lat, row.geo_location_lon),
+    relatedTo = ref Route(row.service_line),
 }
 +> each row -> PotholeEvent(row.unit_identifier) {
     dateTime = row.recorded_at,
@@ -64,10 +66,10 @@ passenger_efficiency
     confidence = row.confidence,
     sizeInMilimiters = row.size_mm,
     roadSurfaceCondition = row.road_surface_condition,
-    detectedBy = Vehicle(row.unit_identifier),
-    hasLocation = Location(row.pothole_latitude, row.pothole_longitude),
-    occursAt = WeatherObservation(row.unit_identifier),
-    relatedTo = Route(row.service_line),
+    detectedBy = ref Vehicle(row.unit_identifier),
+    hasLocation = ref Location(row.pothole_latitude, row.pothole_longitude),
+    occursAt = ref WeatherObservation(row.unit_identifier),
+    relatedTo = ref Route(row.service_line),
 }
 +> each row -> RouteEfficiency(row.unit_identifier) {
     dateTime = row.recorded_at,
@@ -75,8 +77,8 @@ passenger_efficiency
     delayMinutes = row.detour_km,
     fuelExtraPercentage = row.fuel_extra_pct,
     detourDistanceInKilometers = row.detour_km,
-    performedBy = Vehicle(row.unit_identifier),
-    hasLocation = Location(row.coord_lat, row.coord_lng),
-    relatedTo = Route(row.service_line),
+    performedBy = ref Vehicle(row.unit_identifier),
+    hasLocation = ref Location(row.coord_lat, row.coord_lng),
+    relatedTo = ref Route(row.service_line),
 }
 |> Rdf.serialize(@mobility-data/new.nq)

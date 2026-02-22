@@ -133,7 +133,7 @@ impl RdfBatchWriter {
     pub fn write_batch(
         &mut self,
         batch: &DataFrame,
-        xsd_types: &HashMap<String, String>,
+        xsd_types: &HashMap<String, &'static str>,
     ) -> PolarsResult<()> {
         // Pre-filter: drop rows where subject is null
         // This is a columnar operation - removes the null check from the hot loop
@@ -193,7 +193,7 @@ impl RdfBatchWriter {
             // Resolve XSD type once per column — it's constant for all rows
             let xsd_ref = xsd_types
                 .get(name.as_str())
-                .map(|uri| NamedNodeRef::new_unchecked(uri.as_str()));
+                .map(|&uri| NamedNodeRef::new_unchecked(uri));
             let objects = filtered.column(name.as_str())?.cast(&DataType::String)?;
             let objects = objects.str()?;
 

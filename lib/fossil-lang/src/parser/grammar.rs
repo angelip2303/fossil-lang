@@ -6,8 +6,8 @@ use chumsky::prelude::*;
 
 use crate::ast::{
     Argument, Ast, Attribute, AttributeArg, ConstructorParam, Expr, ExprId, ExprKind, Literal,
-    Path, PrimitiveType, ProviderArgument, RecordField, Stmt, StmtId, StmtKind, Type, TypeId,
-    TypeKind,
+    Path, PrimitiveType, ProviderArgument, ProviderTypeEntry, RecordField, Stmt, StmtId, StmtKind,
+    Type, TypeId, TypeKind,
 };
 use crate::ast::Loc;
 use crate::ast::SourceId;
@@ -73,7 +73,7 @@ where
         });
 
     // Type statement with optional leading attributes and constructor params:
-    // #[rdf(type = "...", base = "...")]
+    // #[rdf(type = "...", subject = "...")]
     // type Name(id: string, graph: string) = Type
     //
     // Constructor params are optional and provide metadata for record construction.
@@ -113,27 +113,60 @@ where
             ctx.alloc_type(TypeKind::Record(fields), ctx.to_loc(e.span()))
         });
 
-    // = Type syntax (for providers and named types, NOT records)
-    let eq_body = just(Token::Eq).ignore_then(parse_type(ctx));
-
-    let type_stmt = parse_attribute(ctx)
+    // Provider entry: #[attrs] Name(params) — used in both single and multi-type
+    let provider_entry = parse_attribute(ctx)
         .repeated()
         .collect::<Vec<_>>()
-        .then(just(Token::Type))
+        .then(parse_symbol(ctx))
+        .then(ctor_params.clone())
+        .map(|((attrs, name), ctor_params)| ProviderTypeEntry { name, ctor_params, attrs });
+
+    // Head: Name(params) or { Entry, Entry, ... }
+    let single_head = provider_entry.clone().map(|e| vec![e]);
+    let multi_head = provider_entry
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LBrace), just(Token::RBrace));
+
+    // type (head) = provider!(args) → ProviderType
+    let provider_type_stmt = parse_attribute(ctx)
+        .repeated()
+        .collect::<Vec<_>>()
+        .then_ignore(just(Token::Type))
+        .then(multi_head.or(single_head))
+        .then_ignore(just(Token::Eq))
+        .then(parse_path(ctx))
+        .then_ignore(just(Token::Bang))
+        .then(
+            parse_provider_argument(ctx)
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LParen), just(Token::RParen)),
+        )
+        .map_with(|(((leading_attrs, mut entries), provider), args), e| {
+            if entries.len() == 1 && !leading_attrs.is_empty() {
+                entries[0].attrs = [leading_attrs, std::mem::take(&mut entries[0].attrs)].concat();
+            }
+            let loc = ctx.to_loc(e.span());
+            ctx.alloc_stmt(StmtKind::ProviderType { entries, provider, args, loc }, loc)
+        });
+
+    // #[attrs] type Name(params) do...end → Type (manual record)
+    let record_type_stmt = parse_attribute(ctx)
+        .repeated()
+        .collect::<Vec<_>>()
+        .then_ignore(just(Token::Type))
         .then(parse_symbol(ctx))
         .then(ctor_params)
-        .then(do_end_body.or(eq_body))
-        .map_with(|((((attrs, _), name), ctor_params), ty), e| {
-            ctx.alloc_stmt(
-                StmtKind::Type {
-                    name,
-                    ty,
-                    attrs,
-                    ctor_params,
-                },
-                ctx.to_loc(e.span()),
-            )
+        .then(do_end_body)
+        .map_with(|(((attrs, name), ctor_params), ty), e| {
+            ctx.alloc_stmt(StmtKind::Type { name, ty, attrs, ctor_params }, ctx.to_loc(e.span()))
         });
+
+    let type_stmt = provider_type_stmt.or(record_type_stmt);
 
     let expr_stmt =
         expr.map_with(|expr, e| ctx.alloc_stmt(StmtKind::Expr(expr), ctx.to_loc(e.span())));
@@ -307,7 +340,7 @@ where
             )
             .delimited_by(just(Token::LBrace), just(Token::RBrace));
 
-        let paren_suffix = argument
+        let paren_suffix = argument.clone()
             .separated_by(just(Token::Comma))
             .allow_trailing()
             .collect::<Vec<_>>()
@@ -358,7 +391,21 @@ where
                 }
             });
 
-        let atom = choice((path_based, unit, literal))
+        // ref Type(args) — explicit reference expression
+        let ref_expr = just(Token::Ref)
+            .ignore_then(parse_path(ctx))
+            .then(
+                argument
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .map_with(|(type_path, args), e| {
+                ctx.alloc_expr(ExprKind::Ref { type_path, args }, ctx.to_loc(e.span()))
+            });
+
+        let atom = choice((ref_expr, path_based, unit, literal))
             .map_with(|expr, e| (expr, e.span()))
             .boxed();
 
@@ -623,6 +670,7 @@ where
         Token::BoolType => ctx.intern("bool"),
         Token::StringType => ctx.intern("string"),
         Token::FloatType => ctx.intern("float"),
+        Token::Ref => ctx.intern("ref"),
     }
 }
 
@@ -692,25 +740,10 @@ where
         .then(just(Token::RParen))
         .map_with(|_, e| ctx.alloc_type(TypeKind::Unit, ctx.to_loc(e.span())));
 
-    // Longest-match: parse Path once, then check for ! suffix (provider vs named)
+    // Named type reference (providers are handled at statement level, not type level)
     let path_based_type = parse_path(ctx)
-        .then(
-            just(Token::Bang)
-                .ignore_then(
-                    parse_provider_argument(ctx)
-                        .separated_by(just(Token::Comma))
-                        .allow_trailing()
-                        .collect()
-                        .delimited_by(just(Token::LParen), just(Token::RParen)),
-                )
-                .or_not(),
-        )
-        .map_with(|(path, provider_args), e| {
-            let loc = ctx.to_loc(e.span());
-            match provider_args {
-                Some(args) => ctx.alloc_type(TypeKind::Provider { provider: path, args }, loc),
-                None => ctx.alloc_type(TypeKind::Named(path), loc),
-            }
+        .map_with(|path, e| {
+            ctx.alloc_type(TypeKind::Named(path), ctx.to_loc(e.span()))
         });
 
     choice((

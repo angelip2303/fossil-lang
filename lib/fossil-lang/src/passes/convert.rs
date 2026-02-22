@@ -60,6 +60,10 @@ impl AstToIrConverter {
                 }
             }
 
+            ast::StmtKind::ProviderType { .. } => {
+                unreachable!("ProviderType should be expanded before conversion to IR")
+            }
+
             ast::StmtKind::Expr(expr) => {
                 let ir_expr = self.convert_expr(ast, *expr);
                 StmtKind::Expr(ir_expr)
@@ -145,6 +149,16 @@ impl AstToIrConverter {
                 }
             }
 
+            ast::ExprKind::Ref { type_path, args } => {
+                let ir_args = args.iter()
+                    .map(|arg| self.convert_expr(ast, arg.value()))
+                    .collect();
+                ExprKind::Ref {
+                    type_name: type_path.clone(),
+                    args: ir_args,
+                }
+            }
+
             ast::ExprKind::ProviderInvocation { .. } => {
                 unreachable!("ProviderInvocation should be expanded before conversion to IR")
             }
@@ -175,10 +189,6 @@ impl AstToIrConverter {
             ast::TypeKind::Unit => TypeKind::Unit,
 
             ast::TypeKind::Primitive(prim) => TypeKind::Primitive(*prim),
-
-            ast::TypeKind::Provider { .. } => {
-                unreachable!("Providers should be expanded before conversion to IR")
-            }
 
             ast::TypeKind::Optional(inner) => {
                 let ir_inner = self.convert_type(ast, *inner);

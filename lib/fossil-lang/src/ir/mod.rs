@@ -153,6 +153,11 @@ pub enum ExprKind {
         parts: Vec<Symbol>,
         exprs: Vec<ExprId>,
     },
+    /// `ref Type(args)` — explicit reference to another record type.
+    Ref {
+        type_name: Path,
+        args: Vec<ExprId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

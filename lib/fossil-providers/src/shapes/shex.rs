@@ -3,7 +3,7 @@ use fossil_lang::ast::{Attribute, AttributeArg, Literal, PrimitiveType};
 use fossil_lang::context::Interner;
 use fossil_lang::error::{FossilError, FossilWarning, FossilWarnings};
 use fossil_lang::traits::provider::{
-    FieldSpec, FieldType, FileReader, ProviderArgs, ProviderContext, ProviderInfo, ProviderKind,
+    FieldSpec, FieldType, ProviderArgs, ProviderContext, ProviderInfo, ProviderKind,
     ProviderOutput, ProviderParamInfo, ProviderSchema, TypeProviderImpl,
 };
 
@@ -31,39 +31,14 @@ impl TypeProviderImpl for ShexProvider {
                 default: None,
                 expected_type: Some("string"),
             },
-            ProviderParamInfo {
-                name: "shape",
-                required: true,
-                default: None,
-                expected_type: Some("string"),
-            },
         ]
-    }
-
-    fn type_identity(&self, args: &ProviderArgs, reader: &dyn FileReader) -> Option<String> {
-        let path_str = args.get_string("path")?;
-        let shape_name = args.get_string("shape")?;
-        let path = resolve_path(path_str);
-        let content = reader.read_to_string(path.to_str()).ok()?;
-        let schema = parse_shex_schema(&content, Loc::generated()).ok()?;
-        let shapes = schema.shapes()?;
-        for shape_decl in shapes {
-            if shape_label_matches(shape_decl.id(), shape_name) {
-                return match shape_decl.id() {
-                    ShapeExprLabel::IriRef { value } => Some(value.to_string()),
-                    ShapeExprLabel::BNode { value } => Some(value.to_string()),
-                    ShapeExprLabel::Start => Some("Start".to_string()),
-                };
-            }
-        }
-        None
     }
 
     fn provide(
         &self,
         args: &ProviderArgs,
         ctx: &mut ProviderContext,
-        _type_name: &str,
+        type_name: &str,
         loc: Loc,
     ) -> Result<ProviderOutput, FossilError> {
         let path_str = args.require_string("path", "shex", loc)?;
@@ -71,17 +46,27 @@ impl TypeProviderImpl for ShexProvider {
         validate_extension(path.as_ref(), &["shex"], loc)?;
         validate_path(path.as_ref(), loc)?;
 
-        let shape_name = args.require_string("shape", "shex", loc)?;
-
         let path_str = path.to_str().to_string();
         let shex_content = ctx.file_reader.read_to_string(&path_str)
             .map_err(|e| FossilError::read_error(path_str.clone(), e, loc))?;
 
         let schema = parse_shex_schema(&shex_content, loc)?;
-        let extraction = extract_shape_fields(&schema, shape_name, loc)?;
+
+        // Count validation for multi-type
+        if let Some(expected) = ctx.expected_type_count {
+            let actual = schema.shapes().map(|s| s.len()).unwrap_or(0);
+            if actual != expected {
+                return Err(FossilError::data_error(
+                    format!("ShEx file has {} shapes but {} types declared", actual, expected),
+                    loc,
+                ));
+            }
+        }
+
+        let extraction = extract_shape_fields(&schema, type_name, loc)?;
         let fields = shex_fields_to_field_specs(extraction.fields, ctx.interner, loc);
         let type_attrs = build_rdf_type_attribute(
-            &schema, &extraction.rdf_type, ctx.interner, loc,
+            &schema, &extraction.rdf_type, type_name, &ctx.ctor_params, ctx.interner, loc,
         );
 
         Ok(ProviderOutput::new(ProviderSchema { fields })
@@ -111,22 +96,34 @@ fn rdf_attribute(interner: &mut Interner, key: &str, value: &str, loc: Loc) -> A
     }
 }
 
-/// Build a single `#[rdf(base = "...", type = "...")]` attribute from the
-/// schema's BASE declaration and the extracted rdf:type IRI.  Returns an
-/// empty vec when neither is present.
+/// Build `#[rdf(subject = "template", type = "...")]` from schema BASE + ctor_params.
+///
+/// Subject template uses `{param}` placeholders matching the ctor_params:
+/// e.g. `http://example.org/urban#Vehicle_{identifier}`
 fn build_rdf_type_attribute(
     schema: &Schema,
     rdf_type: &Option<String>,
+    type_name: &str,
+    ctor_params: &[fossil_lang::context::Symbol],
     interner: &mut Interner,
     loc: Loc,
 ) -> Vec<Attribute> {
     let mut args = Vec::new();
 
     if let Some(base_iri) = schema.base() {
-        args.push(AttributeArg::Named {
-            key: interner.intern("base"),
-            value: Literal::String(interner.intern(&base_iri.to_string())),
-        });
+        if !ctor_params.is_empty() {
+            let mut template = format!("{}{}_", base_iri, type_name);
+            for (i, sym) in ctor_params.iter().enumerate() {
+                if i > 0 { template.push('_'); }
+                template.push('{');
+                template.push_str(interner.resolve(*sym));
+                template.push('}');
+            }
+            args.push(AttributeArg::Named {
+                key: interner.intern("subject"),
+                value: Literal::String(interner.intern(&template)),
+            });
+        }
     }
 
     if let Some(rdf_type_iri) = rdf_type {
@@ -147,6 +144,18 @@ struct ShapeExtractionResult {
     fields: Vec<ShapeField>,
     rdf_type: Option<String>,
     warnings: FossilWarnings,
+}
+
+/// Use type_name to match shapes by local name
+fn shape_label_matches(label: &ShapeExprLabel, name: &str) -> bool {
+    match label {
+        ShapeExprLabel::IriRef { value } => {
+            let iri_str = value.to_string();
+            extract_local_name(&iri_str) == name || iri_str.ends_with(name)
+        }
+        ShapeExprLabel::BNode { value } => value.to_string() == name,
+        ShapeExprLabel::Start => name == "start" || name == "Start",
+    }
 }
 
 fn extract_shape_fields(
@@ -177,17 +186,6 @@ fn extract_shape_fields(
     }
 
     Err(FossilError::undefined("shape", shape_name, loc))
-}
-
-fn shape_label_matches(label: &ShapeExprLabel, name: &str) -> bool {
-    match label {
-        ShapeExprLabel::IriRef { value } => {
-            let iri_str = value.to_string();
-            extract_local_name(&iri_str) == name || iri_str.ends_with(name)
-        }
-        ShapeExprLabel::BNode { value } => value.to_string() == name,
-        ShapeExprLabel::Start => name == "start" || name == "Start",
-    }
 }
 
 fn extract_fields_from_shape_expr(
@@ -315,11 +313,6 @@ fn extract_fields_from_triple_expr(
     }
 }
 
-/// Extract an IRI from a ShapeExpr value expression.
-///
-/// Supports both syntactic forms of rdf:type constraints in ShEx:
-/// - `a [ex:Vehicle]` → `NodeConstraint` with a value set containing the IRI
-/// - `a ex:Vehicle`   → `Ref` pointing to a shape label IRI
 fn extract_iri_from_shape_expr(shape_expr: &ShapeExpr) -> Option<String> {
     match shape_expr {
         ShapeExpr::NodeConstraint(nc) => {
@@ -385,8 +378,9 @@ fn extract_value_expr_info(shape_expr: &ShapeExpr) -> ValueExprInfo {
             }
         }
         ShapeExpr::Ref(label) => {
+            // Use local name for cross-references — matches Fossil type names directly
             let name = match label {
-                ShapeExprLabel::IriRef { value } => value.to_string(),
+                ShapeExprLabel::IriRef { value } => extract_local_name(&value.to_string()),
                 ShapeExprLabel::BNode { value } => value.to_string(),
                 ShapeExprLabel::Start => "Start".to_string(),
             };

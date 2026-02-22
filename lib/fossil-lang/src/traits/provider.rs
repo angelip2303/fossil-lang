@@ -224,36 +224,31 @@ fn literal_to_provider_literal(lit: &Literal, interner: &Interner) -> ProviderLi
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct TypeRegistry {
-    identity_to_name: HashMap<String, String>,
+pub struct CachingFileReader<'a> {
+    inner: &'a dyn FileReader,
+    cache: std::sync::Mutex<HashMap<String, String>>,
 }
 
-impl TypeRegistry {
-    pub fn new() -> Self {
-        Self::default()
+impl<'a> CachingFileReader<'a> {
+    pub fn new(inner: &'a dyn FileReader) -> Self {
+        Self { inner, cache: std::sync::Mutex::new(HashMap::new()) }
     }
+}
 
-    pub fn register(&mut self, identity: String, fossil_name: String) {
-        self.identity_to_name.insert(identity, fossil_name);
+impl std::fmt::Debug for CachingFileReader<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachingFileReader").finish()
     }
+}
 
-    pub fn resolve(&self, identity: &str) -> Option<&str> {
-        self.identity_to_name.get(identity).map(|s| s.as_str())
-    }
-
-    pub fn resolve_name(&self, identity: &str) -> String {
-        if let Some(name) = self.identity_to_name.get(identity) {
-            return name.clone();
+impl FileReader for CachingFileReader<'_> {
+    fn read_to_string(&self, path: &str) -> Result<String, String> {
+        if let Some(cached) = self.cache.lock().unwrap().get(path).cloned() {
+            return Ok(cached);
         }
-        let s = identity.trim_start_matches('<').trim_end_matches('>');
-        if let Some(pos) = s.rfind('#') {
-            return s[pos + 1..].to_string();
-        }
-        if let Some(pos) = s.rfind('/') {
-            return s[pos + 1..].to_string();
-        }
-        s.to_string()
+        let content = self.inner.read_to_string(path)?;
+        self.cache.lock().unwrap().insert(path.to_string(), content.clone());
+        Ok(content)
     }
 }
 
@@ -261,6 +256,8 @@ pub struct ProviderContext<'a> {
     pub interner: &'a mut Interner,
     pub storage: &'a StorageConfig,
     pub file_reader: &'a dyn FileReader,
+    pub ctor_params: Vec<Symbol>,
+    pub expected_type_count: Option<usize>,
 }
 
 pub trait TypeProviderImpl: Send + Sync {
@@ -268,12 +265,6 @@ pub trait TypeProviderImpl: Send + Sync {
 
     fn param_info(&self) -> Vec<ProviderParamInfo> {
         vec![]
-    }
-
-    /// Returns the external identity (e.g. full IRI) for the type this provider generates.
-    /// Used during pre-scan to build the TypeRegistry for cross-reference resolution.
-    fn type_identity(&self, _args: &ProviderArgs, _reader: &dyn FileReader) -> Option<String> {
-        None
     }
 
     fn provide(

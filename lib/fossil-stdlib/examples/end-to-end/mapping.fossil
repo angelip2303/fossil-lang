@@ -1,6 +1,6 @@
 let data = csv!("lib/fossil-stdlib/examples/end-to-end/people.csv")
 
-// #[rdf(base = "http://example.com/person/")]
+// #[rdf(subject = "http://example.com/person/{id}")]
 // type Person(id: string) do
 //     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
 //     #[validate(min_length = 2)]
@@ -10,8 +10,7 @@ let data = csv!("lib/fossil-stdlib/examples/end-to-end/people.csv")
 //     age: int
 // end
 
-#[rdf(base = "http://example.com/person/")]
-type Person(id: string) = shex!("lib/fossil-stdlib/examples/end-to-end/person.shex", shape: "PersonShape")
+type Person(id: string) = shex!("lib/fossil-stdlib/examples/end-to-end/person.shex")
 
 let mapped = data
     |> each row -> Person(row.email) { name = row.name, age = row.age }

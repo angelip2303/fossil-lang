@@ -1,6 +1,6 @@
 let data = csv!("az://keasy-dev/people.csv")
 
-#[rdf(base = "http://example.com/person/")]
+#[rdf(subject = "http://example.com/person/{id}")]
 type Person(id: string) do
     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
     #[validate(min_length = 2)]

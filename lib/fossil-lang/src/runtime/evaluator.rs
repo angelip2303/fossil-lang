@@ -54,7 +54,7 @@ pub struct IrEvaluator<'a> {
     storage: Arc<crate::runtime::storage::StorageConfig>,
     /// Accumulates auto-emitted outputs from constructor calls in field-value positions.
     /// Drained by eval_projection after collecting main outputs.
-    auto_emit_outputs: Vec<crate::runtime::value::PendingOutput>,
+    auto_emit_outputs: Vec<crate::runtime::value::OutputSpec>,
 }
 
 impl<'a> IrEvaluator<'a> {
@@ -155,6 +155,16 @@ impl<'a> IrEvaluator<'a> {
             ExprKind::StringInterpolation { parts, exprs } => {
                 self.eval_string_interpolation(parts, exprs)
             }
+
+            ExprKind::Ref { args, .. } => {
+                let type_def_id = self.resolutions.expr_defs.get(&expr_id).copied()
+                    .ok_or_else(|| self.make_error("Unresolved type in ref expression"))?;
+                let arg_values: Vec<Value> = args
+                    .iter()
+                    .map(|&arg| self.eval(arg))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Value::Reference { def_id: type_def_id, args: arg_values })
+            }
         }
     }
 
@@ -196,7 +206,7 @@ impl<'a> IrEvaluator<'a> {
         fields: &[(Symbol, ExprId)],
     ) -> Result<Value, FossilError> {
         use std::collections::HashSet;
-        use crate::runtime::value::{Plan, PendingOutput};
+        use crate::runtime::value::{Plan, OutputSpec};
 
         let type_def_id = self.resolutions.expr_defs.get(&expr_id).copied();
 
@@ -229,22 +239,16 @@ impl<'a> IrEvaluator<'a> {
         }
 
         // Reference-like usage: ctor_args present but no fields/spread.
-        // Call identity_resolver to generate the identity value (e.g. subject IRI).
+        // Return a TypedRef so the serializer can build the identity IRI.
         if fields.is_empty() && spread.is_none() && !ctor_args.is_empty() {
             let ctor_values: Vec<Value> = ctor_args
                 .iter()
                 .map(|arg| self.eval(arg.value()))
                 .collect::<Result<Vec<_>, _>>()?;
 
-            if let Some(ref resolver) = self.gcx.identity_resolver {
-                if let Some(type_def_id) = type_def_id {
-                    if let Some(identity_value) = resolver(type_def_id, &ctor_values, self.gcx) {
-                        return Ok(identity_value);
-                    }
-                }
+            if let Some(type_def_id) = type_def_id {
+                return Ok(Value::Reference { def_id: type_def_id, args: ctor_values });
             }
-
-            // Fallback: return first ctor arg value directly
             if let Some(first) = ctor_values.into_iter().next() {
                 return Ok(first);
             }
@@ -257,11 +261,32 @@ impl<'a> IrEvaluator<'a> {
                 let name_str = self.gcx.interner.resolve(*name);
                 match value {
                     Value::Expr(expr) => Ok(expr.alias(name_str)),
+                    Value::Reference { args, .. } => {
+                        // Store the raw ctor arg value(s) — the serializer discovers
+                        // that this field is a reference by consulting the IR and
+                        // builds the full subject IRI via build_subject_expr.
+                        let raw = if args.len() == 1 {
+                            args.into_iter().next()
+                                .and_then(|v| match v { Value::Expr(e) => Some(e), _ => None })
+                                .unwrap_or(lit(NULL))
+                        } else {
+                            // Multi-arg: concatenate with "_" separator for composite keys
+                            let parts: Vec<Expr> = args.into_iter()
+                                .flat_map(|v| match v {
+                                    Value::Expr(e) => vec![e.cast(polars::prelude::DataType::String)],
+                                    _ => vec![lit("null")],
+                                })
+                                .collect();
+                            if parts.is_empty() { lit(NULL) } else { concat_str(parts, "_", true) }
+                        };
+                        Ok(raw.alias(name_str))
+                    }
                     Value::PendingOutput(po) => {
                         // Auto-emit: constructor call in field-value position.
-                        // Generate identity value for the reference and auto-emit the output.
-                        let identity_expr =
-                            self.resolve_identity_for_pending_output(&po);
+                        // Use first ctor arg as the identity expression.
+                        let identity_expr = po.ctor_args.first()
+                            .cloned()
+                            .unwrap_or(lit(NULL));
                         self.auto_emit_outputs.push(po);
                         Ok(identity_expr.alias(name_str))
                     }
@@ -299,10 +324,10 @@ impl<'a> IrEvaluator<'a> {
 
         let resolved_type_def_id = type_def_id.ok_or_else(|| self.make_error("Named record must resolve to a type definition"))?;
 
-        Ok(Value::PendingOutput(PendingOutput {
+        Ok(Value::PendingOutput(OutputSpec {
             type_def_id: resolved_type_def_id,
             select_exprs,
-            ctor_exprs,
+            ctor_args: ctor_exprs,
             schema: std::sync::Arc::new(schema),
         }))
     }
@@ -326,15 +351,15 @@ impl<'a> IrEvaluator<'a> {
         let mut output_specs: Vec<_> = outputs
             .iter()
             .filter_map(|&expr| match self.eval(expr) {
-                Ok(Value::PendingOutput(po)) => Some(Ok(po.into_output_spec())),
+                Ok(Value::PendingOutput(spec)) => Some(Ok(spec)),
                 Ok(_) => None,
                 Err(e) => Some(Err(e)),
             })
             .collect::<Result<Vec<_>, _>>()?;
 
         // Drain auto-emitted outputs (from constructor calls in field-value positions)
-        for po in self.auto_emit_outputs.drain(..) {
-            output_specs.push(po.into_output_spec());
+        for spec in self.auto_emit_outputs.drain(..) {
+            output_specs.push(spec);
         }
 
         Ok(Value::Plan(plan.project(output_specs)))
@@ -440,7 +465,7 @@ impl<'a> IrEvaluator<'a> {
             }
 
             Value::RecordConstructor(ctor_def_id) => {
-                use crate::runtime::value::PendingOutput;
+                use crate::runtime::value::OutputSpec;
 
                 let ctor_def = self.gcx.definitions.get(ctor_def_id);
                 let type_def_id = ctor_def.parent().unwrap_or(ctor_def_id);
@@ -456,24 +481,12 @@ impl<'a> IrEvaluator<'a> {
                 let ctor_param_names = info.ctor_param_names.clone();
 
                 // Identity construction: args match ctor param count (not field count).
-                // This is a reference-like call — resolve identity via identity_resolver.
+                // Return a TypedRef so the serializer can build the identity IRI.
                 if ctor_param_count > 0
                     && arg_values.len() == ctor_param_count
                     && arg_values.len() != field_names.len()
                 {
-                    if let Some(ref resolver) = self.gcx.identity_resolver {
-                        if let Some(identity_value) =
-                            resolver(type_def_id, &arg_values, self.gcx)
-                        {
-                            return Ok(identity_value);
-                        }
-                    }
-
-                    // Fallback: return first arg value directly
-                    if let Some(first) = arg_values.into_iter().next() {
-                        return Ok(first);
-                    }
-                    return Ok(Value::Expr(lit(NULL)));
+                    return Ok(Value::Reference { def_id: type_def_id, args: arg_values });
                 }
 
                 // Full construction: args match field count.
@@ -522,10 +535,10 @@ impl<'a> IrEvaluator<'a> {
                     .collect();
                 let schema = build_schema(&all_exprs, Some(type_def_id), self.gcx);
 
-                Ok(Value::PendingOutput(PendingOutput {
+                Ok(Value::PendingOutput(OutputSpec {
                     type_def_id,
                     select_exprs,
-                    ctor_exprs,
+                    ctor_args: ctor_exprs,
                     schema: std::sync::Arc::new(schema),
                 }))
             }
@@ -553,30 +566,6 @@ impl<'a> IrEvaluator<'a> {
 
             _ => Err(self.make_error("Field access on non-record value")),
         }
-    }
-
-    /// Resolve an identity expression for a PendingOutput used as a field value.
-    /// Calls the identity_resolver if available, otherwise falls back to ctor args.
-    fn resolve_identity_for_pending_output(
-        &self,
-        po: &crate::runtime::value::PendingOutput,
-    ) -> Expr {
-        if let Some(ref resolver) = self.gcx.identity_resolver {
-            // Build Value wrappers for ctor_exprs
-            let ctor_values: Vec<Value> = po
-                .ctor_exprs
-                .iter()
-                .map(|e| Value::Expr(e.clone()))
-                .collect();
-            if let Some(Value::Expr(expr)) = resolver(po.type_def_id, &ctor_values, self.gcx) {
-                return expr;
-            }
-        }
-        // Fallback: use first ctor arg if available
-        if let Some(first) = po.ctor_exprs.first() {
-            return first.clone();
-        }
-        lit(NULL)
     }
 
     fn make_error(&self, msg: impl Into<String>) -> FossilError {

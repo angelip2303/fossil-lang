@@ -349,10 +349,10 @@ fn error_optional_narrowing() {
 }
 
 #[test]
-fn error_ref_keyword_removed() {
-    // `ref T("abc")` should produce a syntax error (no longer valid)
+fn ref_keyword_produces_reference() {
+    // `ref T("abc")` should compile successfully — produces a Reference value
     assert!(compile(
         "type T(id: string) do Name: string end\n\
          let t = ref T(\"abc\")",
-    ).is_err());
+    ).is_ok());
 }

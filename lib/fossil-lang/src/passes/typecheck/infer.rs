@@ -251,6 +251,19 @@ impl TypeChecker {
                 let ty = self.ir.string_type();
                 Ok((subst, ty))
             }
+
+            ExprKind::Ref { args, .. } => {
+                let mut subst = Subst::default();
+                for &arg in args {
+                    let (s, _) = self.infer(arg)?;
+                    subst = subst.compose(&s, &mut self.ir);
+                }
+                let type_def_id = *self.resolutions.expr_defs.get(&expr_id).ok_or_else(|| {
+                    FossilError::internal("typecheck", "Unresolved type in ref expression", loc)
+                })?;
+                let ty = self.ir.named_type(type_def_id);
+                Ok((subst, ty))
+            }
         };
 
         if let Ok((_, ty)) = &result {

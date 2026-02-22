@@ -5,7 +5,6 @@ use crate::ast::RecordField;
 use crate::common::PrimitiveType;
 use crate::context::{DefId, DefKind, Definitions, Interner, Symbol, TypeMetadata};
 use crate::runtime::storage::StorageConfig;
-use crate::runtime::value::Value;
 
 use crate::traits::provider::{FileReader, LocalFileReader, ModuleSpec, ProviderInfo, TypeProviderImpl};
 
@@ -24,18 +23,12 @@ pub struct TypeInfo<'a> {
 
 pub type ModuleGeneratorFn = Arc<dyn Fn(&TypeInfo) -> Option<ModuleSpec> + Send + Sync>;
 
-/// Generic identity resolver callback. Given a type's DefId, the constructor
-/// argument values, and the global context, returns an optional identity value.
-/// The core language has no knowledge of what this computes — the stdlib/RDF
-/// layer provides the implementation (e.g. generating subject IRIs).
-pub type IdentityResolverFn = Arc<dyn Fn(DefId, &[Value], &GlobalContext) -> Option<Value> + Send + Sync>;
-
 /// Global compilation context shared across all compiler passes and runtime.
 ///
 /// Fields are grouped into four concerns:
 /// - **Core identity**: `interner` and `definitions` — symbol table and definition registry
 /// - **Type metadata**: `type_metadata` and `registered_types` — type attributes and field type info
-/// - **Extension points**: `module_generators` and `identity_resolver` — stdlib hooks
+/// - **Extension points**: `module_generators` — stdlib hooks
 /// - **I/O configuration**: `storage` and `file_reader` — file access and cloud storage
 #[derive(Clone)]
 pub struct GlobalContext {
@@ -49,7 +42,6 @@ pub struct GlobalContext {
 
     // -- Extension points --
     pub module_generators: Vec<ModuleGeneratorFn>,
-    pub identity_resolver: Option<IdentityResolverFn>,
 
     // -- I/O configuration --
     pub storage: StorageConfig,
@@ -120,7 +112,6 @@ impl Default for GlobalContext {
             type_metadata: HashMap::new(),
             registered_types: HashMap::new(),
             module_generators: Vec::new(),
-            identity_resolver: None,
             storage: StorageConfig::default(),
             file_reader: Arc::new(LocalFileReader),
         }

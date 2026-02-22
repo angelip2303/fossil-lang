@@ -27,6 +27,13 @@ pub struct ConstructorParam {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProviderTypeEntry {
+    pub name: Symbol,
+    pub ctor_params: Vec<ConstructorParam>,
+    pub attrs: Vec<Attribute>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StmtKind {
     Let {
         name: Symbol,
@@ -37,6 +44,12 @@ pub enum StmtKind {
         ty: TypeId,
         attrs: Vec<Attribute>,
         ctor_params: Vec<ConstructorParam>,
+    },
+    ProviderType {
+        entries: Vec<ProviderTypeEntry>,
+        provider: Path,
+        args: Vec<ProviderArgument>,
+        loc: Loc,
     },
     Expr(ExprId),
 }
@@ -86,6 +99,11 @@ pub enum ExprKind {
         provider: Path,
         args: Vec<ProviderArgument>,
     },
+    /// `ref Type(args)` — explicit reference to another record type.
+    Ref {
+        type_path: Path,
+        args: Vec<Argument>,
+    },
 }
 
 #[derive(Debug)]
@@ -99,10 +117,6 @@ pub enum TypeKind {
     Named(Path),
     Unit,
     Primitive(PrimitiveType),
-    Provider {
-        provider: Path,
-        args: Vec<ProviderArgument>,
-    },
     Optional(TypeId),
     Record(Vec<RecordField>),
 }
