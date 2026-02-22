@@ -282,8 +282,6 @@ where
 
         let argument = named_arg.or(positional_arg);
 
-        let ref_args = argument.clone();
-
         // Longest-match path-based atom: parse Path once, then check suffix
         let bang_suffix = just(Token::Bang)
             .ignore_then(
@@ -360,23 +358,7 @@ where
                 }
             });
 
-        let ref_expr = just(Token::Ref)
-            .ignore_then(parse_path(ctx))
-            .then(
-                ref_args
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(Token::LParen), just(Token::RParen)),
-            )
-            .map_with(|(type_path, ctor_args), e| {
-                ctx.alloc_expr(
-                    ExprKind::Reference { type_path, ctor_args },
-                    ctx.to_loc(e.span()),
-                )
-            });
-
-        let atom = choice((ref_expr, path_based, unit, literal))
+        let atom = choice((path_based, unit, literal))
             .map_with(|expr, e| (expr, e.span()))
             .boxed();
 
@@ -641,7 +623,6 @@ where
         Token::BoolType => ctx.intern("bool"),
         Token::StringType => ctx.intern("string"),
         Token::FloatType => ctx.intern("float"),
-        Token::Ref => ctx.intern("ref"),
     }
 }
 

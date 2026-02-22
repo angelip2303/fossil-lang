@@ -52,6 +52,9 @@ pub struct IrEvaluator<'a> {
     call_stack: CallStack,
     output_resolver: Arc<dyn OutputResolver>,
     storage: Arc<crate::runtime::storage::StorageConfig>,
+    /// Accumulates auto-emitted outputs from constructor calls in field-value positions.
+    /// Drained by eval_projection after collecting main outputs.
+    auto_emit_outputs: Vec<crate::runtime::value::PendingOutput>,
 }
 
 impl<'a> IrEvaluator<'a> {
@@ -75,6 +78,7 @@ impl<'a> IrEvaluator<'a> {
             call_stack: Default::default(),
             output_resolver,
             storage,
+            auto_emit_outputs: Vec::new(),
         }
     }
 
@@ -147,24 +151,6 @@ impl<'a> IrEvaluator<'a> {
             ExprKind::FieldAccess { expr, field } => self.eval_field_access(*expr, *field),
 
             ExprKind::Unit => Ok(Value::Unit),
-
-            ExprKind::Reference { ctor_args, .. } => {
-                let value = if let Some(first_arg) = ctor_args.first() {
-                    self.eval(first_arg.value())?
-                } else {
-                    return Ok(Value::Expr(lit(NULL)));
-                };
-                if let Some(ref resolver) = self.gcx.ref_resolver {
-                    if let Some(&def_id) = self.resolutions.expr_defs.get(&expr_id) {
-                        if let Some(base) = resolver(def_id, self.gcx) {
-                            if let Value::Expr(expr) = value {
-                                return Ok(Value::Expr(concat_str([lit(base.as_str()), expr], "", true)));
-                            }
-                        }
-                    }
-                }
-                Ok(value)
-            }
 
             ExprKind::StringInterpolation { parts, exprs } => {
                 self.eval_string_interpolation(parts, exprs)
@@ -242,6 +228,28 @@ impl<'a> IrEvaluator<'a> {
             return Ok(Value::Plan(Plan::empty(Schema::default())));
         }
 
+        // Reference-like usage: ctor_args present but no fields/spread.
+        // Call identity_resolver to generate the identity value (e.g. subject IRI).
+        if fields.is_empty() && spread.is_none() && !ctor_args.is_empty() {
+            let ctor_values: Vec<Value> = ctor_args
+                .iter()
+                .map(|arg| self.eval(arg.value()))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            if let Some(ref resolver) = self.gcx.identity_resolver {
+                if let Some(type_def_id) = type_def_id {
+                    if let Some(identity_value) = resolver(type_def_id, &ctor_values, self.gcx) {
+                        return Ok(identity_value);
+                    }
+                }
+            }
+
+            // Fallback: return first ctor arg value directly
+            if let Some(first) = ctor_values.into_iter().next() {
+                return Ok(first);
+            }
+        }
+
         let mut select_exprs: Vec<Expr> = fields
             .iter()
             .map(|(name, expr_id)| {
@@ -249,6 +257,14 @@ impl<'a> IrEvaluator<'a> {
                 let name_str = self.gcx.interner.resolve(*name);
                 match value {
                     Value::Expr(expr) => Ok(expr.alias(name_str)),
+                    Value::PendingOutput(po) => {
+                        // Auto-emit: constructor call in field-value position.
+                        // Generate identity value for the reference and auto-emit the output.
+                        let identity_expr =
+                            self.resolve_identity_for_pending_output(&po);
+                        self.auto_emit_outputs.push(po);
+                        Ok(identity_expr.alias(name_str))
+                    }
                     _ => Ok(lit(NULL).alias(name_str)),
                 }
             })
@@ -302,7 +318,10 @@ impl<'a> IrEvaluator<'a> {
 
         self.env.bind(binding, Value::Plan(plan.clone()));
 
-        let output_specs: Vec<_> = outputs
+        // Clear auto-emit buffer before evaluating outputs
+        self.auto_emit_outputs.clear();
+
+        let mut output_specs: Vec<_> = outputs
             .iter()
             .filter_map(|&expr| match self.eval(expr) {
                 Ok(Value::PendingOutput(po)) => Some(Ok(po.into_output_spec())),
@@ -310,6 +329,11 @@ impl<'a> IrEvaluator<'a> {
                 Err(e) => Some(Err(e)),
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        // Drain auto-emitted outputs (from constructor calls in field-value positions)
+        for po in self.auto_emit_outputs.drain(..) {
+            output_specs.push(po.into_output_spec());
+        }
 
         Ok(Value::Plan(plan.project(output_specs)))
     }
@@ -426,33 +450,80 @@ impl<'a> IrEvaluator<'a> {
                     ))
                 })?;
                 let field_names = &info.field_names;
+                let ctor_param_count = info.ctor_param_names.len();
+                let ctor_param_names = info.ctor_param_names.clone();
 
+                // Identity construction: args match ctor param count (not field count).
+                // This is a reference-like call — resolve identity via identity_resolver.
+                if ctor_param_count > 0
+                    && arg_values.len() == ctor_param_count
+                    && arg_values.len() != field_names.len()
+                {
+                    if let Some(ref resolver) = self.gcx.identity_resolver {
+                        if let Some(identity_value) =
+                            resolver(type_def_id, &arg_values, self.gcx)
+                        {
+                            return Ok(identity_value);
+                        }
+                    }
+
+                    // Fallback: return first arg value directly
+                    if let Some(first) = arg_values.into_iter().next() {
+                        return Ok(first);
+                    }
+                    return Ok(Value::Expr(lit(NULL)));
+                }
+
+                // Full construction: args match field count.
                 if arg_values.len() != field_names.len() {
                     return Err(self.make_error(format!(
-                        "Record constructor expects {} arguments, got {}",
+                        "Record constructor expects {} arguments (or {} for identity), got {}",
                         field_names.len(),
+                        ctor_param_count,
                         arg_values.len()
                     )));
                 }
 
                 let select_exprs: Vec<Expr> = field_names
                     .iter()
-                    .zip(arg_values)
+                    .zip(arg_values.iter())
                     .map(|(field_name, value)| {
                         let name_str = self.gcx.interner.resolve(*field_name);
                         match value {
-                            Value::Expr(expr) => expr.alias(name_str),
+                            Value::Expr(expr) => expr.clone().alias(name_str),
                             _ => lit(NULL).alias(name_str),
                         }
                     })
                     .collect();
 
-                let schema = build_schema(&select_exprs, Some(type_def_id), self.gcx);
+                // Build ctor_exprs from the ctor_param_names — extract matching values
+                let ctor_exprs: Vec<Expr> = if !ctor_param_names.is_empty() {
+                    ctor_param_names
+                        .iter()
+                        .filter_map(|param_name| {
+                            let idx = field_names.iter().position(|f| f == param_name)?;
+                            let alias = self.gcx.interner.resolve(*param_name).to_string();
+                            match &arg_values[idx] {
+                                Value::Expr(expr) => Some(expr.clone().alias(&*alias)),
+                                _ => Some(lit(NULL).alias(&*alias)),
+                            }
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                };
+
+                let all_exprs: Vec<Expr> = ctor_exprs
+                    .iter()
+                    .chain(select_exprs.iter())
+                    .cloned()
+                    .collect();
+                let schema = build_schema(&all_exprs, Some(type_def_id), self.gcx);
 
                 Ok(Value::PendingOutput(PendingOutput {
                     type_def_id,
                     select_exprs,
-                    ctor_exprs: vec![],
+                    ctor_exprs,
                     schema: std::sync::Arc::new(schema),
                 }))
             }
@@ -480,6 +551,30 @@ impl<'a> IrEvaluator<'a> {
 
             _ => Err(self.make_error("Field access on non-record value")),
         }
+    }
+
+    /// Resolve an identity expression for a PendingOutput used as a field value.
+    /// Calls the identity_resolver if available, otherwise falls back to ctor args.
+    fn resolve_identity_for_pending_output(
+        &self,
+        po: &crate::runtime::value::PendingOutput,
+    ) -> Expr {
+        if let Some(ref resolver) = self.gcx.identity_resolver {
+            // Build Value wrappers for ctor_exprs
+            let ctor_values: Vec<Value> = po
+                .ctor_exprs
+                .iter()
+                .map(|e| Value::Expr(e.clone()))
+                .collect();
+            if let Some(Value::Expr(expr)) = resolver(po.type_def_id, &ctor_values, self.gcx) {
+                return expr;
+            }
+        }
+        // Fallback: use first ctor arg if available
+        if let Some(first) = po.ctor_exprs.first() {
+            return first.clone();
+        }
+        lit(NULL)
     }
 
     fn make_error(&self, msg: impl Into<String>) -> FossilError {

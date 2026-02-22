@@ -36,6 +36,8 @@ pub struct RdfTypeAttrs {
     pub rdf_type: Option<String>,
     #[attr("rdf.base")]
     pub base: Option<String>,
+    #[attr("rdf.subject")]
+    pub subject: Option<String>,
 }
 
 #[derive(Debug, Clone, FromAttrs)]

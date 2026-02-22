@@ -242,20 +242,6 @@ impl TypeChecker {
                 }
             }
 
-            ExprKind::Reference { ctor_args, .. } => {
-                let type_def_id = *self.resolutions.expr_defs.get(&expr_id).ok_or_else(|| {
-                    FossilError::internal("typecheck", "Unresolved type in reference", loc)
-                })?;
-                let mut subst = Subst::default();
-                for arg in ctor_args {
-                    let (s, _) = self.infer(arg.value())?;
-                    subst = subst.compose(&s, &mut self.ir);
-                }
-                self.check_ctor_arg_count(type_def_id, ctor_args.len(), loc)?;
-                let named_ty = self.ir.named_type(type_def_id);
-                Ok((subst, named_ty))
-            }
-
             ExprKind::StringInterpolation { parts: _, exprs } => {
                 let mut subst = Subst::default();
                 for &expr in exprs {

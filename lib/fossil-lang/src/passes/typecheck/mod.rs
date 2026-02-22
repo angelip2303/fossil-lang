@@ -129,6 +129,20 @@ impl TypeChecker {
 
     fn init_record_constructors(&mut self) {
         use crate::context::DefKind;
+        use crate::ir::CtorParam;
+
+        // Collect ctor_params from IR statements for types that have them
+        let mut type_ctor_params: HashMap<DefId, Vec<CtorParam>> = HashMap::new();
+        for &stmt_id in &self.ir.root {
+            let stmt = self.ir.stmts.get(stmt_id);
+            if let StmtKind::Type { ctor_params, .. } = &stmt.kind {
+                if !ctor_params.is_empty() {
+                    if let Some(&def_id) = self.resolutions.stmt_defs.get(&stmt_id) {
+                        type_ctor_params.insert(def_id, ctor_params.clone());
+                    }
+                }
+            }
+        }
 
         let pairs: Vec<_> = self.type_index.keys().filter_map(|&type_def_id| {
             let type_def = self.gcx.definitions.get(type_def_id);
@@ -144,12 +158,28 @@ impl TypeChecker {
             let loc = ty.loc;
 
             if let TypeKind::Record(fields) = &ty.kind {
-                let param_types: Vec<_> = fields.fields.iter().map(|(_, ty)| *ty).collect();
+                // Clone field data to release immutable borrow before mutating ir
+                let field_types: Vec<_> = fields.fields.iter().map(|(_, ty)| *ty).collect();
+                let field_count = fields.len();
 
                 let return_ty = self.ir.types.alloc(Type {
                     loc,
                     kind: TypeKind::Named(type_def_id),
                 });
+
+                // When a type has ctor_params and they differ from field count,
+                // the Application-based constructor uses ctor_param types (identity construction).
+                // Full construction uses RecordInstance syntax: T(ctor_args) { fields }.
+                let param_types: Vec<_> =
+                    if let Some(ctor_params) = type_ctor_params.get(&type_def_id) {
+                        if ctor_params.len() != field_count {
+                            ctor_params.iter().map(|p| p.ty).collect()
+                        } else {
+                            field_types
+                        }
+                    } else {
+                        field_types
+                    };
 
                 let fn_ty = self.ir.types.alloc(Type {
                     loc,

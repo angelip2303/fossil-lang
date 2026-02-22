@@ -216,28 +216,6 @@ fn compile_chained_pipe_and_add_output() {
 }
 
 #[test]
-fn compile_add_output_produces_multi_output_projection() {
-    // +> flattens to a single Projection with multiple outputs
-    let prog = compile(
-        "type A do X: int end\n\
-         type B do Y: string end\n\
-         let x = 42\n\
-         x |> each row -> A { X = 1 } +> each row -> B { Y = \"hi\" }",
-    )
-    .unwrap();
-    let stmt = prog.ir.stmts.get(prog.ir.root[3]);
-    if let StmtKind::Expr(expr_id) = &stmt.kind {
-        let expr = prog.ir.exprs.get(*expr_id);
-        assert!(
-            matches!(&expr.kind, ExprKind::Projection { outputs, .. } if outputs.len() == 2),
-            "expected Projection with 2 outputs from +>, got {:?}", expr.kind
-        );
-    } else {
-        panic!("expected Expr stmt at root[3]");
-    }
-}
-
-#[test]
 fn compile_nested_field_access() {
     let prog = compile(
         "type Inner do Value: int end\n\
@@ -266,5 +244,61 @@ fn error_unknown_field_in_record_construction() {
     assert!(compile(
         "type T do Name: string end\n\
          let t = T { BadField = \"hi\" }",
+    ).is_err());
+}
+
+#[test]
+fn compile_record_ctor_args_no_body() {
+    // T("abc") with ctor_args but no fields is parsed as Application to RecordConstructor.
+    // This is how "references" work after removing `ref` — the constructor call resolves identity.
+    let prog = compile(
+        "type Inner(id: string) do Name: string end\n\
+         type Outer do Ref: Inner end\n\
+         let x = 42\n\
+         x |> each row -> Outer { Ref = Inner(\"abc\") }",
+    )
+    .unwrap();
+    let stmt = prog.ir.stmts.get(prog.ir.root[3]);
+    if let StmtKind::Expr(expr_id) = &stmt.kind {
+        let expr = prog.ir.exprs.get(*expr_id);
+        assert!(
+            matches!(&expr.kind, ExprKind::Projection { outputs, .. } if outputs.len() == 1),
+            "expected Projection with 1 output, got {:?}", expr.kind
+        );
+    } else {
+        panic!("expected Expr stmt at root[3]");
+    }
+}
+
+#[test]
+fn compile_inline_constructor_in_projection_field() {
+    // A constructor call used as a field value inside a projection output.
+    // This should compile without errors (auto-emit handles it at runtime).
+    let prog = compile(
+        "type Inner(id: string) do Name: string end\n\
+         type Outer do Ref: Inner end\n\
+         let x = 42\n\
+         x |> each row -> Outer { Ref = Inner(\"abc\") }",
+    )
+    .unwrap();
+    // The Projection has 1 explicit output; auto-emit happens at runtime
+    let stmt = prog.ir.stmts.get(prog.ir.root[3]);
+    if let StmtKind::Expr(expr_id) = &stmt.kind {
+        let expr = prog.ir.exprs.get(*expr_id);
+        assert!(
+            matches!(&expr.kind, ExprKind::Projection { outputs, .. } if outputs.len() == 1),
+            "expected Projection with 1 output (auto-emit is runtime), got {:?}", expr.kind
+        );
+    } else {
+        panic!("expected Expr stmt at root[3]");
+    }
+}
+
+#[test]
+fn error_ref_keyword_removed() {
+    // `ref T("abc")` should produce a syntax error (no longer valid)
+    assert!(compile(
+        "type T(id: string) do Name: string end\n\
+         let t = ref T(\"abc\")",
     ).is_err());
 }

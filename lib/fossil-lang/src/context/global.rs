@@ -5,6 +5,7 @@ use crate::ast::RecordField;
 use crate::common::PrimitiveType;
 use crate::context::{DefId, DefKind, Definitions, Interner, Symbol, TypeMetadata};
 use crate::runtime::storage::StorageConfig;
+use crate::runtime::value::Value;
 
 use crate::traits::provider::{FileReader, LocalFileReader, ModuleSpec, ProviderInfo, TypeProviderImpl};
 
@@ -23,9 +24,11 @@ pub struct TypeInfo<'a> {
 
 pub type ModuleGeneratorFn = Arc<dyn Fn(&TypeInfo) -> Option<ModuleSpec> + Send + Sync>;
 
-/// Hook for resolving the base URI of a type referenced by `ref Type(args)`.
-/// Returns `Some(base_string)` if the type has a base — the evaluator prepends it to the ctor arg.
-pub type RefResolverFn = Arc<dyn Fn(DefId, &GlobalContext) -> Option<String> + Send + Sync>;
+/// Generic identity resolver callback. Given a type's DefId, the constructor
+/// argument values, and the global context, returns an optional identity value.
+/// The core language has no knowledge of what this computes — the stdlib/RDF
+/// layer provides the implementation (e.g. generating subject IRIs).
+pub type IdentityResolverFn = Arc<dyn Fn(DefId, &[Value], &GlobalContext) -> Option<Value> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct GlobalContext {
@@ -34,7 +37,7 @@ pub struct GlobalContext {
     pub type_metadata: HashMap<DefId, Arc<TypeMetadata>>,
     pub registered_types: HashMap<DefId, Vec<(Symbol, BuiltInFieldType)>>,
     pub module_generators: Vec<ModuleGeneratorFn>,
-    pub ref_resolver: Option<RefResolverFn>,
+    pub identity_resolver: Option<IdentityResolverFn>,
     pub storage: StorageConfig,
     pub file_reader: Arc<dyn FileReader>,
 }
@@ -103,7 +106,7 @@ impl Default for GlobalContext {
             type_metadata: HashMap::new(),
             registered_types: HashMap::new(),
             module_generators: Vec::new(),
-            ref_resolver: None,
+            identity_resolver: None,
             storage: StorageConfig::default(),
             file_reader: Arc::new(LocalFileReader),
         }

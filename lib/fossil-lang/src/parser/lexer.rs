@@ -33,8 +33,6 @@ pub enum Token<'a> {
     StringType,
     #[token("float")]
     FloatType,
-    #[token("ref")]
-    Ref,
 
     #[token("=")]
     Eq,
@@ -96,7 +94,6 @@ impl Token<'_> {
             Token::BoolType => Some("bool"),
             Token::StringType => Some("string"),
             Token::FloatType => Some("float"),
-            Token::Ref => Some("ref"),
             _ => None,
         }
     }

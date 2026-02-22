@@ -86,10 +86,6 @@ pub enum ExprKind {
         provider: Path,
         args: Vec<ProviderArgument>,
     },
-    Reference {
-        type_path: Path,
-        ctor_args: Vec<Argument>,
-    },
 }
 
 #[derive(Debug)]

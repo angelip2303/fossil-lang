@@ -145,14 +145,6 @@ impl AstToIrConverter {
                 }
             }
 
-            ast::ExprKind::Reference { type_path, ctor_args } => {
-                let ir_ctor_args = self.convert_args(ast, ctor_args);
-                ExprKind::Reference {
-                    type_name: type_path.clone(),
-                    ctor_args: ir_ctor_args,
-                }
-            }
-
             ast::ExprKind::ProviderInvocation { .. } => {
                 unreachable!("ProviderInvocation should be expanded before conversion to IR")
             }

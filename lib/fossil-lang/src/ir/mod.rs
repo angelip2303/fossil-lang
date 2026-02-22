@@ -153,10 +153,6 @@ pub enum ExprKind {
         parts: Vec<Symbol>,
         exprs: Vec<ExprId>,
     },
-    Reference {
-        type_name: Path,
-        ctor_args: Vec<Argument>,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
