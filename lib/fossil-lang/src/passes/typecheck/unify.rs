@@ -135,7 +135,7 @@ impl TypeChecker {
                 params.iter().any(|p| self.occurs_in(var, *p)) || self.occurs_in(var, *ret)
             }
             TypeKind::Optional(inner) => self.occurs_in(var, *inner),
-            TypeKind::Primitive(_) | TypeKind::Named(_) | TypeKind::Unresolved(_) | TypeKind::Unit => false,
+            TypeKind::Primitive(_) | TypeKind::Named(_) | TypeKind::Unit => false,
         }
     }
 

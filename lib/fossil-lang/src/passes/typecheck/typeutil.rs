@@ -61,7 +61,6 @@ impl TypeEnv {
             TypeKind::Optional(inner) => self.free_vars_type(*inner, ir),
             TypeKind::Primitive(_)
             | TypeKind::Named(_)
-            | TypeKind::Unresolved(_)
             | TypeKind::Unit => HashSet::new(),
         }
     }
@@ -159,7 +158,6 @@ impl Subst {
 
             TypeKind::Primitive(_)
             | TypeKind::Named(_)
-            | TypeKind::Unresolved(_)
             | TypeKind::Unit => ty_id,
         };
 
@@ -229,7 +227,6 @@ impl TypeChecker {
                     name.to_string()
                 }
             }
-            TypeKind::Unresolved(path) => path.display(&self.gcx.interner),
             TypeKind::Function(params, ret) => {
                 let param_strs: Vec<_> = params.iter().map(|p| self.format_type(*p)).collect();
                 format!("({}) -> {}", param_strs.join(", "), self.format_type(*ret))

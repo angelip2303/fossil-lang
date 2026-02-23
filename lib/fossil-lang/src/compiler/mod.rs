@@ -4,10 +4,9 @@ use std::path::PathBuf;
 use crate::ast::Loc;
 use crate::context::extract_type_metadata;
 use crate::error::{FossilError, FossilErrors, FossilWarnings};
-use crate::passes;
-use crate::passes::resolve::IrResolver;
 use crate::passes::{
-    GlobalContext, IrProgram, expand::ProviderExpander, parse::Parser, typecheck::TypeChecker,
+    GlobalContext, IrProgram, expand::ProviderExpander, lower, parse::Parser,
+    typecheck::TypeChecker,
 };
 
 #[derive(Debug, Clone)]
@@ -67,10 +66,8 @@ impl Compiler {
         let parsed = Parser::parse_with_context(src, self.source_id, gcx)?;
         let expand_result = ProviderExpander::new((parsed.ast, parsed.gcx)).expand()?;
         let ty = extract_type_metadata(&expand_result.ast);
-        let ir = passes::convert::ast_to_ir(expand_result.ast);
-        let (ir, gcx, resolutions) = IrResolver::new(ir, expand_result.gcx)
-            .with_type_metadata(ty)
-            .resolve()?;
+        let (ir, gcx, resolutions) =
+            lower::lower_with_metadata(expand_result.ast, expand_result.gcx, ty)?;
         let program = TypeChecker::new(ir, gcx, resolutions).check()?;
 
         Ok(CompileResult {

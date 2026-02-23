@@ -12,33 +12,61 @@ type {
     RouteEfficiency(id: string),
 } = shex!(@mobility-vocab/urban-mobility.shex)
 
-let passenger_efficiency =
+let passenger_data =
     PassengerComfortData.load()
         |> each row -> PassengerComfortData {
             ..row,
             unit_identifier = row.unit_identifier |> String.extract("(\d+)"),
         }
 
-let pothole_telemetry =
+let pothole_data =
     PotholeTelemetryData.load()
         |> each row -> PotholeTelemetryData {
             ..row,
             bus_code = row.bus_code |> String.extract("(\d+)"),
         }
 
-let route_efficiency =
+let route_data =
     RouteEfficiencyData.load()
         |> each row -> RouteEfficiencyData {
             ..row,
             fleet_unit = row.fleet_unit |> String.extract("(\d+)"),
         }
 
-let weather_observation = csv!(@mobility-data/weather_observations.csv)
+let weather_data = csv!(@mobility-data/weather_observations.csv)
 
-passenger_efficiency
-|> join pothole_telemetry   on (unit_identifier, recorded_at) = (bus_code, timestamp)
-|> join route_efficiency    on (unit_identifier, recorded_at) = (fleet_unit, event_time)
-|> join weather_observation on (recorded_at) = (observation_time)
+passenger_data
+|> join pothole_data on (
+    unit_identifier,
+    recorded_at,
+    geo_location_lat,
+    geo_location_lon
+) = (
+    bus_code,
+    timestamp,
+    pothole_latitude,
+    pothole_longitude
+)
+|> join route_data on (
+    unit_identifier,
+    recorded_at,
+    geo_location_lat,
+    geo_location_lon
+) = (
+    fleet_unit,
+    event_time,
+    coord_lat,
+    coord_lng
+)
+|> join weather_data on (
+    recorded_at,
+    geo_location_lat,
+    geo_location_lon
+) = (
+    observation_time,
+    geo_point_latitude,
+    geo_point_longitude
+)
 |> each row -> WeatherObservation(row.unit_identifier) {
     dateTime = row.recorded_at,
     temperature = row.air_temperature_c,
@@ -48,11 +76,7 @@ passenger_efficiency
     visibility = row.visibility_km,
     weatherCondition = row.weather_condition,
     roadCondition = row.road_condition_estimated,
-    hasLocation = ref Location(row.geo_point_latitude, row.geo_point_longitude),
-}
-+> each row -> Location(row.geo_point_latitude, row.geo_point_longitude) {
-    latitude = row.geo_point_latitude,
-    longitude = row.geo_point_longitude
+    hasLocation = ref Location(row.geo_location_lat, row.geo_location_lon),
 }
 +> each row -> PassengerImpact(row.unit_identifier) {
     dateTime = row.recorded_at,
@@ -64,38 +88,30 @@ passenger_efficiency
     hasLocation = ref Location(row.geo_location_lat, row.geo_location_lon),
     relatedTo = ref Route(row.service_line),
 }
-+> each row -> Location(row.geo_location_lat, row.geo_location_lon) {
-    latitude = row.geo_location_lat,
-    longitude = row.geo_location_lon
-}
-+> each row -> PotholeEvent(row.unit_identifier) {
++> each row -> PotholeEvent("PotholeDetection_${row.unit_identifier}_${row.recorded_at}") {
     dateTime = row.recorded_at,
     severity = row.severity,
     confidence = row.confidence,
     sizeInMilimiters = row.size_mm,
     roadSurfaceCondition = row.road_surface_condition,
     detectedBy = ref Vehicle(row.unit_identifier),
-    hasLocation = ref Location(row.pothole_latitude, row.pothole_longitude),
+    hasLocation = ref Location(row.geo_location_lat, row.geo_location_lon),
     occursAt = ref WeatherObservation(row.unit_identifier),
     relatedTo = ref Route(row.service_line),
 }
-+> each row -> Location(row.pothole_latitude, row.pothole_longitude) {
-    latitude = row.pothole_latitude,
-    longitude = row.pothole_longitude
-}
 +> each row -> RouteEfficiency(row.unit_identifier) {
     dateTime = row.recorded_at,
-    altRouteFlag = row.fuel_extra_pct,
-    delayMinutes = row.detour_km,
+    altRouteFlag = row.alt_route_flag,
+    delayMinutes = row.delay_minutes,
     fuelExtraPercentage = row.fuel_extra_pct,
     detourDistanceInKilometers = row.detour_km,
     performedBy = ref Vehicle(row.unit_identifier),
-    hasLocation = ref Location(row.coord_lat, row.coord_lng),
+    hasLocation = ref Location(row.geo_location_lat, row.geo_location_lon),
     relatedTo = ref Route(row.service_line),
 }
-+> each row -> Location(row.coord_lat, row.coord_lng) {
-    latitude = row.coord_lat,
-    longitude = row.coord_lng
++> each row -> Location(row.geo_location_lat, row.geo_location_lon) {
+    latitude = row.geo_location_lat,
+    longitude = row.geo_location_lon
 }
 +> each row -> Vehicle(row.unit_identifier) {
     identifier = row.unit_identifier

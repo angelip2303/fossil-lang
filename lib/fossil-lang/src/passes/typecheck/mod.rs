@@ -198,7 +198,6 @@ impl TypeChecker {
     pub(crate) fn named_def_id(&self, ty_id: TypeId) -> Option<DefId> {
         match &self.ir.types.get(ty_id).kind {
             TypeKind::Named(def_id) => Some(*def_id),
-            TypeKind::Unresolved(_) => self.resolutions.type_defs.get(&ty_id).copied(),
             _ => None,
         }
     }
@@ -284,17 +283,17 @@ impl TypeChecker {
 
 /// Extract BuiltInFieldType from an IR type node.
 /// Returns None for types without a clear runtime representation (e.g. functions, records).
-/// Named/Unresolved types map to String (at runtime, record references become string identifiers/IRIs).
+/// Named types map to String (at runtime, record references become string identifiers/IRIs).
 fn extract_field_type(ir: &Ir, ty_id: TypeId) -> Option<BuiltInFieldType> {
     match &ir.types.get(ty_id).kind {
         TypeKind::Primitive(p) => Some(BuiltInFieldType::Required(*p)),
         TypeKind::Optional(inner_id) => match &ir.types.get(*inner_id).kind {
             TypeKind::Primitive(p) => Some(BuiltInFieldType::Optional(*p)),
-            TypeKind::Named(_) | TypeKind::Unresolved(_) =>
+            TypeKind::Named(_) =>
                 Some(BuiltInFieldType::Optional(PrimitiveType::String)),
             _ => None,
         },
-        TypeKind::Named(_) | TypeKind::Unresolved(_) =>
+        TypeKind::Named(_) =>
             Some(BuiltInFieldType::Required(PrimitiveType::String)),
         _ => None,
     }

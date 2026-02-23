@@ -184,7 +184,6 @@ pub struct Type {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeKind {
     Named(DefId),
-    Unresolved(Path),
     Unit,
     Primitive(PrimitiveType),
     Function(Vec<TypeId>, TypeId),

@@ -1,10 +1,9 @@
 use crate::ast::Ast;
 use crate::ir;
 
-pub mod convert;
 pub mod expand;
+pub mod lower;
 pub mod parse;
-pub mod resolve;
 pub mod typecheck;
 
 pub use crate::context::GlobalContext;

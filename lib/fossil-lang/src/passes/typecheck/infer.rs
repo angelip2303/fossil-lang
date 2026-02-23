@@ -300,11 +300,9 @@ mod tests {
             .expand()
             .expect("expand failed");
         let ty = crate::context::extract_type_metadata(&expand_result.ast);
-        let ir = crate::passes::convert::ast_to_ir(expand_result.ast);
-        let (ir, gcx, resolutions) = crate::passes::resolve::IrResolver::new(ir, expand_result.gcx)
-            .with_type_metadata(ty)
-            .resolve()
-            .expect("resolve failed");
+        let (ir, gcx, resolutions) =
+            crate::passes::lower::lower_with_metadata(expand_result.ast, expand_result.gcx, ty)
+                .expect("lower failed");
         super::TypeChecker::new(ir, gcx, resolutions)
             .check()
             .expect("typecheck failed")
@@ -354,11 +352,9 @@ mod tests {
             .expand()
             .expect("expand failed");
         let ty = crate::context::extract_type_metadata(&expand_result.ast);
-        let ir = crate::passes::convert::ast_to_ir(expand_result.ast);
-        let (ir, gcx, resolutions) = crate::passes::resolve::IrResolver::new(ir, expand_result.gcx)
-            .with_type_metadata(ty)
-            .resolve()
-            .expect("resolve failed");
+        let (ir, gcx, resolutions) =
+            crate::passes::lower::lower_with_metadata(expand_result.ast, expand_result.gcx, ty)
+                .expect("lower failed");
         let result = super::TypeChecker::new(ir, gcx, resolutions).check();
         assert!(result.is_err(), "expected typecheck error for missing field Z");
     }
