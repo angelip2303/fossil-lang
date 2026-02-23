@@ -154,6 +154,20 @@ fn parse_template(
     parts
 }
 
+/// Build a subject IRI expression for a reference field.
+///
+/// Extracts the base prefix from the referenced type's subject template
+/// (everything before the first `{`) and prepends it to the identity expression.
+fn build_ref_identity_expr(
+    def_id: DefId,
+    identity_expr: &Expr,
+    gcx: &GlobalContext,
+) -> Option<Expr> {
+    let template = RdfTypeAttrs::from_def_id(def_id, gcx)?.subject?;
+    let base = &template[..template.find('{')?];
+    Some(concat_str(vec![lit(base), identity_expr.clone().cast(DataType::String)], "", true))
+}
+
 /// Check if a field's type is a reference to another record type.
 /// Returns the DefId of the referenced type if so.
 fn field_ref_type(
@@ -242,16 +256,19 @@ fn serialize_rdf(
                     && let Some(field_sym) = interner.lookup(field_name)
                     && let Some(uri) = field_uris.get(&field_sym)
                 {
-                    // Reference field → build subject IRI for the referenced type
+                    // Reference field → build subject IRI from base + identity
                     if let Some(ref_def_id) = field_ref_type(
                         def_id, field_sym, ctx.ir, ctx.type_index,
                     ) {
-                        if let Some(ref_expr) = build_subject_expr(
-                            ref_def_id, &[inner.as_ref().clone()], ctx.gcx, ctx.type_index,
+                        if let Some(ref_expr) = build_ref_identity_expr(
+                            ref_def_id, inner.as_ref(), ctx.gcx,
                         ) {
                             selection.push(ref_expr.alias(uri));
                             continue;
                         }
+                        // No template → use raw value as-is (already a full IRI)
+                        selection.push(inner.as_ref().clone().alias(uri));
+                        continue;
                     }
                     // Normal field — cast to registered type + alias to predicate URI
                     let prim = field_primitive_type(def_id, field_sym, ctx.gcx);

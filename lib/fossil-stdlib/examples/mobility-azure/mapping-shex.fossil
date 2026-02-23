@@ -50,6 +50,10 @@ passenger_efficiency
     roadCondition = row.road_condition_estimated,
     hasLocation = ref Location(row.geo_point_latitude, row.geo_point_longitude),
 }
++> each row -> Location(row.geo_point_latitude, row.geo_point_longitude) {
+    latitude = row.geo_point_latitude,
+    longitude = row.geo_point_longitude
+}
 +> each row -> PassengerImpact(row.unit_identifier) {
     dateTime = row.recorded_at,
     comfortScore = row.comfort_score,
@@ -59,6 +63,10 @@ passenger_efficiency
     reportedBy = ref Vehicle(row.unit_identifier),
     hasLocation = ref Location(row.geo_location_lat, row.geo_location_lon),
     relatedTo = ref Route(row.service_line),
+}
++> each row -> Location(row.geo_location_lat, row.geo_location_lon) {
+    latitude = row.geo_location_lat,
+    longitude = row.geo_location_lon
 }
 +> each row -> PotholeEvent(row.unit_identifier) {
     dateTime = row.recorded_at,
@@ -71,6 +79,10 @@ passenger_efficiency
     occursAt = ref WeatherObservation(row.unit_identifier),
     relatedTo = ref Route(row.service_line),
 }
++> each row -> Location(row.pothole_latitude, row.pothole_longitude) {
+    latitude = row.pothole_latitude,
+    longitude = row.pothole_longitude
+}
 +> each row -> RouteEfficiency(row.unit_identifier) {
     dateTime = row.recorded_at,
     altRouteFlag = row.fuel_extra_pct,
@@ -81,4 +93,14 @@ passenger_efficiency
     hasLocation = ref Location(row.coord_lat, row.coord_lng),
     relatedTo = ref Route(row.service_line),
 }
-|> Rdf.serialize(@mobility-data/new.nq)
++> each row -> Location(row.coord_lat, row.coord_lng) {
+    latitude = row.coord_lat,
+    longitude = row.coord_lng
+}
++> each row -> Vehicle(row.unit_identifier) {
+    identifier = row.unit_identifier
+}
++> each row -> Route(row.service_line) {
+    identifier = row.service_line
+}
+|> Rdf.serialize(@mobility-data/mobility.nq)

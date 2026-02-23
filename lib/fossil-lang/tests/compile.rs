@@ -356,3 +356,14 @@ fn ref_keyword_produces_reference() {
          let t = ref T(\"abc\")",
     ).is_ok());
 }
+
+#[test]
+fn ref_in_projection_field() {
+    // `ref Inner(1, 2)` as a field value in a projection should compile
+    compile(
+        "type Inner(a: int, b: int) do X: int end\n\
+         type Outer do Ref: Inner end\n\
+         let x = 42\n\
+         x |> each row -> Outer { Ref = ref Inner(1, 2) }",
+    ).unwrap();
+}

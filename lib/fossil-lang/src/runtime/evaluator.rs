@@ -262,33 +262,15 @@ impl<'a> IrEvaluator<'a> {
                 match value {
                     Value::Expr(expr) => Ok(expr.alias(name_str)),
                     Value::Reference { args, .. } => {
-                        // Store the raw ctor arg value(s) — the serializer discovers
-                        // that this field is a reference by consulting the IR and
-                        // builds the full subject IRI via build_subject_expr.
-                        let raw = if args.len() == 1 {
-                            args.into_iter().next()
-                                .and_then(|v| match v { Value::Expr(e) => Some(e), _ => None })
-                                .unwrap_or(lit(NULL))
-                        } else {
-                            // Multi-arg: concatenate with "_" separator for composite keys
-                            let parts: Vec<Expr> = args.into_iter()
-                                .flat_map(|v| match v {
-                                    Value::Expr(e) => vec![e.cast(polars::prelude::DataType::String)],
-                                    _ => vec![lit("null")],
-                                })
-                                .collect();
-                            if parts.is_empty() { lit(NULL) } else { concat_str(parts, "_", true) }
-                        };
-                        Ok(raw.alias(name_str))
+                        let exprs: Vec<Expr> = args.into_iter()
+                            .map(|v| match v { Value::Expr(e) => e, _ => lit(NULL) })
+                            .collect();
+                        Ok(identity_from_exprs(&exprs).alias(name_str))
                     }
                     Value::PendingOutput(po) => {
-                        // Auto-emit: constructor call in field-value position.
-                        // Use first ctor arg as the identity expression.
-                        let identity_expr = po.ctor_args.first()
-                            .cloned()
-                            .unwrap_or(lit(NULL));
+                        let identity = identity_from_exprs(&po.ctor_args);
                         self.auto_emit_outputs.push(po);
-                        Ok(identity_expr.alias(name_str))
+                        Ok(identity.alias(name_str))
                     }
                     _ => Ok(lit(NULL).alias(name_str)),
                 }
@@ -315,12 +297,17 @@ impl<'a> IrEvaluator<'a> {
             }
         }
 
+        let ctor_param_names: Vec<Symbol> = type_def_id
+            .and_then(|id| self.type_index.get(id))
+            .map(|info| info.ctor_param_names.clone())
+            .unwrap_or_default();
+
         let all_exprs: Vec<Expr> = ctor_exprs
             .iter()
             .chain(select_exprs.iter())
             .cloned()
             .collect();
-        let schema = build_schema(&all_exprs, type_def_id, self.gcx);
+        let schema = build_schema(&all_exprs, type_def_id, self.gcx, &ctor_param_names);
 
         let resolved_type_def_id = type_def_id.ok_or_else(|| self.make_error("Named record must resolve to a type definition"))?;
 
@@ -533,7 +520,7 @@ impl<'a> IrEvaluator<'a> {
                     .chain(select_exprs.iter())
                     .cloned()
                     .collect();
-                let schema = build_schema(&all_exprs, Some(type_def_id), self.gcx);
+                let schema = build_schema(&all_exprs, Some(type_def_id), self.gcx, &ctor_param_names);
 
                 Ok(Value::PendingOutput(OutputSpec {
                     type_def_id,
@@ -573,12 +560,35 @@ impl<'a> IrEvaluator<'a> {
     }
 }
 
+/// Build a single identity expression from ctor args.
+/// Single arg: used as-is (stripped of alias). Multiple: concatenated with "_".
+fn identity_from_exprs(exprs: &[Expr]) -> Expr {
+    match exprs.len() {
+        0 => lit(NULL),
+        1 => strip_alias(&exprs[0]),
+        _ => {
+            let parts: Vec<Expr> = exprs.iter()
+                .map(|e| strip_alias(e).cast(DataType::String))
+                .collect();
+            concat_str(parts, "_", true)
+        }
+    }
+}
+
+fn strip_alias(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Alias(inner, _) => inner.as_ref().clone(),
+        other => other.clone(),
+    }
+}
+
 fn build_schema(
     exprs: &[Expr],
     type_def_id: Option<DefId>,
     gcx: &GlobalContext,
+    ctor_param_names: &[Symbol],
 ) -> Schema {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     // Build name→DataType map from registered types if available
     let type_map: HashMap<&str, DataType> = type_def_id
@@ -594,6 +604,10 @@ fn build_schema(
         })
         .unwrap_or_default();
 
+    let ctor_names: HashSet<&str> = ctor_param_names.iter()
+        .map(|s| gcx.interner.resolve(*s))
+        .collect();
+
     let fields: Vec<_> = exprs
         .iter()
         .filter_map(|expr| {
@@ -602,8 +616,10 @@ fn build_schema(
                     .get(name.as_str())
                     .cloned()
                     .unwrap_or_else(|| {
-                        #[cfg(debug_assertions)]
-                        eprintln!("[fossil] field '{}' not found in type_map, using Unknown", name);
+                        if !ctor_names.contains(name.as_str()) {
+                            #[cfg(debug_assertions)]
+                            eprintln!("[fossil] field '{}' not found in type_map, using Unknown", name);
+                        }
                         DataType::Unknown(Default::default())
                     });
                 Some(Field::new(name.clone(), dtype))

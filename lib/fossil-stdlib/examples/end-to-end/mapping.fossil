@@ -1,19 +1,17 @@
 let data = csv!("lib/fossil-stdlib/examples/end-to-end/people.csv")
 
-// #[rdf(subject = "http://example.com/person/{id}")]
-// type Person(id: string) do
-//     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
-//     #[validate(min_length = 2)]
-//     name: string
+#[rdf(subject = "http://example.com/person/{id}")]
+type Person(id: string) do
+    #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
+    #[validate(min_length = 2)]
+    name: string
 
-//     #[rdf(uri = "http://xmlns.com/foaf/0.1/age")]
-//     age: int
-// end
+    #[rdf(uri = "http://xmlns.com/foaf/0.1/age")]
+    age: int
+end
 
-type Person(id: string) = shex!("lib/fossil-stdlib/examples/end-to-end/person.shex")
+// type Person(id: string) = shex!("lib/fossil-stdlib/examples/end-to-end/person.shex")
 
-let mapped = data
-    |> each row -> Person(row.email) { name = row.name, age = row.age }
-
-mapped |> Person.validate() |> Rdf.serialize("actual.nq")
-mapped |> Person.errors() |> Report.csv("errors.csv")
+data
+|> each row -> Person(row.email) { name = row.name, age = row.age }
+|> Rdf.serialize("actual.nq")
