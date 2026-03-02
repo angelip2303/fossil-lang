@@ -330,7 +330,7 @@ mod tests {
 
     impl TypeProviderImpl for MockProvider {
         fn info(&self) -> ProviderInfo {
-            ProviderInfo { extensions: &[], kind: ProviderKind::Schema }
+            ProviderInfo { extensions: vec![], kind: ProviderKind::Schema }
         }
 
         fn provide(

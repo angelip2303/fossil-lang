@@ -37,7 +37,7 @@ pub struct IfcProvider;
 
 impl TypeProviderImpl for IfcProvider {
     fn info(&self) -> ProviderInfo {
-        ProviderInfo { extensions: &["ifc"], kind: ProviderKind::Data }
+        ProviderInfo { extensions: vec!["ifc"], kind: ProviderKind::Data }
     }
 
     fn param_info(&self) -> Vec<ProviderParamInfo> {

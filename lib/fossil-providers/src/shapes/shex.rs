@@ -10,6 +10,7 @@ use fossil_lang::traits::provider::{
 use iri_s::IriS;
 use shex_ast::ast::{ObjectValue, Schema, ShapeExpr, ShapeExprLabel, StringFacet, TripleExpr, ValueSetValue, XsFacet};
 use shex_ast::compact::ShExParser;
+use shex_ast::ShExFormat;
 
 use crate::shapes::{ShapeField, ValidateValue, extract_local_name, xsd_to_fossil_type};
 use crate::utils::{resolve_path, validate_extension, validate_path};
@@ -18,9 +19,20 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
 pub struct ShexProvider;
 
+/// Supported ShEx formats (ShExR/RDF is niche — defer).
+const SUPPORTED_SHEX_FORMATS: &[ShExFormat] = &[ShExFormat::ShExC, ShExFormat::ShExJ];
+
+fn shex_extensions() -> Vec<&'static str> {
+    SUPPORTED_SHEX_FORMATS.iter().flat_map(|f| f.extensions()).collect()
+}
+
+fn detect_shex_format(ext: &str) -> Option<ShExFormat> {
+    SUPPORTED_SHEX_FORMATS.iter().find(|f| f.extensions().contains(&ext)).cloned()
+}
+
 impl TypeProviderImpl for ShexProvider {
     fn info(&self) -> ProviderInfo {
-        ProviderInfo { extensions: &["shex"], kind: ProviderKind::Schema }
+        ProviderInfo { extensions: shex_extensions(), kind: ProviderKind::Schema }
     }
 
     fn param_info(&self) -> Vec<ProviderParamInfo> {
@@ -43,14 +55,19 @@ impl TypeProviderImpl for ShexProvider {
     ) -> Result<ProviderOutput, FossilError> {
         let path_str = args.require_string("path", "shex", loc)?;
         let path = resolve_path(path_str);
-        validate_extension(path.as_ref(), &["shex"], loc)?;
+        let extensions = shex_extensions();
+        validate_extension(path.as_ref(), &extensions, loc)?;
         validate_path(path.as_ref(), loc)?;
+
+        let path_ref = path.as_ref();
+        let ext = path_ref.extension().unwrap_or_default();
+        let format = detect_shex_format(ext).unwrap_or(ShExFormat::ShExC);
 
         let path_str = path.to_str().to_string();
         let shex_content = ctx.file_reader.read_to_string(&path_str)
             .map_err(|e| FossilError::read_error(path_str.clone(), e, loc))?;
 
-        let schema = parse_shex_schema(&shex_content, loc)?;
+        let schema = parse_shex_schema(&shex_content, &format, loc)?;
 
         // Count validation for multi-type
         if let Some(expected) = ctx.expected_type_count {
@@ -63,7 +80,8 @@ impl TypeProviderImpl for ShexProvider {
             }
         }
 
-        let extraction = extract_shape_fields(&schema, type_name, loc)?;
+        let index = ctx.entry_index.unwrap_or(0);
+        let extraction = extract_shape_at(&schema, index, type_name, loc)?;
         let fields = shex_fields_to_field_specs(extraction.fields, ctx.interner, loc);
         let type_attrs = build_rdf_type_attribute(
             &schema, &extraction.rdf_type, type_name, &ctx.ctor_params, ctx.interner, loc,
@@ -75,10 +93,21 @@ impl TypeProviderImpl for ShexProvider {
     }
 }
 
-fn parse_shex_schema(content: &str, loc: Loc) -> Result<Schema, FossilError> {
-    let source_iri = IriS::new_unchecked("file:///schema.shex");
-    ShExParser::parse(content, None, &source_iri)
-        .map_err(|e| FossilError::parse_error("ShEx", e.to_string(), loc))
+fn parse_shex_schema(content: &str, format: &ShExFormat, loc: Loc) -> Result<Schema, FossilError> {
+    match format {
+        ShExFormat::ShExC => {
+            let source_iri = IriS::new_unchecked("file:///schema.shex");
+            ShExParser::parse(content, None, &source_iri)
+                .map_err(|e| FossilError::parse_error("ShEx", e.to_string(), loc))
+        }
+        ShExFormat::ShExJ => {
+            Schema::from_reader(content.as_bytes())
+                .map_err(|e| FossilError::parse_error("ShExJ", e.to_string(), loc))
+        }
+        ShExFormat::RDFFormat(_) => {
+            Err(FossilError::parse_error("ShEx", "RDF-based ShEx formats are not supported".to_string(), loc))
+        }
+    }
 }
 
 /// Build an `#[rdf(key = "value")]` attribute.
@@ -146,46 +175,37 @@ struct ShapeExtractionResult {
     warnings: FossilWarnings,
 }
 
-/// Use type_name to match shapes by local name
-fn shape_label_matches(label: &ShapeExprLabel, name: &str) -> bool {
-    match label {
-        ShapeExprLabel::IriRef { value } => {
-            let iri_str = value.to_string();
-            extract_local_name(&iri_str) == name || iri_str.ends_with(name)
-        }
-        ShapeExprLabel::BNode { value } => value.to_string() == name,
-        ShapeExprLabel::Start => name == "start" || name == "Start",
-    }
-}
-
-fn extract_shape_fields(
+/// Extract shape fields by positional index.
+fn extract_shape_at(
     schema: &Schema,
-    shape_name: &str,
+    index: usize,
+    type_name: &str,
     loc: Loc,
 ) -> Result<ShapeExtractionResult, FossilError> {
     let shapes = schema
         .shapes()
         .ok_or_else(|| FossilError::data_error("schema has no shapes defined", loc))?;
 
-    for shape_decl in shapes {
-        if shape_label_matches(shape_decl.id(), shape_name) {
-            let mut fields = Vec::new();
-            let mut rdf_type = None;
-            let mut warnings = FossilWarnings::new();
-            extract_fields_from_shape_expr(
-                &shape_decl.shape_expr,
-                &mut fields,
-                &mut rdf_type,
-                &mut warnings,
-                schema,
-                shape_name,
-                loc,
-            );
-            return Ok(ShapeExtractionResult { fields, rdf_type, warnings });
-        }
-    }
+    let shape_decl = shapes.get(index).ok_or_else(|| {
+        FossilError::data_error(
+            format!("shape index {} out of bounds (file has {} shapes)", index, shapes.len()),
+            loc,
+        )
+    })?;
 
-    Err(FossilError::undefined("shape", shape_name, loc))
+    let mut fields = Vec::new();
+    let mut rdf_type = None;
+    let mut warnings = FossilWarnings::new();
+    extract_fields_from_shape_expr(
+        &shape_decl.shape_expr,
+        &mut fields,
+        &mut rdf_type,
+        &mut warnings,
+        schema,
+        type_name,
+        loc,
+    );
+    Ok(ShapeExtractionResult { fields, rdf_type, warnings })
 }
 
 fn extract_fields_from_shape_expr(

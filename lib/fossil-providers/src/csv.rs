@@ -75,7 +75,7 @@ pub struct CsvProvider;
 
 impl TypeProviderImpl for CsvProvider {
     fn info(&self) -> ProviderInfo {
-        ProviderInfo { extensions: &["csv"], kind: ProviderKind::Both }
+        ProviderInfo { extensions: vec!["csv"], kind: ProviderKind::Both }
     }
 
     fn param_info(&self) -> Vec<ProviderParamInfo> {

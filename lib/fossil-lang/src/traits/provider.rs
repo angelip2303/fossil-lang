@@ -34,7 +34,7 @@ pub enum ProviderKind {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProviderInfo {
-    pub extensions: &'static [&'static str],
+    pub extensions: Vec<&'static str>,
     pub kind: ProviderKind,
 }
 
@@ -258,6 +258,9 @@ pub struct ProviderContext<'a> {
     pub file_reader: &'a dyn FileReader,
     pub ctor_params: Vec<Symbol>,
     pub expected_type_count: Option<usize>,
+    /// Positional index of this entry within a multi-type destructure.
+    /// When `Some(i)`, providers should use shape at position `i` instead of name-matching.
+    pub entry_index: Option<usize>,
 }
 
 pub trait TypeProviderImpl: Send + Sync {

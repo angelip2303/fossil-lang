@@ -226,7 +226,8 @@ impl ProviderExpander {
             let caching_reader = CachingFileReader::new(self.gcx.file_reader.as_ref());
             entries
                 .iter()
-                .map(|entry| {
+                .enumerate()
+                .map(|(i, entry)| {
                     let type_name_str = self.gcx.interner.resolve(entry.name).to_string();
                     let ctor_params: Vec<Symbol> = entry.ctor_params.iter().map(|p| p.name).collect();
                     let mut ctx = ProviderContext {
@@ -235,6 +236,7 @@ impl ProviderExpander {
                         file_reader: &caching_reader,
                         ctor_params,
                         expected_type_count: if entries.len() > 1 { Some(entries.len()) } else { None },
+                        entry_index: Some(i),
                     };
                     resolved.imp.provide(&resolved.args, &mut ctx, &type_name_str, loc)
                 })
@@ -314,6 +316,7 @@ impl ProviderExpander {
                 file_reader: self.gcx.file_reader.as_ref(),
                 ctor_params: vec![],
                 expected_type_count: None,
+                entry_index: None,
             };
             resolved.imp.provide(&resolved.args, &mut ctx, &binding_name_str, loc)?
         };

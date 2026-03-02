@@ -1,0 +1,53 @@
+let data = csv!(@fc-data/players.csv)
+
+type {
+  SportsTeam(id: int), SportsOrganization(id: string),
+  Player(id: int), City(id: string), Country(id: string),
+  Role(id: int), MonetaryAmount(id: int), EmploymentAgency(id: string)
+} = shex!(@fc-vocab/players.shex)
+
+data
+|> each row -> Player(row.player_id) {
+  identifier = row.player_id,
+  givenName = row.first_name,
+  familyName = row.last_name,
+  height = row.height_in_cm,
+  birthDate = row.date_of_birth,
+  image = row.image_url,
+  url = row.url,
+  goodLeg = row.foot,
+  birthPlace = ref City(String.extract(row.city_of_birth, "\s")),
+  nationality = ref Country(String.extract(row.country_of_citizenship, "\s")),
+  hasOccupation = ref Role(row.player_id),
+  netWorth = ref MonetaryAmount(row.player_id),
+  contactPoint = ref EmploymentAgency(String.extract(row.agent_name, "\s"))
+}
++> each row -> City(String.extract(row.city_of_birth, "\s")) {
+  name = row.city_of_birth,
+  containedInPlace = ref Country(String.extract(row.country_of_citizenship, "\s"))
+}
++> each row -> Country(String.extract(row.country_of_citizenship, "\s")) {
+  name = row.country_of_citizenship
+}
++> each row -> Role(row.player_id) {
+  endDate = row.contract_expiration_date,
+  roleName = row.position
+}
++> each row -> MonetaryAmount(row.player_id) {
+  value = row.market_value_in_eur,
+  maxValue = row.highest_market_value_in_eur,
+  currency = "EUR"
+}
++> each row -> EmploymentAgency(String.extract(row.agent_name, "\s")) {
+  name = row.agent_name
+}
++> each row -> SportsTeam(row.current_club_id) {
+  identifier = row.current_club_id,
+  name = row.current_club_name,
+  memberOf = ref SportsOrganization(row.current_club_domestic_competition_id),
+  athlete = ref Player(row.player_id),
+}
++> each row -> SportsOrganization(row.current_club_domestic_competition_id) {
+  identifier = row.current_club_domestic_competition_id
+}
+|> Rdf.serialize(@fc-data/players.ttl)
