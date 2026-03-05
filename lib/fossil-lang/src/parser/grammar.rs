@@ -432,11 +432,47 @@ where
         .map(|expr| expr.0)
         .boxed();
 
+        // Coalesce: base ?? default (low precedence, right-associative)
+        let coalesce = base.clone()
+            .then(
+                just(Token::DoubleQuestion)
+                    .ignore_then(base.clone())
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .map(|(first, rest)| {
+                if rest.is_empty() {
+                    return first;
+                }
+                // Right-associative: a ?? b ?? c → a ?? (b ?? c)
+                let mut iter = rest.into_iter().rev();
+                let mut current = iter.next().unwrap();
+                for val in iter {
+                    let loc = {
+                        let ast = ctx.ast.borrow();
+                        ast.exprs.get(val).loc.merge(ast.exprs.get(current).loc)
+                    };
+                    current = ctx.alloc_expr(
+                        ExprKind::Coalesce { value: val, default: current },
+                        loc,
+                    );
+                }
+                let loc = {
+                    let ast = ctx.ast.borrow();
+                    ast.exprs.get(first).loc.merge(ast.exprs.get(current).loc)
+                };
+                ctx.alloc_expr(
+                    ExprKind::Coalesce { value: first, default: current },
+                    loc,
+                )
+            })
+            .boxed();
+
         // Pipe chain: base (|> | +>) (each param -> expr | join ... on ... | call_expr)
         let projection_rhs = just(Token::Each)
             .ignore_then(parse_symbol(ctx))
             .then_ignore(just(Token::Arrow))
-            .then(base.clone());
+            .then(coalesce.clone());
 
         // Parse join columns: either single symbol or (sym1, sym2, ...)
         let join_cols = parse_symbol(ctx)
@@ -454,7 +490,7 @@ where
             .or_not();
 
         let join_rhs = just(Token::Join)
-            .ignore_then(base.clone())
+            .ignore_then(coalesce.clone())
             .then_ignore(just(Token::On))
             .then(join_cols.clone())
             .then_ignore(just(Token::Eq))
@@ -470,10 +506,10 @@ where
         let pipe_rhs = chain_op.then(choice((
             projection_rhs.map(|(param, output)| PipeRhs::Projection(param, output)),
             join_rhs,
-            base.clone().map(PipeRhs::Call),
+            coalesce.clone().map(PipeRhs::Call),
         )));
 
-        base.then(pipe_rhs.repeated().collect::<Vec<_>>())
+        coalesce.then(pipe_rhs.repeated().collect::<Vec<_>>())
             .map(|(source, stages)| {
                 if stages.is_empty() {
                     return source;

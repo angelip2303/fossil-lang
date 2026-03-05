@@ -20,9 +20,16 @@ pub fn init(gcx: &mut GlobalContext) {
     });
     gcx.register_module("String", ModuleSpec {
         functions: vec![
-            FunctionDef::new("extract", string::StringExtractFunction),
             FunctionDef::new("replace", string::StringReplaceFunction),
-            FunctionDef::new("replace_all", string::StringReplaceAllFunction),
+            FunctionDef::new("trim", string::StringTrimFunction),
+            FunctionDef::new("upper", string::StringUpperFunction),
+            FunctionDef::new("lower", string::StringLowerFunction),
+            FunctionDef::new("length", string::StringLengthFunction),
+            FunctionDef::new("contains", string::StringContainsFunction),
+            FunctionDef::new("starts_with", string::StringStartsWithFunction),
+            FunctionDef::new("ends_with", string::StringEndsWithFunction),
+            FunctionDef::new("slug", string::StringSlugFunction),
+            FunctionDef::new("concat", string::StringConcatFunction),
         ],
     });
 

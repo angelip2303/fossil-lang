@@ -62,6 +62,8 @@ pub enum Token<'a> {
     RBrace,
     #[token("!")]
     Bang,
+    #[token("??")]
+    DoubleQuestion,
     #[token("?")]
     Question,
     #[token("#[")]

@@ -99,6 +99,11 @@ pub enum ExprKind {
         provider: Path,
         args: Vec<ProviderArgument>,
     },
+    /// `expr ?? default` — null coalescing operator.
+    Coalesce {
+        value: ExprId,
+        default: ExprId,
+    },
     /// `ref Type(args)` — explicit reference to another record type.
     Ref {
         type_path: Path,

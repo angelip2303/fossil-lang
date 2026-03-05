@@ -16,17 +16,17 @@ data
   image = row.image_url,
   url = row.url,
   goodLeg = row.foot,
-  birthPlace = ref City(String.extract(row.city_of_birth, "\s")),
-  nationality = ref Country(String.extract(row.country_of_citizenship, "\s")),
+  birthPlace = ref City(String.slug(row.city_of_birth)),
+  nationality = ref Country(String.slug(row.country_of_citizenship)),
   hasOccupation = ref Role(row.player_id),
   netWorth = ref MonetaryAmount(row.player_id),
-  contactPoint = ref EmploymentAgency(String.extract(row.agent_name, "\s"))
+  contactPoint = ref EmploymentAgency(String.slug(row.agent_name))
 }
-+> each row -> City(String.extract(row.city_of_birth, "\s")) {
++> each row -> City(String.slug(row.city_of_birth)) {
   name = row.city_of_birth,
-  containedInPlace = ref Country(String.extract(row.country_of_citizenship, "\s"))
+  containedInPlace = ref Country(String.slug(row.country_of_citizenship))
 }
-+> each row -> Country(String.extract(row.country_of_citizenship, "\s")) {
++> each row -> Country(String.slug(row.country_of_citizenship)) {
   name = row.country_of_citizenship
 }
 +> each row -> Role(row.player_id) {
@@ -38,7 +38,7 @@ data
   maxValue = row.highest_market_value_in_eur,
   currency = "EUR"
 }
-+> each row -> EmploymentAgency(String.extract(row.agent_name, "\s")) {
++> each row -> EmploymentAgency(String.slug(row.agent_name)) {
   name = row.agent_name
 }
 +> each row -> SportsTeam(row.current_club_id) {

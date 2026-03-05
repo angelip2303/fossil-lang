@@ -315,6 +315,7 @@ fn serialize_oxigraph(
                 let rdf_batch = lazy_batch
                     .clone()
                     .select(selection.clone())
+                    .unique(None, UniqueKeepStrategy::First)
                     .collect()
                     .map_err(|e| {
                         PolarsError::ComputeError(

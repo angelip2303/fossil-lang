@@ -153,6 +153,11 @@ pub enum ExprKind {
         parts: Vec<Symbol>,
         exprs: Vec<ExprId>,
     },
+    /// `expr ?? default` — null coalescing operator.
+    Coalesce {
+        value: ExprId,
+        default: ExprId,
+    },
     /// `ref Type(args)` — explicit reference to another record type.
     Ref {
         type_name: Path,

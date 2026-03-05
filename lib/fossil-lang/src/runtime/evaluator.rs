@@ -156,6 +156,21 @@ impl<'a> IrEvaluator<'a> {
                 self.eval_string_interpolation(parts, exprs)
             }
 
+            ExprKind::Coalesce { value, default } => {
+                let value_val = self.eval(*value)?;
+                let default_val = self.eval(*default)?;
+                match (value_val, default_val) {
+                    (Value::Expr(v), Value::Expr(d)) => {
+                        Ok(Value::Expr(
+                            when(v.clone().is_not_null())
+                                .then(v)
+                                .otherwise(d),
+                        ))
+                    }
+                    (v, _) => Ok(v),
+                }
+            }
+
             ExprKind::Ref { args, .. } => {
                 let type_def_id = self.resolutions.expr_defs.get(&expr_id).copied()
                     .ok_or_else(|| self.make_error("Unresolved type in ref expression"))?;

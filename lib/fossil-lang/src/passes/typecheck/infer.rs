@@ -252,6 +252,27 @@ impl TypeChecker {
                 Ok((subst, ty))
             }
 
+            ExprKind::Coalesce { value, default } => {
+                let (mut subst, value_ty) = self.infer(*value)?;
+                let (s, default_ty) = self.infer(*default)?;
+                subst = subst.compose(&s, &mut self.ir);
+
+                // If value is T?, result is T (unwrap optional via default).
+                // If value is T (non-optional), result is T.
+                let value_ty_applied = subst.apply(value_ty, &mut self.ir);
+                let inner_ty = match &self.ir.types.get(value_ty_applied).kind {
+                    TypeKind::Optional(inner) => *inner,
+                    _ => value_ty_applied,
+                };
+
+                // Unify inner type with default type
+                let s = self.unify(inner_ty, default_ty, loc)?;
+                subst = subst.compose(&s, &mut self.ir);
+
+                let result_ty = subst.apply(inner_ty, &mut self.ir);
+                Ok((subst, result_ty))
+            }
+
             ExprKind::Ref { args, .. } => {
                 let mut subst = Subst::default();
                 for &arg in args {

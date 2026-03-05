@@ -416,6 +416,18 @@ impl Lowering {
                 })
             }
 
+            ast::ExprKind::Coalesce { value, default } => {
+                let ir_value = self.fold_expr(value, errors);
+                let ir_default = self.fold_expr(default, errors);
+                self.ir.exprs.alloc(Expr {
+                    loc,
+                    kind: ExprKind::Coalesce {
+                        value: ir_value,
+                        default: ir_default,
+                    },
+                })
+            }
+
             ast::ExprKind::Ref { type_path, args } => {
                 let ir_args: Vec<_> = args
                     .iter()
