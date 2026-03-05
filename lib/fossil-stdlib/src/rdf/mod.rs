@@ -15,6 +15,7 @@ use fossil_lang::runtime::chunked_executor::{ChunkedExecutor, estimate_batch_siz
 use fossil_lang::runtime::value::{Plan, Value};
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 
+use crate::string::template::parse_template;
 use metadata::{RdfFieldAttrs, RdfTypeAttrs, build_xsd_type_map, field_primitive_type};
 
 use oxrdfio::RdfFormat;
@@ -108,64 +109,30 @@ fn build_subject_expr(
             let param_names = type_index.get(def_id)
                 .map(|info| &info.ctor_param_names[..])
                 .unwrap_or(&[]);
-            let parts = parse_template(&template, param_names, ctor_args, gcx);
+            let parts = parse_template(&template, param_names, ctor_args, &gcx.interner);
             Some(concat_str(parts, "", true))
         }
         None => Some(ctor_args[0].clone()),
     }
 }
 
-/// Parse a subject template string, expanding `{param}` placeholders into
-/// Polars expressions from the positionally-matched ctor_args.
-fn parse_template(
-    template: &str,
-    param_names: &[Symbol],
-    ctor_args: &[Expr],
-    gcx: &GlobalContext,
-) -> Vec<Expr> {
-    let mut parts = Vec::new();
-    let mut literal = String::new();
-    let mut chars = template.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '{' {
-            if !literal.is_empty() {
-                parts.push(lit(std::mem::take(&mut literal)));
-            }
-            let mut name = String::new();
-            for c in chars.by_ref() {
-                if c == '}' { break; }
-                name.push(c);
-            }
-            if let Some(idx) = param_names.iter().position(|sym| gcx.interner.resolve(*sym) == name) {
-                if let Some(arg) = ctor_args.get(idx) {
-                    parts.push(arg.clone().cast(DataType::String));
-                }
-            }
-        } else {
-            literal.push(c);
-        }
-    }
-
-    if !literal.is_empty() {
-        parts.push(lit(literal));
-    }
-
-    parts
-}
-
 /// Build a subject IRI expression for a reference field.
 ///
-/// Extracts the base prefix from the referenced type's subject template
-/// (everything before the first `{`) and prepends it to the identity expression.
+/// Reuses `parse_template` with the referenced type's subject template and
+/// param names, so filters and multi-placeholder templates work identically
+/// to the constructor path.
 fn build_ref_identity_expr(
     def_id: DefId,
     identity_expr: &Expr,
     gcx: &GlobalContext,
+    type_index: &TypeIndex,
 ) -> Option<Expr> {
     let template = RdfTypeAttrs::from_def_id(def_id, gcx)?.subject?;
-    let base = &template[..template.find('{')?];
-    Some(concat_str(vec![lit(base), identity_expr.clone().cast(DataType::String)], "", true))
+    let param_names = type_index.get(def_id)
+        .map(|info| &info.ctor_param_names[..])
+        .unwrap_or(&[]);
+    let parts = parse_template(&template, param_names, &[identity_expr.clone()], &gcx.interner);
+    Some(concat_str(parts, "", true))
 }
 
 /// Check if a field's type is a reference to another record type.
@@ -261,7 +228,7 @@ fn serialize_rdf(
                         def_id, field_sym, ctx.ir, ctx.type_index,
                     ) {
                         if let Some(ref_expr) = build_ref_identity_expr(
-                            ref_def_id, inner.as_ref(), ctx.gcx,
+                            ref_def_id, inner.as_ref(), ctx.gcx, ctx.type_index,
                         ) {
                             selection.push(ref_expr.alias(uri));
                             continue;

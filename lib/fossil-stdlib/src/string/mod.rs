@@ -1,3 +1,5 @@
+pub mod template;
+
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
@@ -5,6 +7,7 @@ use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 
 use polars::prelude::*;
+use unicode_normalization::UnicodeNormalization;
 
 fn take_expr(value: Value, label: &str) -> Result<Expr, FossilError> {
     let loc = fossil_lang::ast::Loc::generated();
@@ -15,6 +18,43 @@ fn take_expr(value: Value, label: &str) -> Result<Expr, FossilError> {
             loc,
         )),
     }
+}
+
+/// Transliterate a string: NFD normalize then strip combining marks.
+/// "Avilés" → "Aviles", "São Paulo" → "Sao Paulo"
+fn transliterate(s: &str) -> String {
+    s.nfd().filter(|c| !unicode_normalization::char::is_combining_mark(*c)).collect()
+}
+
+// ── Expr→Expr transforms (reused by FunctionImpl and template filters) ──
+
+pub fn slug(expr: Expr) -> Expr {
+    expr.map(
+        |s| {
+            let ca = s.str()?;
+            let out: StringChunked = ca.apply_into_string_amortized(|val, buf| {
+                for c in transliterate(val).chars() {
+                    if c.is_ascii_alphanumeric() {
+                        buf.push(c.to_ascii_lowercase());
+                    }
+                }
+            });
+            Ok(out.into_column())
+        },
+        |_: &Schema, _: &Field| Ok(Field::new("slug".into(), DataType::String)),
+    )
+}
+
+pub fn lower(expr: Expr) -> Expr {
+    expr.str().to_lowercase()
+}
+
+pub fn upper(expr: Expr) -> Expr {
+    expr.str().to_uppercase()
+}
+
+pub fn trim(expr: Expr) -> Expr {
+    expr.str().strip_chars(lit(""))
 }
 
 /// `String.replace(input, pattern, replacement)` — replaces first match of a regex pattern
@@ -57,7 +97,7 @@ impl FunctionImpl for StringTrimFunction {
     fn call(&self, args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, FossilError> {
         let mut args = args.into_iter();
         let input = take_expr(args.next().unwrap(), "String.trim")?;
-        Ok(Value::Expr(input.str().strip_chars(lit(""))))
+        Ok(Value::Expr(trim(input)))
     }
 }
 
@@ -78,7 +118,7 @@ impl FunctionImpl for StringUpperFunction {
     fn call(&self, args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, FossilError> {
         let mut args = args.into_iter();
         let input = take_expr(args.next().unwrap(), "String.upper")?;
-        Ok(Value::Expr(input.str().to_uppercase()))
+        Ok(Value::Expr(upper(input)))
     }
 }
 
@@ -99,7 +139,7 @@ impl FunctionImpl for StringLowerFunction {
     fn call(&self, args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, FossilError> {
         let mut args = args.into_iter();
         let input = take_expr(args.next().unwrap(), "String.lower")?;
-        Ok(Value::Expr(input.str().to_lowercase()))
+        Ok(Value::Expr(lower(input)))
     }
 }
 
@@ -211,11 +251,7 @@ impl FunctionImpl for StringSlugFunction {
     fn call(&self, args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, FossilError> {
         let mut args = args.into_iter();
         let input = take_expr(args.next().unwrap(), "String.slug")?;
-        // lowercase then replace non-alphanumeric runs with ""
-        let lowered = input.str().to_lowercase();
-        Ok(Value::Expr(
-            lowered.str().replace_all(lit(r"[^a-z0-9]+"), lit(""), true),
-        ))
+        Ok(Value::Expr(slug(input)))
     }
 }
 
