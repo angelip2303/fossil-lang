@@ -1,9 +1,14 @@
 let data = csv!(@fc-data/players.csv)
 
 type {
-  SportsTeam(id: int), SportsOrganization(id: string),
-  Player(id: int), City(id: string), Country(id: string),
-  Role(id: int), MonetaryAmount(id: int), EmploymentAgency(id: string)
+  SportsTeam(id: int),
+  SportsOrganization(id: string),
+  Player(id: int),
+  City(id: string),
+  Country(id: string),
+  Role(id: int),
+  MonetaryAmount(id: int),
+  EmploymentAgency(id: string)
 } = shex!(@fc-vocab/players.shex)
 
 data
@@ -36,7 +41,7 @@ data
 +> each row -> MonetaryAmount(row.player_id) {
   value = row.market_value_in_eur,
   maxValue = row.highest_market_value_in_eur,
-  currency = "EUR"
+  currency = row.currency ?? "EUR"
 }
 +> each row -> EmploymentAgency(String.slug(row.agent_name)) {
   name = row.agent_name

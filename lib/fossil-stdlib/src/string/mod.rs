@@ -214,7 +214,7 @@ impl FunctionImpl for StringSlugFunction {
         // lowercase then replace non-alphanumeric runs with ""
         let lowered = input.str().to_lowercase();
         Ok(Value::Expr(
-            lowered.str().replace_all(lit(r"[^a-z0-9]+"), lit(""), false),
+            lowered.str().replace_all(lit(r"[^a-z0-9]+"), lit(""), true),
         ))
     }
 }
