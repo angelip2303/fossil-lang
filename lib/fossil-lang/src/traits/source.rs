@@ -5,7 +5,12 @@
 
 use std::fmt::Debug;
 
-use polars::prelude::{LazyFrame, PolarsResult};
+use polars::prelude::{DataFrame, LazyFrame, PolarsResult};
+
+/// Forward-only batch iterator for streaming execution.
+pub trait BatchReader: Send {
+    fn next_batch(&mut self) -> PolarsResult<Option<DataFrame>>;
+}
 
 /// A data source that can produce a LazyFrame
 ///
@@ -32,6 +37,12 @@ pub trait Source: Send + Sync + Debug {
 
     /// Clone this source into a boxed trait object
     fn box_clone(&self) -> Box<dyn Source>;
+
+    /// Optional: return a forward-only batch reader for true streaming.
+    /// Default returns None (executor falls back to collect-once).
+    fn batch_reader(&self, _batch_size: usize) -> PolarsResult<Option<Box<dyn BatchReader>>> {
+        Ok(None)
+    }
 }
 
 impl Clone for Box<dyn Source> {

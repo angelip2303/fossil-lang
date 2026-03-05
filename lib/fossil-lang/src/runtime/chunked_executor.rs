@@ -5,10 +5,29 @@ use polars::prelude::*;
 use super::lazy_frame::SafeLazyFrame;
 use super::value::{Plan, Transform};
 
+/// A join with the right side pre-materialized for per-batch joining.
+struct MaterializedJoin {
+    right_df: DataFrame,
+    left_on: Vec<Expr>,
+    right_on: Vec<Expr>,
+    suffix: String,
+}
+
+/// Pre-processed transform: Select/Filter unchanged, Join pre-materialized.
+enum PreparedTransform {
+    Select(Vec<Expr>),
+    Filter(Expr),
+    Join(MaterializedJoin),
+}
+
 /// Executes Plan in chunks of configurable size
 ///
 /// This is the ONLY component that can materialize a Plan.
 /// It processes data in fixed-size batches, writing incrementally to output.
+///
+/// Two execution strategies:
+/// - **Streaming** (local CSV): Uses `BatchReader` for forward-only O(n) reads.
+/// - **Collect-once** (fallback): Collects full DataFrame once, then slices in-memory.
 pub struct ChunkedExecutor {
     batch_size: usize,
 }
@@ -38,44 +57,17 @@ impl ChunkedExecutor {
         &self,
         plan: &Plan,
         select_exprs: Vec<Expr>,
-        mut process_batch: F,
+        process_batch: F,
     ) -> PolarsResult<u64>
     where
         F: FnMut(DataFrame) -> PolarsResult<()>,
     {
-        let mut safe_lf = self.build_safe_lazy_frame(plan)?;
-        if !select_exprs.is_empty() {
-            safe_lf = safe_lf.select(select_exprs);
-        }
-
-        // Convert to LazyFrame for batched execution
-        let lf = safe_lf.into_inner();
-        let mut total_rows: u64 = 0;
-        let mut offset: i64 = 0;
-
-        loop {
-            // Get a batch using slice - THIS is where materialization happens
-            let batch_lf = lf.clone().slice(offset, self.batch_size as u32);
-            let batch_df = batch_lf.collect()?;
-
-            let batch_len = batch_df.height();
-            if batch_len == 0 {
-                break;
-            }
-
-            // Call the callback with this batch
-            process_batch(batch_df)?;
-
-            total_rows += batch_len as u64;
-            offset += batch_len as i64;
-
-            // If we got fewer rows than requested, we're done
-            if batch_len < self.batch_size {
-                break;
-            }
-        }
-
-        Ok(total_rows)
+        let extra_select = if select_exprs.is_empty() {
+            None
+        } else {
+            Some(select_exprs)
+        };
+        self.execute_internal(plan, extra_select, process_batch)
     }
 
     /// Execute a Plan without selection and process batches via callback
@@ -91,40 +83,86 @@ impl ChunkedExecutor {
     /// # Returns
     ///
     /// Total number of rows processed
-    pub fn execute_plan_batched<F>(&self, plan: &Plan, mut process_batch: F) -> PolarsResult<u64>
+    pub fn execute_plan_batched<F>(&self, plan: &Plan, process_batch: F) -> PolarsResult<u64>
     where
         F: FnMut(DataFrame) -> PolarsResult<()>,
     {
-        let safe_lf = self.build_safe_lazy_frame(plan)?;
+        self.execute_internal(plan, None, process_batch)
+    }
 
-        // Convert to LazyFrame for batched execution
-        let lf = safe_lf.into_inner();
-        let mut total_rows: u64 = 0;
-        let mut offset: i64 = 0;
+    /// Unified internal execution method.
+    ///
+    /// Tries streaming via `BatchReader` first, falls back to collect-once + slice.
+    fn execute_internal<F>(
+        &self,
+        plan: &Plan,
+        extra_select: Option<Vec<Expr>>,
+        mut process_batch: F,
+    ) -> PolarsResult<u64>
+    where
+        F: FnMut(DataFrame) -> PolarsResult<()>,
+    {
+        // Try streaming path
+        let batch_reader = match &plan.source {
+            Some(src) => src.batch_reader(self.batch_size)?,
+            None => None,
+        };
 
-        loop {
-            // Get a batch using slice - THIS is where materialization happens
-            let batch_lf = lf.clone().slice(offset, self.batch_size as u32);
-            let batch_df = batch_lf.collect()?;
-
-            let batch_len = batch_df.height();
-            if batch_len == 0 {
-                break;
+        if let Some(mut reader) = batch_reader {
+            // Streaming path: pre-materialize transforms, apply per-batch
+            let mut prepared = prepare_transforms(&plan.transforms)?;
+            if let Some(sel) = extra_select {
+                prepared.push(PreparedTransform::Select(sel));
             }
 
-            // Call the callback with this batch
-            process_batch(batch_df)?;
+            let mut total_rows: u64 = 0;
+            loop {
+                let batch = match reader.next_batch()? {
+                    Some(df) if df.height() > 0 => df,
+                    _ => break,
+                };
 
-            total_rows += batch_len as u64;
-            offset += batch_len as i64;
+                let result = apply_prepared(batch, &prepared)?;
+                let batch_len = result.height();
+                if batch_len == 0 {
+                    break;
+                }
 
-            // If we got fewer rows than requested, we're done
-            if batch_len < self.batch_size {
-                break;
+                process_batch(result)?;
+                total_rows += batch_len as u64;
             }
+
+            Ok(total_rows)
+        } else {
+            // Fallback: collect once, then slice in-memory (zero-copy)
+            let mut safe_lf = self.build_safe_lazy_frame(plan)?;
+            if let Some(sel) = extra_select {
+                safe_lf = safe_lf.select(sel);
+            }
+
+            let full_df = safe_lf.into_inner().collect()?;
+            let total_height = full_df.height();
+            let mut total_rows: u64 = 0;
+            let mut offset: i64 = 0;
+
+            loop {
+                let batch_df = full_df.slice(offset, self.batch_size);
+                let batch_len = batch_df.height();
+                if batch_len == 0 {
+                    break;
+                }
+
+                process_batch(batch_df)?;
+                total_rows += batch_len as u64;
+                offset += batch_len as i64;
+
+                if (offset as usize) >= total_height {
+                    break;
+                }
+            }
+
+            Ok(total_rows)
         }
-
-        Ok(total_rows)
     }
 
     /// Build a SafeLazyFrame from a Plan
@@ -167,6 +205,70 @@ impl ChunkedExecutor {
             }
         }
     }
+}
+
+/// Pre-materialize transforms for streaming execution.
+///
+/// Select/Filter are kept as-is. Joins have their right side collected
+/// into a DataFrame once so it can be reused across batches.
+fn prepare_transforms(transforms: &[Transform]) -> PolarsResult<Vec<PreparedTransform>> {
+    transforms.iter().map(|t| match t {
+        Transform::Select(e) => Ok(PreparedTransform::Select(e.clone())),
+        Transform::Filter(e) => Ok(PreparedTransform::Filter(e.clone())),
+        Transform::Join(j) => {
+            let mut right_lf = match &j.right_source {
+                Some(src) => src.to_lazy_frame()?,
+                None => LazyFrame::default(),
+            };
+            for t in &j.right_transforms {
+                right_lf = apply_transform_to_lf(right_lf, t)?;
+            }
+            let right_df = right_lf.collect()?;
+            Ok(PreparedTransform::Join(MaterializedJoin {
+                right_df,
+                left_on: j.left_on.clone(),
+                right_on: j.right_on.clone(),
+                suffix: j.suffix.clone(),
+            }))
+        }
+    }).collect()
+}
+
+/// Apply a Transform to a raw LazyFrame (used for building right sides of joins).
+fn apply_transform_to_lf(lf: LazyFrame, transform: &Transform) -> PolarsResult<LazyFrame> {
+    match transform {
+        Transform::Select(exprs) => Ok(lf.select(exprs.clone())),
+        Transform::Filter(expr) => Ok(lf.filter(expr.clone())),
+        Transform::Join(join) => {
+            let mut right_lf = match &join.right_source {
+                Some(src) => src.to_lazy_frame()?,
+                None => LazyFrame::default(),
+            };
+            for t in &join.right_transforms {
+                right_lf = apply_transform_to_lf(right_lf, t)?;
+            }
+            let args = JoinArgs::new(JoinType::Inner)
+                .with_suffix(Some(join.suffix.clone().into()));
+            Ok(lf.join(right_lf, join.left_on.clone(), join.right_on.clone(), args))
+        }
+    }
+}
+
+/// Apply pre-processed transforms to a single batch DataFrame.
+fn apply_prepared(batch: DataFrame, transforms: &[PreparedTransform]) -> PolarsResult<DataFrame> {
+    let mut lf = batch.lazy();
+    for t in transforms {
+        match t {
+            PreparedTransform::Select(e) => lf = lf.select(e.clone()),
+            PreparedTransform::Filter(e) => lf = lf.filter(e.clone()),
+            PreparedTransform::Join(j) => {
+                let args = JoinArgs::new(JoinType::Inner)
+                    .with_suffix(Some(j.suffix.clone().into()));
+                lf = lf.join(j.right_df.clone().lazy(), j.left_on.clone(), j.right_on.clone(), args);
+            }
+        }
+    }
+    lf.collect()
 }
 
 /// Estimate optimal batch size based on schema
