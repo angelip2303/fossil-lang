@@ -62,6 +62,16 @@ fn resolve_dot_access(program: &IrProgram, receiver: &str) -> Vec<CompletionItem
         }
     }
 
+    // Try as a binding variable (from projection, let, each, etc.)
+    if let Some(def) = program.gcx.definitions.find_by_symbol(sym, |k| matches!(k, DefKind::Let)) {
+        if let Some(&type_id) = program.typeck_results.binding_types.get(&def.id()) {
+            let completions = completions_for_type(program, type_id);
+            if !completions.is_empty() {
+                return completions;
+            }
+        }
+    }
+
     vec![]
 }
 

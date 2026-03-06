@@ -226,6 +226,18 @@ impl TypeChecker {
                 .or_insert_with(|| self.global_subst.apply(raw_ty, &mut self.ir));
         }
 
+        // Export binding types for LSP completions (Let bindings: projections, let statements).
+        {
+            use crate::context::DefKind;
+            for (&def_id, poly) in &self.env.bindings {
+                let def = self.gcx.definitions.get(def_id);
+                if matches!(def.kind, DefKind::Let) {
+                    let resolved_ty = self.global_subst.apply(poly.ty, &mut self.ir);
+                    self.typeck_results.binding_types.insert(def_id, resolved_ty);
+                }
+            }
+        }
+
         Ok(IrProgram {
             ir: self.ir,
             gcx: self.gcx,

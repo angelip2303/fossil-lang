@@ -16,7 +16,7 @@ use super::TypeChecker;
 
 #[derive(Clone, Debug, Default)]
 pub struct TypeEnv {
-    bindings: HashMap<DefId, Polytype>,
+    pub(crate) bindings: HashMap<DefId, Polytype>,
 }
 
 impl TypeEnv {
