@@ -27,18 +27,19 @@ impl AnalysisHost {
         Self { snapshot: None }
     }
 
-    /// Analyze the source. Returns diagnostics always; updates internal
-    /// snapshot on success. Completions use the latest snapshot.
+    /// Analyze the source. Returns diagnostics always; updates the snapshot
+    /// with partial type info even when there are type errors (for completions).
     pub fn analyze(&mut self, source: &str, gcx: GlobalContext) -> AnalysisResult {
         let compiler = Compiler::with_context(gcx);
-        let compile_result = compiler.compile(CompilerInput::Source {
+        let compile_result = compiler.compile_tolerant(CompilerInput::Source {
             name: "editor".to_string(),
             content: source.to_string(),
         });
 
         match compile_result {
             Ok(result) => {
-                let diagnostics = diagnostics::map_warnings(&result.warnings.0);
+                let mut diagnostics = diagnostics::map_warnings(&result.warnings.0);
+                diagnostics.extend(diagnostics::map_errors(&result.errors.0));
 
                 self.snapshot = Some(AnalysisSnapshot {
                     program: result.program,
@@ -46,6 +47,7 @@ impl AnalysisHost {
 
                 AnalysisResult { diagnostics }
             }
+            // Parse/expand/lower failed — too broken for partial results
             Err(errors) => {
                 let diagnostics = diagnostics::map_errors(&errors.0);
                 AnalysisResult { diagnostics }

@@ -202,7 +202,18 @@ impl TypeChecker {
         }
     }
 
-    pub fn check(mut self) -> Result<IrProgram, FossilErrors> {
+    pub fn check(self) -> Result<IrProgram, FossilErrors> {
+        let (program, errors) = self.check_tolerant();
+        if errors.is_empty() {
+            Ok(program)
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Type-check and always return partial results, even when there are errors.
+    /// Used by the LSP to keep the snapshot up-to-date for completions.
+    pub fn check_tolerant(mut self) -> (IrProgram, FossilErrors) {
         let root_ids = self.ir.root.clone();
         let mut errors = FossilErrors::new();
 
@@ -210,10 +221,6 @@ impl TypeChecker {
             if let Err(e) = self.check_stmt(stmt_id) {
                 errors.push(e);
             }
-        }
-
-        if !errors.is_empty() {
-            return Err(errors);
         }
 
         // Finalize: populate expr_types for ALL expressions with fully-resolved types.
@@ -238,13 +245,14 @@ impl TypeChecker {
             }
         }
 
-        Ok(IrProgram {
+        let program = IrProgram {
             ir: self.ir,
             gcx: self.gcx,
             type_index: self.type_index,
             resolutions: self.resolutions,
             typeck_results: self.typeck_results,
-        })
+        };
+        (program, errors)
     }
 
     fn check_stmt(&mut self, stmt_id: StmtId) -> Result<(), FossilError> {
