@@ -70,13 +70,13 @@ impl Compiler {
     /// Tolerant compilation: parse/expand/lower errors are still fatal,
     /// but type-check errors produce partial results (for LSP completions).
     pub fn compile_tolerant(&self, input: CompilerInput) -> Result<TolerantResult, FossilErrors> {
-        let src = match &input {
+        let src = match input {
             CompilerInput::File(path) => {
                 let msg = format!("Failed to read file '{}'", path.display());
                 let loc = Loc::generated();
-                read_to_string(path).map_err(|_| FossilError::internal("io", msg, loc))?
+                read_to_string(&path).map_err(|_| FossilError::internal("io", msg, loc))?
             }
-            CompilerInput::Source { content, .. } => content.clone(),
+            CompilerInput::Source { content, .. } => content,
         };
         let gcx = self.gcx.clone().unwrap_or_default();
 
