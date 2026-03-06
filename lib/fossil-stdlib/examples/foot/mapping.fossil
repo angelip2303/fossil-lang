@@ -1,14 +1,19 @@
 let data = csv!(@fc-data/players.csv)
 
 type {
+  #[rdf(subject = "http://example.org/sports-team/{id}")]
   SportsTeam(id: int),
+  #[rdf(subject = "http://example.org/sports-organization/{id}")]
   SportsOrganization(id: string),
+  #[rdf(subject = "http://example.org/player/{id}")]
   Player(id: int),
   #[rdf(subject = "http://example.org/city/{id|slug}")]
   City(id: string),
   #[rdf(subject = "http://example.org/country/{id|slug}")]
   Country(id: string),
+  #[rdf(subject = "http://example.org/country/{id}")]
   Role(id: int),
+  #[rdf(subject = "http://example.org/monetary-amount/{id}")]
   MonetaryAmount(id: int),
   #[rdf(subject = "http://example.org/employment-agency/{id|slug}")]
   EmploymentAgency(id: string)
@@ -44,7 +49,7 @@ data
 +> each row -> MonetaryAmount(row.player_id) {
   value = row.market_value_in_eur,
   maxValue = row.highest_market_value_in_eur,
-  currency = row.currency ?? "EUR"
+  currency = "EUR"
 }
 +> each row -> EmploymentAgency(row.agent_name) {
   name = row.agent_name

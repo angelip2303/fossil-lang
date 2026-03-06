@@ -1,7 +1,7 @@
 [package]
-name = "fossil-providers"
+name = "fossil-lsp"
 version.workspace = true
-description.workspace = true
+description = "Error-tolerant analysis for Fossil language editor support"
 homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
@@ -12,18 +12,11 @@ authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+utoipa = ["dep:utoipa"]
+
 [dependencies]
-# external dependencies
-polars.workspace = true
-calamine = "0.31"
-shex_ast = "0.1"
-iri_s = "0.1"
-
-# internal dependencies
 fossil-lang.workspace = true
-
-[dev-dependencies]
-thiserror.workspace = true
-oxrdfio = "0.2.2"
-
-fossil-stdlib.workspace = true
+serde = { version = "1", features = ["derive"] }
+miette = "7"
+utoipa = { version = "5", optional = true }

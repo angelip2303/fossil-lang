@@ -84,13 +84,41 @@ impl FunctionImpl for RdfSerializeFunction {
     }
 }
 
-/// Build a Polars Expr that generates the subject IRI for a given type.
+/// Build a blank node expression: `_:{TypeName}_{arg0}_{arg1}_...`
+fn build_bnode_expr(def_id: DefId, args: &[Expr], gcx: &GlobalContext) -> Expr {
+    let type_name = gcx.interner.resolve(gcx.definitions.get(def_id).name);
+    let mut parts = vec![lit(format!("_:{type_name}"))];
+    parts.extend(args.iter().map(|a| a.clone().cast(DataType::String)));
+    concat_str(parts, "_", true)
+}
+
+/// Resolve a subject identity expression for a type.
 ///
-/// Two cases:
-/// - With `#[rdf(subject = "http://example.org/Type_{param}")]`: template expansion
-/// - Without subject: `ctor_args[0]` directly (already a full IRI)
-///
-/// Templates use `{param}` placeholders matching ctor_param_names positionally.
+/// With `#[rdf(subject = "...")]`: template expansion using param names.
+/// Without: blank node `_:{TypeName}_{arg0}_{arg1}_...`
+fn resolve_identity_expr(
+    def_id: DefId,
+    args: &[Expr],
+    gcx: &GlobalContext,
+    type_index: &TypeIndex,
+) -> Expr {
+    let template = RdfTypeAttrs::from_def_id(def_id, gcx)
+        .and_then(|a| a.subject);
+
+    match template {
+        Some(template) => {
+            let param_names = type_index.get(def_id)
+                .map(|info| &info.ctor_param_names[..])
+                .unwrap_or(&[]);
+            let parts = parse_template(&template, param_names, args, &gcx.interner);
+            concat_str(parts, "", true)
+        }
+        None => build_bnode_expr(def_id, args, gcx),
+    }
+}
+
+/// Build the subject expression for a type's constructor args.
+/// Returns `None` when there are no ctor args.
 fn build_subject_expr(
     def_id: DefId,
     ctor_args: &[Expr],
@@ -100,39 +128,7 @@ fn build_subject_expr(
     if ctor_args.is_empty() {
         return None;
     }
-
-    let subject_template = RdfTypeAttrs::from_def_id(def_id, gcx)
-        .and_then(|a| a.subject);
-
-    match subject_template {
-        Some(template) => {
-            let param_names = type_index.get(def_id)
-                .map(|info| &info.ctor_param_names[..])
-                .unwrap_or(&[]);
-            let parts = parse_template(&template, param_names, ctor_args, &gcx.interner);
-            Some(concat_str(parts, "", true))
-        }
-        None => Some(ctor_args[0].clone()),
-    }
-}
-
-/// Build a subject IRI expression for a reference field.
-///
-/// Reuses `parse_template` with the referenced type's subject template and
-/// param names, so filters and multi-placeholder templates work identically
-/// to the constructor path.
-fn build_ref_identity_expr(
-    def_id: DefId,
-    identity_expr: &Expr,
-    gcx: &GlobalContext,
-    type_index: &TypeIndex,
-) -> Option<Expr> {
-    let template = RdfTypeAttrs::from_def_id(def_id, gcx)?.subject?;
-    let param_names = type_index.get(def_id)
-        .map(|info| &info.ctor_param_names[..])
-        .unwrap_or(&[]);
-    let parts = parse_template(&template, param_names, &[identity_expr.clone()], &gcx.interner);
-    Some(concat_str(parts, "", true))
+    Some(resolve_identity_expr(def_id, ctor_args, gcx, type_index))
 }
 
 /// Check if a field's type is a reference to another record type.
@@ -227,14 +223,10 @@ fn serialize_rdf(
                     if let Some(ref_def_id) = field_ref_type(
                         def_id, field_sym, ctx.ir, ctx.type_index,
                     ) {
-                        if let Some(ref_expr) = build_ref_identity_expr(
-                            ref_def_id, inner.as_ref(), ctx.gcx, ctx.type_index,
-                        ) {
-                            selection.push(ref_expr.alias(uri));
-                            continue;
-                        }
-                        // No template → use raw value as-is (already a full IRI)
-                        selection.push(inner.as_ref().clone().alias(uri));
+                        let ref_expr = resolve_identity_expr(
+                            ref_def_id, &[inner.as_ref().clone()], ctx.gcx, ctx.type_index,
+                        );
+                        selection.push(ref_expr.alias(uri));
                         continue;
                     }
                     // Normal field — cast to registered type + alias to predicate URI

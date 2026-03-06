@@ -48,12 +48,6 @@ impl CsvSource {
     pub fn new(path: PlPath, options: CsvOptions, storage: StorageConfig) -> Self {
         Self { path, options, storage }
     }
-
-    pub fn infer_schema(&self) -> PolarsResult<Schema> {
-        self.to_lazy_frame()?
-            .collect_schema()
-            .map(|arc| arc.as_ref().clone())
-    }
 }
 
 struct CsvBatchReader {

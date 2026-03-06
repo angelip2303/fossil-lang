@@ -5,7 +5,7 @@
 
 use std::fmt::Debug;
 
-use polars::prelude::{DataFrame, LazyFrame, PolarsResult};
+use polars::prelude::{DataFrame, LazyFrame, PolarsResult, Schema};
 
 /// Forward-only batch iterator for streaming execution.
 pub trait BatchReader: Send {
@@ -37,6 +37,13 @@ pub trait Source: Send + Sync + Debug {
 
     /// Clone this source into a boxed trait object
     fn box_clone(&self) -> Box<dyn Source>;
+
+    /// Infer the schema by collecting the lazy frame's schema.
+    fn infer_schema(&self) -> PolarsResult<Schema> {
+        self.to_lazy_frame()?
+            .collect_schema()
+            .map(|arc| arc.as_ref().clone())
+    }
 
     /// Optional: return a forward-only batch reader for true streaming.
     /// Default returns None (executor falls back to collect-once).

@@ -6,6 +6,7 @@ members = [
     "lib/fossil-providers",
     "lib/fossil-stdlib",
     "lib/fossil-ifc",
+    "lib/fossil-lsp",
 ]
 resolver = "2"
 
@@ -33,6 +34,7 @@ fossil-macros = { path = "./lib/fossil-macros" }
 fossil-providers = { path = "./lib/fossil-providers" }
 fossil-stdlib = { path = "./lib/fossil-stdlib" }
 fossil-ifc = { path = "./lib/fossil-ifc" }
+fossil-lsp = { path = "./lib/fossil-lsp" }
 
 [profile.release]
 lto = true
