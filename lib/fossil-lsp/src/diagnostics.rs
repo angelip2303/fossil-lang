@@ -1,7 +1,7 @@
 use fossil_lang::error::{FossilError, FossilWarning};
 use serde::Serialize;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct DiagnosticItem {
     pub from: usize,
