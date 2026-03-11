@@ -197,7 +197,7 @@ impl FunctionImpl for CleanFunction {
                 if let Some(ops) = ops_map.get(name.as_str()) {
                     apply_clean_ops(name, ops)
                 } else {
-                    col(name.clone())
+                    col(name.clone()).alias(name.clone())
                 }
             })
             .collect();
