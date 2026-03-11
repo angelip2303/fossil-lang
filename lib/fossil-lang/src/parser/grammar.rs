@@ -729,7 +729,11 @@ where
 
     let positional_arg = parse_literal(ctx).map(AttributeArg::Positional);
 
-    let attr_arg = named_arg.or(positional_arg);
+    // Allow bare identifiers as positional string args: #[clean(trim)] → Positional("trim")
+    let ident_positional = parse_field_name(ctx)
+        .map(|sym| AttributeArg::Positional(Literal::String(sym)));
+
+    let attr_arg = named_arg.or(positional_arg).or(ident_positional);
 
     just(Token::HashBracket)
         .ignore_then(parse_symbol(ctx))

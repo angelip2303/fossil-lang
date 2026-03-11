@@ -1,5 +1,51 @@
 let data = csv!(@fc-data/players.csv)
 
+type CleanData do
+  player_id: int,
+
+  #[clean(trim)]
+  #[clean(default = "Unknown")]
+  first_name: string,
+
+  #[clean(trim)]
+  last_name: string,
+
+  #[clean(to_null = "Missing")]
+  position: string?,
+
+  #[clean(to_null = "Missing")]
+  sub_position: string?,
+
+  #[clean(min = 159)]
+  height_in_cm: int?,
+
+  #[clean(trim)]
+  #[clean(replace = "UdSSR", with = "USSR")]
+  #[clean(replace = "CSSR", with = "Czechoslovakia")]
+  #[clean(replace = "Jugoslawien \\(SFR\\)", with = "Yugoslavia")]
+  country_of_citizenship: string,
+
+  #[clean(trim)]
+  city_of_birth: string?,
+
+  foot: string?,
+  date_of_birth: string?,
+  image_url: string?,
+  url: string?,
+
+  #[clean(trim)]
+  agent_name: string?,
+
+  current_club_id: int?,
+  current_club_name: string?,
+  current_club_domestic_competition_id: string?,
+  market_value_in_eur: int?,
+  highest_market_value_in_eur: int?,
+  contract_expiration_date: string?
+end
+
+let clean = CleanData.clean(data)
+
 type {
   #[rdf(subject = "http://example.org/sports-team/{id}")]
   SportsTeam(id: int),
@@ -19,7 +65,7 @@ type {
   EmploymentAgency(id: string)
 } = shex!(@fc-vocab/players.shex)
 
-data
+clean
 |> each row -> Player(row.player_id) {
   identifier = row.player_id,
   givenName = row.first_name,

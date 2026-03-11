@@ -3,7 +3,6 @@ let data = csv!("lib/fossil-stdlib/examples/end-to-end/people.csv")
 #[rdf(subject = "http://example.com/person/{id}")]
 type Person(id: string) do
     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
-    #[validate(min_length = 2)]
     name: string
 
     #[rdf(uri = "http://xmlns.com/foaf/0.1/age")]

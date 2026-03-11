@@ -1,39 +1,24 @@
-type PassengerComfortData = csv!(@mobility-data/passenger_comfort.csv)
-type PotholeTelemetryData = csv!(@mobility-data/pothole_telemetry.csv)
-type RouteEfficiencyData = csv!(@mobility-data/route_efficiency.csv)
+let passenger_data = csv!(@mobility-data/passenger_comfort.csv)
+let pothole_data = csv!(@mobility-data/pothole_telemetry.csv)
+let route_data = csv!(@mobility-data/route_efficiency.csv)
+let weather_data = csv!(@mobility-data/weather_observations.csv)
 
 type {
-    Vehicle(identifier: string),
-    Route(identifier: int),
+    #[rdf(subject = "http://example.org/vehicle/{id}")]
+    Vehicle(id: string),
+    #[rdf(subject = "http://example.org/route/{id}")]
+    Route(id: int),
+    #[rdf(subject = "http://example.org/location/{latitude}_{longitude}")]
     Location(latitude: float, longitude: float),
+    #[rdf(subject = "http://example.org/weather-observation/{id}")]
     WeatherObservation(id: string),
+    #[rdf(subject = "http://example.org/passenger-impact/{id}")]
     PassengerImpact(id: string),
+    #[rdf(subject = "http://example.org/pothole-event/{id}")]
     PotholeEvent(id: string),
+    #[rdf(subject = "http://example.org/route-efficiency/{id}")]
     RouteEfficiency(id: string),
 } = shex!(@mobility-vocab/urban-mobility.shex)
-
-let passenger_data =
-    PassengerComfortData.load()
-        |> each row -> PassengerComfortData {
-            ..row,
-            unit_identifier = row.unit_identifier |> String.extract("(\d+)"),
-        }
-
-let pothole_data =
-    PotholeTelemetryData.load()
-        |> each row -> PotholeTelemetryData {
-            ..row,
-            bus_code = row.bus_code |> String.extract("(\d+)"),
-        }
-
-let route_data =
-    RouteEfficiencyData.load()
-        |> each row -> RouteEfficiencyData {
-            ..row,
-            fleet_unit = row.fleet_unit |> String.extract("(\d+)"),
-        }
-
-let weather_data = csv!(@mobility-data/weather_observations.csv)
 
 passenger_data
 |> join pothole_data on (
@@ -88,7 +73,7 @@ passenger_data
     hasLocation = ref Location(row.geo_location_lat, row.geo_location_lon),
     relatedTo = ref Route(row.service_line),
 }
-+> each row -> PotholeEvent("PotholeDetection_${row.unit_identifier}_${row.recorded_at}") {
++> each row -> PotholeEvent(row.unit_identifier) {
     dateTime = row.recorded_at,
     severity = row.severity,
     confidence = row.confidence,
