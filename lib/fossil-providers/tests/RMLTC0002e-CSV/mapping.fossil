@@ -3,7 +3,7 @@ let input = csv!("tests/RMLTC0002e-CSV/student2.csv")
 
 type Output do
     #[rdf(uri = "http://example.com/id")]
-    ID: string
+    ID: string,
 
     #[rdf(uri = "http://xmlns.com/foaf/0.1/name")]
     Name: string

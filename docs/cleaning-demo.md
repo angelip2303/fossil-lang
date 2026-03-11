@@ -21,23 +21,23 @@ In OpenRefine, you'd spend 20 minutes clicking through menus. In Python, you'd w
 
 ```fossil
 type CleanData do
-  player_id: int,
+  player_id: int
 
   #[clean(trim)]
   #[clean(default = "Unknown")]
-  first_name: string,
+  first_name: string
 
   #[clean(to_null = "Missing")]
-  position: string?,
+  position: string?
 
   #[clean(min = 159)]
-  height_in_cm: int?,
+  height_in_cm: int?
 
   #[clean(trim)]
   #[clean(replace = "UdSSR", with = "USSR")]
   #[clean(replace = "CSSR", with = "Czechoslovakia")]
   #[clean(replace = "Jugoslawien \\(SFR\\)", with = "Yugoslavia")]
-  country_of_citizenship: string,
+  country_of_citizenship: string
 
   city_of_birth: string?
 end

@@ -343,8 +343,8 @@ mod tests {
     #[test]
     fn join_merges_record_types() {
         let prog = compile_ok(
-            "type A do X: int Y: string end\n\
-             type B do X: int Z: bool end\n\
+            "type A do X: int, Y: string end\n\
+             type B do X: int, Z: bool end\n\
              let a = A { X = 1, Y = \"hi\" }\n\
              let b = B { X = 1, Z = true }\n\
              let c = a |> join b on X = X",
@@ -385,9 +385,9 @@ mod tests {
         use crate::ir::ExprKind;
 
         let prog = compile_ok(
-            "type A do X: int Y: string end\n\
-             type B do X: int Z: bool end\n\
-             type Out do Y: string Z: bool end\n\
+            "type A do X: int, Y: string end\n\
+             type B do X: int, Z: bool end\n\
+             type Out do Y: string, Z: bool end\n\
              let a = A { X = 1, Y = \"hi\" }\n\
              let b = B { X = 1, Z = true }\n\
              a |> join b on X = X |> each row -> Out { Y = row.Y, Z = row.Z }",

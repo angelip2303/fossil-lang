@@ -105,7 +105,8 @@ where
     let do_end_body = just(Token::Do)
         .ignore_then(
             do_end_field
-                .repeated()
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
                 .collect::<Vec<_>>(),
         )
         .then_ignore(just(Token::End))

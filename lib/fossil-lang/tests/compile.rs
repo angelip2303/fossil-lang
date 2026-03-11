@@ -34,7 +34,7 @@ fn compile_let_literals() {
 #[test]
 fn compile_type_and_record_construction() {
     let prog = compile(
-        "type Person do Name: string Age: int end\n\
+        "type Person do Name: string, Age: int end\n\
          let p = Person { Name = \"Alice\", Age = 30 }",
     )
     .unwrap();
@@ -98,7 +98,7 @@ fn compile_multiple_types() {
 #[test]
 fn compile_optional_field() {
     let prog = compile(
-        "type T do Name: string Age: int? end\n\
+        "type T do Name: string, Age: int? end\n\
          let t = T { Name = \"hi\", Age = 42 }",
     )
     .unwrap();
