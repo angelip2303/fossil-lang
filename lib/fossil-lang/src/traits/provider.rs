@@ -5,7 +5,6 @@ use crate::ast::Loc;
 use crate::ast::{Attribute, Literal, PrimitiveType, ProviderArgument};
 use crate::context::{Interner, Symbol};
 use crate::error::{FossilError, FossilWarnings};
-use crate::runtime::storage::StorageConfig;
 use crate::traits::function::FunctionImpl;
 
 pub trait FileReader: Send + Sync + std::fmt::Debug {
@@ -254,7 +253,7 @@ impl FileReader for CachingFileReader<'_> {
 
 pub struct ProviderContext<'a> {
     pub interner: &'a mut Interner,
-    pub storage: &'a StorageConfig,
+    pub storage: &'a HashMap<String, String>,
     pub file_reader: &'a dyn FileReader,
     pub ctor_params: Vec<Symbol>,
     pub expected_type_count: Option<usize>,

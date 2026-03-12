@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::error::FossilError;
@@ -5,19 +6,18 @@ use crate::ir::StmtKind;
 use crate::passes::IrProgram;
 use crate::runtime::evaluator::IrEvaluator;
 use crate::runtime::output::{LocalOutputResolver, OutputResolver};
-use crate::runtime::storage::StorageConfig;
 use crate::runtime::value::{Environment, Value};
 
 pub struct ExecutionConfig {
     pub output_resolver: Arc<dyn OutputResolver>,
-    pub storage: StorageConfig,
+    pub storage: HashMap<String, String>,
 }
 
 impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
             output_resolver: Arc::new(LocalOutputResolver),
-            storage: StorageConfig::default(),
+            storage: HashMap::new(),
         }
     }
 }

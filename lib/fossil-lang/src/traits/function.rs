@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::context::DefId;
@@ -5,7 +6,6 @@ use crate::error::FossilError;
 use crate::ir::{Ir, Polytype, TypeIndex, TypeVar};
 use crate::passes::GlobalContext;
 use crate::runtime::output::{LocalOutputResolver, OutputResolver};
-use crate::runtime::storage::StorageConfig;
 use crate::runtime::value::Value;
 
 pub struct RuntimeContext<'a> {
@@ -14,7 +14,7 @@ pub struct RuntimeContext<'a> {
     pub type_index: &'a TypeIndex,
     pub current_type: Option<DefId>,
     pub output_resolver: Arc<dyn OutputResolver>,
-    pub storage: Arc<StorageConfig>,
+    pub storage: Arc<HashMap<String, String>>,
 }
 
 impl<'a> RuntimeContext<'a> {
@@ -25,7 +25,7 @@ impl<'a> RuntimeContext<'a> {
             type_index,
             current_type: None,
             output_resolver: Arc::new(LocalOutputResolver),
-            storage: Arc::new(StorageConfig::default()),
+            storage: Arc::new(HashMap::new()),
         }
     }
 
@@ -39,7 +39,7 @@ impl<'a> RuntimeContext<'a> {
         self
     }
 
-    pub fn with_storage(mut self, storage: Arc<StorageConfig>) -> Self {
+    pub fn with_storage(mut self, storage: Arc<HashMap<String, String>>) -> Self {
         self.storage = storage;
         self
     }

@@ -51,7 +51,7 @@ pub struct IrEvaluator<'a> {
     env: IrEnvironment,
     call_stack: CallStack,
     output_resolver: Arc<dyn OutputResolver>,
-    storage: Arc<crate::runtime::storage::StorageConfig>,
+    storage: Arc<std::collections::HashMap<String, String>>,
     /// Accumulates auto-emitted outputs from constructor calls in field-value positions.
     /// Drained by eval_projection after collecting main outputs.
     auto_emit_outputs: Vec<crate::runtime::value::OutputSpec>,
@@ -66,7 +66,7 @@ impl<'a> IrEvaluator<'a> {
         typeck_results: &'a TypeckResults,
         env: IrEnvironment,
         output_resolver: Arc<dyn OutputResolver>,
-        storage: Arc<crate::runtime::storage::StorageConfig>,
+        storage: Arc<std::collections::HashMap<String, String>>,
     ) -> Self {
         Self {
             ir,

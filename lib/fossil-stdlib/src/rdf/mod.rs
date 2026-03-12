@@ -1,10 +1,16 @@
+pub mod fragment_writer;
 pub mod metadata;
+pub mod nt_writer;
+pub mod oxrdf_writer;
 pub mod serializer;
+pub mod triple_writer;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
+pub use fragment_writer::{FragmentManifest, OutputConfig};
 pub use serializer::RdfBatchWriter;
+pub use triple_writer::TripleWriter;
 
 use fossil_lang::common::PrimitiveType;
 use fossil_lang::context::{DefId, Symbol};
@@ -259,7 +265,8 @@ fn serialize_oxigraph(
     output_configs: &[(Vec<Expr>, HashMap<String, &'static str>)],
     batch_size: usize,
 ) -> Result<Value, FossilError> {
-    let rdf_writer = RefCell::new(RdfBatchWriter::new(writer, format));
+    let triple_writer = oxrdf_writer::OxrdfTripleWriter::new(writer, format);
+    let rdf_writer = RefCell::new(RdfBatchWriter::new(Box::new(triple_writer)));
 
     let executor = ChunkedExecutor::new(batch_size);
     executor
@@ -287,14 +294,153 @@ fn serialize_oxigraph(
         })
         .map_err(|e| RdfError::Write(e.to_string()))?;
 
-    let mut writer = rdf_writer
+    rdf_writer
         .into_inner()
         .finish()
         .map_err(|e| RdfError::Finalize(e.to_string()))?;
 
-    writer
-        .flush()
-        .map_err(|e| RdfError::Finalize(e.to_string()))?;
-
     Ok(Value::Unit)
+}
+
+// ---------------------------------------------------------------------------
+// Fragment writing (columnar N-Triples → blob storage)
+// ---------------------------------------------------------------------------
+
+pub struct RdfFragmentFunction;
+
+impl FunctionImpl for RdfFragmentFunction {
+    fn signature(
+        &self,
+        ir: &mut Ir,
+        next_type_var: &mut dyn FnMut() -> TypeVar,
+        _gcx: &GlobalContext,
+    ) -> Polytype {
+        // forall T. (T, String) -> Unit
+        let t_var = next_type_var();
+        let t_ty = ir.var_type(t_var);
+        let path_ty = ir.string_type();
+        let output_ty = ir.unit_type();
+        Polytype::poly(vec![t_var], ir.fn_type(vec![t_ty, path_ty], output_ty))
+    }
+
+    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
+        let mut args_iter = args.into_iter();
+
+        let input_value = args_iter.next().ok_or(RdfError::SerializeMissingArgs)?;
+
+        let base_path = args_iter
+            .next()
+            .and_then(|v| v.as_literal_string())
+            .ok_or(RdfError::SerializeInvalidFilename)?;
+
+        match input_value {
+            Value::Plan(plan) if plan.has_outputs() => {
+                let configs = build_fragment_configs(&plan, ctx);
+                let fragment_size = estimate_batch_size_from_plan(&plan);
+                fragment_writer::write_fragments(
+                    &plan,
+                    &configs,
+                    &base_path,
+                    fragment_size,
+                    ctx.output_resolver.as_ref(),
+                )?;
+                Ok(Value::Unit)
+            }
+            _ => Err(RdfError::SerializeInvalidInput.into()),
+        }
+    }
+}
+
+/// Build fragment output configs from a plan's OutputSpecs.
+///
+/// Same selection-building logic as `serialize_rdf` but also tracks reference
+/// predicates, type directory names, and type IRIs needed for fragment layout.
+fn build_fragment_configs(plan: &Plan, ctx: &RuntimeContext) -> Vec<OutputConfig> {
+    let interner = ctx.gcx.interner.clone();
+
+    plan.outputs
+        .iter()
+        .map(|output_spec| {
+            let def_id = output_spec.type_def_id;
+
+            // Type-level attrs
+            let type_attrs = RdfTypeAttrs::from_def_id(def_id, ctx.gcx);
+
+            // Field-level: field_sym → predicate URI
+            let mut field_uris: HashMap<Symbol, String> = HashMap::new();
+            if let Some(tm) = ctx.gcx.type_metadata.get(&def_id) {
+                for (&field_sym, field_meta) in &tm.field_metadata {
+                    let attrs = RdfFieldAttrs::from_field_metadata(field_meta, &interner);
+                    if let Some(uri) = attrs.uri {
+                        field_uris.insert(field_sym, uri);
+                    }
+                }
+            }
+
+            // Build selection + track reference predicates
+            let mut selection: Vec<Expr> = Vec::new();
+            let mut ref_predicates: HashSet<String> = HashSet::new();
+
+            if let Some(subject_expr) =
+                build_subject_expr(def_id, &output_spec.ctor_args, ctx.gcx, ctx.type_index)
+            {
+                selection.push(subject_expr.alias("_subject"));
+            }
+
+            if let Some(ref attrs) = type_attrs {
+                if let Some(ref rdf_type) = attrs.rdf_type {
+                    selection.push(lit(rdf_type.as_str()).alias("_type"));
+                }
+            }
+
+            for transform_expr in &output_spec.select_exprs {
+                if let Expr::Alias(inner, field_name) = transform_expr
+                    && let Some(field_sym) = interner.lookup(field_name)
+                    && let Some(uri) = field_uris.get(&field_sym)
+                {
+                    // Reference field → URI/blank node object
+                    if let Some(ref_def_id) =
+                        field_ref_type(def_id, field_sym, ctx.ir, ctx.type_index)
+                    {
+                        ref_predicates.insert(uri.clone());
+                        let ref_expr = resolve_identity_expr(
+                            ref_def_id,
+                            &[inner.as_ref().clone()],
+                            ctx.gcx,
+                            ctx.type_index,
+                        );
+                        selection.push(ref_expr.alias(uri));
+                        continue;
+                    }
+                    // Normal field
+                    let prim = field_primitive_type(def_id, field_sym, ctx.gcx);
+                    let expr = match prim {
+                        Some(p) if p != PrimitiveType::String => {
+                            inner.as_ref().clone().cast(p.to_polars_dtype())
+                        }
+                        _ => inner.as_ref().clone(),
+                    };
+                    selection.push(expr.alias(uri));
+                }
+            }
+
+            let xsd_types = build_xsd_type_map(def_id, &field_uris, ctx.gcx);
+
+            // Derive type directory and IRI
+            let type_name = interner.resolve(ctx.gcx.definitions.get(def_id).name);
+            let type_dir = type_name.to_lowercase();
+            let type_iri = type_attrs
+                .as_ref()
+                .and_then(|a| a.rdf_type.clone())
+                .unwrap_or_else(|| type_name.to_string());
+
+            OutputConfig {
+                selection,
+                xsd_types,
+                ref_predicates,
+                type_dir,
+                type_iri,
+            }
+        })
+        .collect()
 }

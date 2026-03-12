@@ -1,10 +1,11 @@
-use fossil_lang::runtime::storage::StorageConfig;
+use std::collections::HashMap;
+
 use polars::prelude::cloud::CloudOptions;
 use polars::prelude::{PlPath, PlPathRef};
 
-/// Converts StorageConfig into Polars CloudOptions for a given URL.
+/// Converts a storage credentials map into Polars CloudOptions for a given URL.
 /// Returns None for local paths or when config is empty (fallback to env vars).
-pub fn build_cloud_options(url: &str, config: &StorageConfig) -> Option<CloudOptions> {
+pub fn build_cloud_options(url: &str, config: &HashMap<String, String>) -> Option<CloudOptions> {
     if config.is_empty() {
         return None;
     }
@@ -15,7 +16,6 @@ pub fn build_cloud_options(url: &str, config: &StorageConfig) -> Option<CloudOpt
         PlPathRef::Cloud(cloud_path) => {
             let scheme = cloud_path.scheme();
             let pairs: Vec<(&str, &str)> = config
-                .as_map()
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();

@@ -4,8 +4,7 @@ type CleanData do
   player_id: int,
 
   #[clean(trim)]
-  #[clean(default = "Unknown")]
-  first_name: string,
+  first_name: string?,
 
   #[clean(trim)]
   last_name: string,
@@ -57,7 +56,7 @@ type {
   City(id: string),
   #[rdf(subject = "http://example.org/country/{id|slug}")]
   Country(id: string),
-  #[rdf(subject = "http://example.org/country/{id}")]
+  #[rdf(subject = "http://example.org/role/{id}")]
   Role(id: int),
   #[rdf(subject = "http://example.org/monetary-amount/{id}")]
   MonetaryAmount(id: int),
@@ -67,6 +66,7 @@ type {
 
 clean
 |> each row -> Player(row.player_id) {
+  label = row.last_name,
   identifier = row.player_id,
   givenName = row.first_name,
   familyName = row.last_name,
@@ -82,31 +82,38 @@ clean
   contactPoint = ref EmploymentAgency(row.agent_name)
 }
 +> each row -> City(row.city_of_birth) {
+  label = row.city_of_birth,
   name = row.city_of_birth,
   containedInPlace = ref Country(row.country_of_citizenship)
 }
 +> each row -> Country(row.country_of_citizenship) {
+  label = row.country_of_citizenship,
   name = row.country_of_citizenship
 }
 +> each row -> Role(row.player_id) {
+  label = row.position,
   endDate = row.contract_expiration_date,
   roleName = row.position
 }
 +> each row -> MonetaryAmount(row.player_id) {
+  label = "${row.market_value_in_eur} EUR",
   value = row.market_value_in_eur,
   maxValue = row.highest_market_value_in_eur,
   currency = "EUR"
 }
 +> each row -> EmploymentAgency(row.agent_name) {
+  label = row.agent_name,
   name = row.agent_name
 }
 +> each row -> SportsTeam(row.current_club_id) {
+  label = row.current_club_name,
   identifier = row.current_club_id,
   name = row.current_club_name,
   memberOf = ref SportsOrganization(row.current_club_domestic_competition_id),
-  athlete = ref Player(row.player_id),
+  athlete = ref Player(row.player_id)
 }
 +> each row -> SportsOrganization(row.current_club_domestic_competition_id) {
+  label = row.current_club_domestic_competition_id,
   identifier = row.current_club_domestic_competition_id
 }
 |> Rdf.serialize(@fc-data/players.ttl)

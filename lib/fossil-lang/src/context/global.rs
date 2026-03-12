@@ -4,8 +4,6 @@ use std::sync::Arc;
 use crate::ast::RecordField;
 use crate::common::PrimitiveType;
 use crate::context::{DefId, DefKind, Definitions, Interner, Symbol, TypeMetadata};
-use crate::runtime::storage::StorageConfig;
-
 use crate::traits::provider::{FileReader, LocalFileReader, ModuleSpec, ProviderInfo, TypeProviderImpl};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +42,7 @@ pub struct GlobalContext {
     pub module_generators: Vec<ModuleGeneratorFn>,
 
     // -- I/O configuration --
-    pub storage: StorageConfig,
+    pub storage: HashMap<String, String>,
     pub file_reader: Arc<dyn FileReader>,
 }
 
@@ -112,7 +110,7 @@ impl Default for GlobalContext {
             type_metadata: HashMap::new(),
             registered_types: HashMap::new(),
             module_generators: Vec::new(),
-            storage: StorageConfig::default(),
+            storage: HashMap::new(),
             file_reader: Arc::new(LocalFileReader),
         }
     }

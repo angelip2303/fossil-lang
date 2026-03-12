@@ -1,8 +1,9 @@
+use std::collections::HashMap;
+
 use fossil_lang::ast::Loc;
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
-use fossil_lang::runtime::storage::StorageConfig;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 use fossil_lang::traits::provider::{
@@ -41,11 +42,11 @@ impl Default for CsvOptions {
 pub struct CsvSource {
     pub path: PlPath,
     pub options: CsvOptions,
-    pub storage: StorageConfig,
+    pub storage: HashMap<String, String>,
 }
 
 impl CsvSource {
-    pub fn new(path: PlPath, options: CsvOptions, storage: StorageConfig) -> Self {
+    pub fn new(path: PlPath, options: CsvOptions, storage: HashMap<String, String>) -> Self {
         Self { path, options, storage }
     }
 }
