@@ -16,7 +16,7 @@ use fossil_lang::traits::source::Source;
 use polars::prelude::*;
 
 use crate::utils::{
-    lookup_type_id, polars_schema_to_field_specs, resolve_path, validate_extension, validate_path,
+    lookup_type_id, polars_schema_to_field_specs, validate_extension, validate_path,
 };
 
 const EXCEL_EXTENSIONS: &[&str] = &["xlsx", "xlsm", "xls", "xlsb", "ods"];
@@ -232,8 +232,8 @@ impl TypeProviderImpl for ExcelProvider {
         type_name: &str,
         loc: Loc,
     ) -> Result<ProviderOutput, FossilError> {
-        let path_str = args.require_string("path", "excel", loc)?;
-        let path = resolve_path(path_str);
+        let (_, resolved) = args.resolve_path("path", ctx.path_resolver, "excel", loc)?;
+        let path = PlPath::from_str(&resolved.url);
         validate_extension(path.as_ref(), EXCEL_EXTENSIONS, loc)?;
         validate_path(path.as_ref(), loc)?;
 

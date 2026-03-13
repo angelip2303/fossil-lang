@@ -49,7 +49,6 @@ pub struct IrEvaluator<'a> {
     typeck_results: &'a TypeckResults,
     env: IrEnvironment,
     call_stack: CallStack,
-    storage: Arc<std::collections::HashMap<String, String>>,
     outputs: Arc<Mutex<Vec<OutputRecord>>>,
 }
 
@@ -61,7 +60,6 @@ impl<'a> IrEvaluator<'a> {
         resolutions: &'a Resolutions,
         typeck_results: &'a TypeckResults,
         env: IrEnvironment,
-        storage: Arc<std::collections::HashMap<String, String>>,
         outputs: Arc<Mutex<Vec<OutputRecord>>>,
     ) -> Self {
         Self {
@@ -72,7 +70,6 @@ impl<'a> IrEvaluator<'a> {
             typeck_results,
             env,
             call_stack: Default::default(),
-            storage,
             outputs,
         }
     }
@@ -438,7 +435,6 @@ impl<'a> IrEvaluator<'a> {
                 });
 
                 let mut ctx = RuntimeContext::new(self.gcx, self.ir, self.type_index)
-                    .with_storage(self.storage.clone())
                     .with_outputs(self.outputs.clone());
 
                 if !args.is_empty() {

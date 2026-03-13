@@ -63,7 +63,7 @@ pub struct StepFile {
 impl StepFile {
     pub fn open(url: &str, reader: &dyn FileReader) -> Result<Self, String> {
         let content = reader
-            .read_to_string(url)
+            .read_to_string(url, &std::collections::HashMap::new())
             .map_err(|e| format!("failed to read IFC file: {}", e))?;
         Ok(Self { content })
     }

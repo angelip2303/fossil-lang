@@ -116,4 +116,4 @@ clean
   label = row.current_club_domestic_competition_id,
   identifier = row.current_club_domestic_competition_id
 }
-|> Rdf.serialize(@fc-data/players.ttl)
+|> Rdf.materialize(@fc-data/players)

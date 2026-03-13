@@ -15,7 +15,7 @@ use fossil_lang::traits::source::Source;
 use polars::prelude::*;
 
 use crate::cloud_options::build_cloud_options;
-use crate::utils::{lookup_type_id, polars_schema_to_field_specs, resolve_path, validate_extension, validate_path};
+use crate::utils::{lookup_type_id, polars_schema_to_field_specs, validate_extension, validate_path};
 
 #[derive(Debug, Clone)]
 pub struct CsvOptions {
@@ -40,18 +40,18 @@ impl Default for CsvOptions {
 pub struct CsvSource {
     pub path: PlPath,
     pub options: CsvOptions,
-    pub storage: HashMap<String, String>,
+    pub credentials: HashMap<String, String>,
 }
 
 impl CsvSource {
-    pub fn new(path: PlPath, options: CsvOptions, storage: HashMap<String, String>) -> Self {
-        Self { path, options, storage }
+    pub fn new(path: PlPath, options: CsvOptions, credentials: HashMap<String, String>) -> Self {
+        Self { path, options, credentials }
     }
 }
 
 impl Source for CsvSource {
     fn scan(&self) -> PolarsResult<LazyFrame> {
-        let cloud_opts = build_cloud_options(self.path.to_str(), &self.storage);
+        let cloud_opts = build_cloud_options(self.path.to_str(), &self.credentials);
         LazyCsvReader::new(self.path.clone())
             .with_separator(self.options.delimiter)
             .with_has_header(self.options.has_header)
@@ -99,8 +99,8 @@ impl TypeProviderImpl for CsvProvider {
         type_name: &str,
         loc: Loc,
     ) -> Result<ProviderOutput, FossilError> {
-        let path_str = args.require_string("path", "csv", loc)?;
-        let path = resolve_path(path_str);
+        let (raw_path, resolved) = args.resolve_path("path", ctx.path_resolver, "csv", loc)?;
+        let path = PlPath::from_str(&resolved.url);
         validate_extension(path.as_ref(), &["csv"], loc)?;
         validate_path(path.as_ref(), loc)?;
 
@@ -120,7 +120,7 @@ impl TypeProviderImpl for CsvProvider {
             options.has_header = has_header;
         }
 
-        let csv_source = CsvSource::new(path, options, ctx.storage.clone());
+        let csv_source = CsvSource::new(path, options.clone(), resolved.credentials);
         let schema = csv_source
             .infer_schema()
             .map_err(|e| FossilError::data_error(e.to_string(), loc))?;
@@ -129,7 +129,8 @@ impl TypeProviderImpl for CsvProvider {
 
         let module_spec = ModuleSpec {
             functions: vec![FunctionDef::new("load", CsvLoadFunction {
-                source: csv_source,
+                raw_path,
+                options,
                 type_name: type_name.to_string(),
                 loc,
             })],
@@ -141,7 +142,8 @@ impl TypeProviderImpl for CsvProvider {
 }
 
 pub struct CsvLoadFunction {
-    source: CsvSource,
+    raw_path: String,
+    options: CsvOptions,
     type_name: String,
     loc: Loc,
 }
@@ -162,10 +164,13 @@ impl FunctionImpl for CsvLoadFunction {
     }
 
     fn call(&self, _args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
+        let resolved = ctx.gcx.path_resolver.resolve(&self.raw_path)
+            .map_err(|e| FossilError::data_error(e, self.loc))?;
+
         let source = CsvSource {
-            path: self.source.path.clone(),
-            options: self.source.options.clone(),
-            storage: (*ctx.storage).clone(),
+            path: PlPath::from_str(&resolved.url),
+            options: self.options.clone(),
+            credentials: resolved.credentials,
         };
 
         let frame = source.scan()

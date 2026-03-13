@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::error::FossilError;
@@ -6,18 +5,6 @@ use crate::ir::StmtKind;
 use crate::passes::IrProgram;
 use crate::runtime::evaluator::IrEvaluator;
 use crate::runtime::value::{Environment, Value};
-
-pub struct ExecutionConfig {
-    pub storage: HashMap<String, String>,
-}
-
-impl Default for ExecutionConfig {
-    fn default() -> Self {
-        Self {
-            storage: HashMap::new(),
-        }
-    }
-}
 
 /// Describes a single output produced during script execution.
 #[derive(Debug, Clone)]
@@ -42,13 +29,6 @@ pub struct IrExecutor;
 
 impl IrExecutor {
     pub fn execute(program: IrProgram) -> Result<ExecutionResult, FossilError> {
-        Self::execute_with_config(program, ExecutionConfig::default())
-    }
-
-    pub fn execute_with_config(
-        program: IrProgram,
-        config: ExecutionConfig,
-    ) -> Result<ExecutionResult, FossilError> {
         let outputs: Arc<Mutex<Vec<OutputRecord>>> = Arc::new(Mutex::new(Vec::new()));
 
         let IrProgram { ir, gcx, type_index, resolutions, typeck_results } = program;
@@ -59,7 +39,6 @@ impl IrExecutor {
             &resolutions,
             &typeck_results,
             Environment::default(),
-            Arc::new(config.storage),
             outputs.clone(),
         );
         let mut values = Vec::new();

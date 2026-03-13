@@ -13,7 +13,7 @@ use shex_ast::compact::ShExParser;
 use shex_ast::ShExFormat;
 
 use crate::shapes::{ShapeField, ValidateValue, extract_local_name, xsd_to_fossil_type};
-use crate::utils::{resolve_path, validate_extension, validate_path};
+use crate::utils::{validate_extension, validate_path};
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
@@ -53,8 +53,8 @@ impl TypeProviderImpl for ShexProvider {
         type_name: &str,
         loc: Loc,
     ) -> Result<ProviderOutput, FossilError> {
-        let path_str = args.require_string("path", "shex", loc)?;
-        let path = resolve_path(path_str);
+        let (_, resolved) = args.resolve_path("path", ctx.path_resolver, "shex", loc)?;
+        let path = polars::prelude::PlPath::from_str(&resolved.url);
         let extensions = shex_extensions();
         validate_extension(path.as_ref(), &extensions, loc)?;
         validate_path(path.as_ref(), loc)?;
@@ -63,9 +63,9 @@ impl TypeProviderImpl for ShexProvider {
         let ext = path_ref.extension().unwrap_or_default();
         let format = detect_shex_format(ext).unwrap_or(ShExFormat::ShExC);
 
-        let path_str = path.to_str().to_string();
-        let shex_content = ctx.file_reader.read_to_string(&path_str)
-            .map_err(|e| FossilError::read_error(path_str.clone(), e, loc))?;
+        let url_str = resolved.url.clone();
+        let shex_content = ctx.file_reader.read_to_string(&url_str, &resolved.credentials)
+            .map_err(|e| FossilError::read_error(url_str.clone(), e, loc))?;
 
         let schema = parse_shex_schema(&shex_content, &format, loc)?;
 

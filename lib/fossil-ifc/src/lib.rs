@@ -14,7 +14,7 @@ use fossil_lang::traits::provider::{
     ProviderKind, ProviderOutput, ProviderParamInfo, ProviderSchema, TypeProviderImpl,
 };
 use fossil_lang::traits::source::Source;
-use fossil_providers::utils::{resolve_path, validate_extension, validate_path};
+use fossil_providers::utils::{validate_extension, validate_path};
 
 use schema::{datatype_to_primitive, IfcEntityDef, IfcFieldDef, Optionality, ALL_ENTITIES};
 use source::IfcSource;
@@ -62,10 +62,10 @@ impl TypeProviderImpl for IfcProvider {
         type_name: &str,
         loc: Loc,
     ) -> Result<ProviderOutput, FossilError> {
-        let path_str = args.require_string("path", "ifc", loc)?;
+        let (_, resolved) = args.resolve_path("path", ctx.path_resolver, "ifc", loc)?;
         let entity_str = args.require_string("entity", "ifc", loc)?;
 
-        let path = resolve_path(path_str);
+        let path = polars::prelude::PlPath::from_str(&resolved.url);
         validate_extension(path.as_ref(), &["ifc"], loc)?;
         validate_path(path.as_ref(), loc)?;
 

@@ -27,7 +27,10 @@ impl RdfGraph {
     }
 
     /// Open an RDF Parquet dataset, optionally from cloud storage with credentials.
-    pub fn open_with_options(base: &str, creds: &HashMap<String, String>) -> Result<Self, RdfGraphError> {
+    pub fn open_with_options(
+        base: &str,
+        creds: &HashMap<String, String>,
+    ) -> Result<Self, RdfGraphError> {
         let scan_args = Self::build_scan_args(base, creds);
         let meta = DatasetMeta::load_with_args(base, &scan_args)?;
         Ok(Self {
@@ -85,7 +88,8 @@ impl RdfGraph {
 
     /// Total triple count from `_meta.parquet` (no data scan).
     pub fn triple_count(&self) -> u64 {
-        self.meta.predicate_stats
+        self.meta
+            .predicate_stats
             .column("count")
             .ok()
             .and_then(|c| c.u64().ok())
@@ -141,7 +145,8 @@ impl RdfGraph {
     ) -> Result<LazyFrame, RdfGraphError> {
         let base = match (s, p, o) {
             (Some(subject), _, _) => self.entity(subject)?,
-            (_, Some(predicate), _) => self.predicate(predicate)?
+            (_, Some(predicate), _) => self
+                .predicate(predicate)?
                 .with_column(lit(predicate).alias("predicate"))
                 .with_column(lit("").alias("object_datatype")),
             (_, _, Some(object)) => self.references_to(object)?,
@@ -174,7 +179,8 @@ impl RdfGraph {
     pub fn search(&self, query: &str, limit: u32) -> Result<LazyFrame, RdfGraphError> {
         let query_lower = query.to_lowercase();
 
-        let labels = self.predicate(RDFS_LABEL)?
+        let labels = self
+            .predicate(RDFS_LABEL)?
             .filter(
                 col("object")
                     .str()
@@ -182,29 +188,32 @@ impl RdfGraph {
                     .str()
                     .contains_literal(lit(query_lower.as_str())),
             )
-            .select([
-                col("subject"),
-                col("object").alias("label"),
-            ])
+            .select([col("subject"), col("object").alias("label")])
             .limit(limit);
 
         // Join with rdf:type for grouping
-        let types = self.predicate(RDF_TYPE)?
-            .select([
-                col("subject"),
-                col("object").alias("type"),
-            ]);
+        let types = self
+            .predicate(RDF_TYPE)?
+            .select([col("subject"), col("object").alias("type")]);
 
         // Join with rdfs:comment for description
-        let comments = self.predicate(RDFS_COMMENT)?
-            .select([
-                col("subject"),
-                col("object").alias("description"),
-            ]);
+        let comments = self
+            .predicate(RDFS_COMMENT)?
+            .select([col("subject"), col("object").alias("description")]);
 
         Ok(labels
-            .join(types, [col("subject")], [col("subject")], JoinType::Left.into())
-            .join(comments, [col("subject")], [col("subject")], JoinType::Left.into())
+            .join(
+                types,
+                [col("subject")],
+                [col("subject")],
+                JoinType::Left.into(),
+            )
+            .join(
+                comments,
+                [col("subject")],
+                [col("subject")],
+                JoinType::Left.into(),
+            )
             .limit(limit))
     }
 
@@ -212,8 +221,7 @@ impl RdfGraph {
     pub fn expand(&self, iri: &str, limit: u32) -> Result<LazyFrame, RdfGraphError> {
         let outgoing = self.entity(iri)?;
         let incoming = self.references_to(iri)?;
-        Ok(concat([outgoing, incoming], UnionArgs::default())?
-            .limit(limit))
+        Ok(concat([outgoing, incoming], UnionArgs::default())?.limit(limit))
     }
 }
 

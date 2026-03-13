@@ -232,7 +232,7 @@ impl ProviderExpander {
                     let ctor_params: Vec<Symbol> = entry.ctor_params.iter().map(|p| p.name).collect();
                     let mut ctx = ProviderContext {
                         interner: &mut self.gcx.interner,
-                        storage: &self.gcx.storage,
+                        path_resolver: self.gcx.path_resolver.as_ref(),
                         file_reader: &caching_reader,
                         ctor_params,
                         expected_type_count: if entries.len() > 1 { Some(entries.len()) } else { None },
@@ -312,7 +312,7 @@ impl ProviderExpander {
         let provider_output = {
             let mut ctx = ProviderContext {
                 interner: &mut self.gcx.interner,
-                storage: &self.gcx.storage,
+                path_resolver: self.gcx.path_resolver.as_ref(),
                 file_reader: self.gcx.file_reader.as_ref(),
                 ctor_params: vec![],
                 expected_type_count: None,

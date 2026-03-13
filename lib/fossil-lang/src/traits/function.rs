@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::context::DefId;
@@ -13,7 +12,6 @@ pub struct RuntimeContext<'a> {
     pub ir: &'a Ir,
     pub type_index: &'a TypeIndex,
     pub current_type: Option<DefId>,
-    pub storage: Arc<HashMap<String, String>>,
     outputs: Arc<Mutex<Vec<OutputRecord>>>,
 }
 
@@ -24,18 +22,12 @@ impl<'a> RuntimeContext<'a> {
             ir,
             type_index,
             current_type: None,
-            storage: Arc::new(HashMap::new()),
             outputs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub fn with_type(mut self, type_def_id: DefId) -> Self {
         self.current_type = Some(type_def_id);
-        self
-    }
-
-    pub fn with_storage(mut self, storage: Arc<HashMap<String, String>>) -> Self {
-        self.storage = storage;
         self
     }
 

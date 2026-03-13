@@ -6,16 +6,17 @@ use crate::ast::{Attribute, Literal, PrimitiveType, ProviderArgument};
 use crate::context::{Interner, Symbol};
 use crate::error::{FossilError, FossilWarnings};
 use crate::traits::function::FunctionImpl;
+use crate::traits::resolver::PathResolver;
 
 pub trait FileReader: Send + Sync + std::fmt::Debug {
-    fn read_to_string(&self, url: &str) -> Result<String, String>;
+    fn read_to_string(&self, url: &str, credentials: &HashMap<String, String>) -> Result<String, String>;
 }
 
 #[derive(Debug)]
 pub struct LocalFileReader;
 
 impl FileReader for LocalFileReader {
-    fn read_to_string(&self, path: &str) -> Result<String, String> {
+    fn read_to_string(&self, path: &str, _credentials: &HashMap<String, String>) -> Result<String, String> {
         std::fs::read_to_string(path).map_err(|e| e.to_string())
     }
 }
@@ -150,6 +151,23 @@ impl ProviderArgs {
         self.get_string(name)
             .ok_or_else(|| FossilError::missing_argument(name, provider, loc))
     }
+
+    /// Resolve a path parameter through the host's PathResolver.
+    /// Returns `(raw_path, ResolvedPath)` — provider uses `ResolvedPath` for immediate I/O
+    /// (schema inference) and stores `raw_path` for lazy re-resolution at runtime.
+    pub fn resolve_path(
+        &self,
+        name: &'static str,
+        resolver: &dyn PathResolver,
+        provider: &'static str,
+        loc: Loc,
+    ) -> Result<(String, crate::traits::resolver::ResolvedPath), FossilError> {
+        let raw = self.require_string(name, provider, loc)?.to_string();
+        let resolved = resolver
+            .resolve(&raw)
+            .map_err(|e| FossilError::data_error(e, loc))?;
+        Ok((raw, resolved))
+    }
 }
 
 pub fn resolve_to_provider_args(
@@ -241,11 +259,11 @@ impl std::fmt::Debug for CachingFileReader<'_> {
 }
 
 impl FileReader for CachingFileReader<'_> {
-    fn read_to_string(&self, path: &str) -> Result<String, String> {
+    fn read_to_string(&self, path: &str, credentials: &HashMap<String, String>) -> Result<String, String> {
         if let Some(cached) = self.cache.lock().unwrap().get(path).cloned() {
             return Ok(cached);
         }
-        let content = self.inner.read_to_string(path)?;
+        let content = self.inner.read_to_string(path, credentials)?;
         self.cache.lock().unwrap().insert(path.to_string(), content.clone());
         Ok(content)
     }
@@ -253,7 +271,7 @@ impl FileReader for CachingFileReader<'_> {
 
 pub struct ProviderContext<'a> {
     pub interner: &'a mut Interner,
-    pub storage: &'a HashMap<String, String>,
+    pub path_resolver: &'a dyn PathResolver,
     pub file_reader: &'a dyn FileReader,
     pub ctor_params: Vec<Symbol>,
     pub expected_type_count: Option<usize>,

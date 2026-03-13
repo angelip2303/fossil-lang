@@ -5,7 +5,7 @@ use fossil_lang::error::FossilError;
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::traits::provider::{FieldSpec, FieldType};
 
-use polars::prelude::{CloudScheme, PlPath, PlPathRef, Schema};
+use polars::prelude::{CloudScheme, PlPathRef, Schema};
 
 pub fn lookup_type_id(name: &str, gcx: &GlobalContext) -> Option<DefId> {
     gcx.interner.lookup(name).and_then(|sym| {
@@ -65,6 +65,3 @@ pub fn polars_schema_to_field_specs(
         .collect()
 }
 
-pub fn resolve_path(path_str: &str) -> PlPath {
-    PlPath::from_str(path_str)
-}
