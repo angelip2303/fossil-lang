@@ -170,8 +170,8 @@ impl RdfGraph {
         Ok(lf)
     }
 
-    /// Search by `rdfs:label`. Returns collected DataFrame: `[subject, label, type, description]`.
-    pub fn search(&self, query: &str, limit: u32) -> Result<DataFrame, RdfGraphError> {
+    /// Search by `rdfs:label`. Returns lazy: `[subject, label, type, description]`.
+    pub fn search(&self, query: &str, limit: u32) -> Result<LazyFrame, RdfGraphError> {
         let query_lower = query.to_lowercase();
 
         let labels = self.predicate(RDFS_LABEL)?
@@ -202,23 +202,18 @@ impl RdfGraph {
                 col("object").alias("description"),
             ]);
 
-        let result = labels
+        Ok(labels
             .join(types, [col("subject")], [col("subject")], JoinType::Left.into())
             .join(comments, [col("subject")], [col("subject")], JoinType::Left.into())
-            .limit(limit)
-            .collect()?;
-
-        Ok(result)
+            .limit(limit))
     }
 
     /// 1-hop neighborhood: outgoing + incoming triples.
-    pub fn expand(&self, iri: &str, limit: u32) -> Result<DataFrame, RdfGraphError> {
+    pub fn expand(&self, iri: &str, limit: u32) -> Result<LazyFrame, RdfGraphError> {
         let outgoing = self.entity(iri)?;
         let incoming = self.references_to(iri)?;
-        concat([outgoing, incoming], UnionArgs::default())?
-            .limit(limit)
-            .collect()
-            .map_err(Into::into)
+        Ok(concat([outgoing, incoming], UnionArgs::default())?
+            .limit(limit))
     }
 }
 

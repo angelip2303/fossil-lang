@@ -20,16 +20,15 @@ impl<'a> SparqlEngine<'a> {
         Self { graph }
     }
 
-    /// Execute a SPARQL SELECT query, returning a collected DataFrame.
-    pub fn select(&self, sparql: &str) -> Result<DataFrame, RdfGraphError> {
+    /// Translate a SPARQL SELECT query into a lazy Polars plan.
+    pub fn select(&self, sparql: &str) -> Result<LazyFrame, RdfGraphError> {
         let query = SparqlParser::new()
             .parse_query(sparql)
             .map_err(|e| RdfGraphError::SparqlParse(e.to_string()))?;
 
         match query {
             Query::Select { pattern, .. } => {
-                let lf = translator::translate_pattern(self.graph, &pattern)?;
-                lf.collect().map_err(Into::into)
+                translator::translate_pattern(self.graph, &pattern)
             }
             _ => Err(RdfGraphError::UnsupportedSparql(
                 "Only SELECT queries are supported".into(),
