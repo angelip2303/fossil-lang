@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::common::Path;
-use crate::traits::function::FunctionImpl;
+use crate::traits::function::{FunctionEffect, FunctionImpl};
 use crate::traits::provider::TypeProviderImpl;
 
 pub mod global;
@@ -286,6 +286,13 @@ impl Definitions {
                 }
                 Some(current_id)
             }
+        }
+    }
+
+    pub fn function_effects(&self, id: DefId) -> &[FunctionEffect] {
+        match &self.get(id).kind {
+            DefKind::Func(f) => f.effects(),
+            _ => &[],
         }
     }
 

@@ -8,3 +8,5 @@ pub mod parser;
 pub mod passes;
 pub mod runtime;
 pub mod traits;
+
+pub use traits::function::FunctionEffect;

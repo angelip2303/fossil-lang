@@ -45,6 +45,13 @@ impl<'a> RuntimeContext<'a> {
     }
 }
 
+/// Declarative effect a built-in function may have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionEffect {
+    /// The function writes data to an external destination.
+    Sink,
+}
+
 pub trait FunctionImpl: Send + Sync {
     fn signature(
         &self,
@@ -54,4 +61,9 @@ pub trait FunctionImpl: Send + Sync {
     ) -> Polytype;
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError>;
+
+    /// Effects declared by this function. Default: none.
+    fn effects(&self) -> &[FunctionEffect] {
+        &[]
+    }
 }

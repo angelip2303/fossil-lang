@@ -10,7 +10,7 @@ use fossil_lang::ir::{Ir, Polytype, TypeIndex, TypeKind as IrTypeKind, TypeVar};
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::executor::OutputKind;
 use fossil_lang::runtime::value::{Emission, Value};
-use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
+use fossil_lang::traits::function::{FunctionEffect, FunctionImpl, RuntimeContext};
 
 use crate::string::template::parse_template;
 use metadata::{RdfFieldAttrs, RdfTypeAttrs, build_xsd_type_map, field_primitive_type};
@@ -145,6 +145,10 @@ impl FunctionImpl for RdfMaterializeFunction {
         let path_ty = ir.string_type();
         let output_ty = ir.unit_type();
         Polytype::poly(vec![t_var], ir.fn_type(vec![t_ty, path_ty], output_ty))
+    }
+
+    fn effects(&self) -> &[FunctionEffect] {
+        &[FunctionEffect::Sink]
     }
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
