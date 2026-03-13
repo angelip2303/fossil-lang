@@ -8,19 +8,6 @@ use crate::error::{FossilError, FossilWarnings};
 use crate::traits::function::FunctionImpl;
 use crate::traits::resolver::PathResolver;
 
-pub trait FileReader: Send + Sync + std::fmt::Debug {
-    fn read_to_string(&self, url: &str, credentials: &HashMap<String, String>) -> Result<String, String>;
-}
-
-#[derive(Debug)]
-pub struct LocalFileReader;
-
-impl FileReader for LocalFileReader {
-    fn read_to_string(&self, path: &str, _credentials: &HashMap<String, String>) -> Result<String, String> {
-        std::fs::read_to_string(path).map_err(|e| e.to_string())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
@@ -241,38 +228,9 @@ fn literal_to_provider_literal(lit: &Literal, interner: &Interner) -> ProviderLi
     }
 }
 
-pub struct CachingFileReader<'a> {
-    inner: &'a dyn FileReader,
-    cache: std::sync::Mutex<HashMap<String, String>>,
-}
-
-impl<'a> CachingFileReader<'a> {
-    pub fn new(inner: &'a dyn FileReader) -> Self {
-        Self { inner, cache: std::sync::Mutex::new(HashMap::new()) }
-    }
-}
-
-impl std::fmt::Debug for CachingFileReader<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CachingFileReader").finish()
-    }
-}
-
-impl FileReader for CachingFileReader<'_> {
-    fn read_to_string(&self, path: &str, credentials: &HashMap<String, String>) -> Result<String, String> {
-        if let Some(cached) = self.cache.lock().unwrap().get(path).cloned() {
-            return Ok(cached);
-        }
-        let content = self.inner.read_to_string(path, credentials)?;
-        self.cache.lock().unwrap().insert(path.to_string(), content.clone());
-        Ok(content)
-    }
-}
-
 pub struct ProviderContext<'a> {
     pub interner: &'a mut Interner,
     pub path_resolver: &'a dyn PathResolver,
-    pub file_reader: &'a dyn FileReader,
     pub ctor_params: Vec<Symbol>,
     pub expected_type_count: Option<usize>,
     /// Positional index of this entry within a multi-type destructure.

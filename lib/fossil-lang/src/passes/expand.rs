@@ -6,7 +6,7 @@ use crate::context::global::TypeInfo;
 use crate::error::{FossilError, FossilErrors, FossilWarnings};
 use crate::passes::GlobalContext;
 use crate::traits::provider::{
-    CachingFileReader, FieldType, ModuleSpec, ProviderArgs, ProviderContext, ProviderKind,
+    FieldType, ModuleSpec, ProviderArgs, ProviderContext, ProviderKind,
     ProviderSchema, resolve_to_provider_args,
 };
 
@@ -221,9 +221,7 @@ impl ProviderExpander {
             ));
         }
 
-        // Collect all provider outputs first (using caching reader for shared file reads)
         let outputs: Vec<_> = {
-            let caching_reader = CachingFileReader::new(self.gcx.file_reader.as_ref());
             entries
                 .iter()
                 .enumerate()
@@ -233,7 +231,6 @@ impl ProviderExpander {
                     let mut ctx = ProviderContext {
                         interner: &mut self.gcx.interner,
                         path_resolver: self.gcx.path_resolver.as_ref(),
-                        file_reader: &caching_reader,
                         ctor_params,
                         expected_type_count: if entries.len() > 1 { Some(entries.len()) } else { None },
                         entry_index: Some(i),
@@ -313,7 +310,6 @@ impl ProviderExpander {
             let mut ctx = ProviderContext {
                 interner: &mut self.gcx.interner,
                 path_resolver: self.gcx.path_resolver.as_ref(),
-                file_reader: self.gcx.file_reader.as_ref(),
                 ctor_params: vec![],
                 expected_type_count: None,
                 entry_index: None,

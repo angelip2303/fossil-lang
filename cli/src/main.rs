@@ -49,7 +49,6 @@ fn main() -> miette::Result<()> {
 fn compile(path: PathBuf) -> miette::Result<CompileResult> {
     let mut gcx = GlobalContext::default();
     fossil_providers::init(&mut gcx);
-    fossil_ifc::init(&mut gcx);
     fossil_stdlib::init(&mut gcx);
 
     let source_content = read_to_string(&path).into_diagnostic()?;

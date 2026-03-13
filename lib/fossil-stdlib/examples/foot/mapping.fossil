@@ -1,4 +1,4 @@
-let data = csv!(@fc-data/players.csv)
+let data = csv!("@fc-data/players.csv")
 
 type CleanData do
   player_id: int,
@@ -62,7 +62,7 @@ type {
   MonetaryAmount(id: int),
   #[rdf(subject = "http://example.org/employment-agency/{id|slug}")]
   EmploymentAgency(id: string)
-} = shex!(@fc-vocab/players.shex)
+} = shex!("@fc-vocab/players.shex")
 
 clean
 |> each row -> Player(row.player_id) {
@@ -116,4 +116,4 @@ clean
   label = row.current_club_domestic_competition_id,
   identifier = row.current_club_domestic_competition_id
 }
-|> Rdf.materialize(@fc-data/players)
+|> Rdf.materialize("@fc-data/players")

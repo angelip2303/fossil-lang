@@ -23,4 +23,3 @@ serde_json = "1"
 # internal dependencies
 fossil-lang.workspace = true
 fossil-macros.workspace = true
-fossil-providers.workspace = true

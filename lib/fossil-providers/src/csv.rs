@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use fossil_lang::ast::Loc;
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
@@ -13,8 +11,8 @@ use fossil_lang::traits::provider::{
 use fossil_lang::traits::source::Source;
 
 use polars::prelude::*;
+use polars::prelude::cloud::CloudOptions;
 
-use crate::cloud_options::build_cloud_options;
 use crate::utils::{lookup_type_id, polars_schema_to_field_specs, validate_extension, validate_path};
 
 #[derive(Debug, Clone)]
@@ -40,24 +38,23 @@ impl Default for CsvOptions {
 pub struct CsvSource {
     pub path: PlPath,
     pub options: CsvOptions,
-    pub credentials: HashMap<String, String>,
+    pub cloud_options: Option<CloudOptions>,
 }
 
 impl CsvSource {
-    pub fn new(path: PlPath, options: CsvOptions, credentials: HashMap<String, String>) -> Self {
-        Self { path, options, credentials }
+    pub fn new(path: PlPath, options: CsvOptions, cloud_options: Option<CloudOptions>) -> Self {
+        Self { path, options, cloud_options }
     }
 }
 
 impl Source for CsvSource {
     fn scan(&self) -> PolarsResult<LazyFrame> {
-        let cloud_opts = build_cloud_options(self.path.to_str(), &self.credentials);
         LazyCsvReader::new(self.path.clone())
             .with_separator(self.options.delimiter)
             .with_has_header(self.options.has_header)
             .with_quote_char(self.options.quote_char)
             .with_infer_schema_length(self.options.infer_schema_length)
-            .with_cloud_options(cloud_opts)
+            .with_cloud_options(self.cloud_options.clone())
             .finish()
     }
 }
@@ -120,7 +117,7 @@ impl TypeProviderImpl for CsvProvider {
             options.has_header = has_header;
         }
 
-        let csv_source = CsvSource::new(path, options.clone(), resolved.credentials);
+        let csv_source = CsvSource::new(path, options.clone(), resolved.cloud_options);
         let schema = csv_source
             .infer_schema()
             .map_err(|e| FossilError::data_error(e.to_string(), loc))?;
@@ -170,7 +167,7 @@ impl FunctionImpl for CsvLoadFunction {
         let source = CsvSource {
             path: PlPath::from_str(&resolved.url),
             options: self.options.clone(),
-            credentials: resolved.credentials,
+            cloud_options: resolved.cloud_options,
         };
 
         let frame = source.scan()

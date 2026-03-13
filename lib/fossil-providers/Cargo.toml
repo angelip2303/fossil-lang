@@ -16,8 +16,6 @@ rust-version.workspace = true
 # external dependencies
 polars.workspace = true
 calamine = "0.31"
-shex_ast = "0.1"
-iri_s = "0.1"
 
 # internal dependencies
 fossil-lang.workspace = true

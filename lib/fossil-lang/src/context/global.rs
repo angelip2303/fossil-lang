@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::ast::RecordField;
 use crate::common::PrimitiveType;
 use crate::context::{DefId, DefKind, Definitions, Interner, Symbol, TypeMetadata};
-use crate::traits::provider::{FileReader, LocalFileReader, ModuleSpec, ProviderInfo, TypeProviderImpl};
+use crate::traits::provider::{ModuleSpec, ProviderInfo, TypeProviderImpl};
 use crate::traits::resolver::{DefaultPathResolver, PathResolver};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +28,7 @@ pub type ModuleGeneratorFn = Arc<dyn Fn(&TypeInfo) -> Option<ModuleSpec> + Send 
 /// - **Core identity**: `interner` and `definitions` — symbol table and definition registry
 /// - **Type metadata**: `type_metadata` and `registered_types` — type attributes and field type info
 /// - **Extension points**: `module_generators` — stdlib hooks
-/// - **I/O configuration**: `path_resolver` and `file_reader` — path resolution and file access
+/// - **I/O configuration**: `path_resolver` — path resolution
 #[derive(Clone)]
 pub struct GlobalContext {
     // -- Core identity --
@@ -44,7 +44,6 @@ pub struct GlobalContext {
 
     // -- I/O configuration --
     pub path_resolver: Arc<dyn PathResolver>,
-    pub file_reader: Arc<dyn FileReader>,
 }
 
 impl GlobalContext {
@@ -112,7 +111,6 @@ impl Default for GlobalContext {
             registered_types: HashMap::new(),
             module_generators: Vec::new(),
             path_resolver: Arc::new(DefaultPathResolver),
-            file_reader: Arc::new(LocalFileReader),
         }
     }
 }

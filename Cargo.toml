@@ -5,7 +5,6 @@ members = [
     "lib/fossil-macros",
     "lib/fossil-providers",
     "lib/fossil-stdlib",
-    "lib/fossil-ifc",
     "lib/fossil-lsp",
     "lib/fossil-rdf",
 ]
@@ -34,7 +33,6 @@ fossil-lang = { path = "./lib/fossil-lang" }
 fossil-macros = { path = "./lib/fossil-macros" }
 fossil-providers = { path = "./lib/fossil-providers" }
 fossil-stdlib = { path = "./lib/fossil-stdlib" }
-fossil-ifc = { path = "./lib/fossil-ifc" }
 fossil-lsp = { path = "./lib/fossil-lsp" }
 fossil-rdf = { path = "./lib/fossil-rdf" }
 

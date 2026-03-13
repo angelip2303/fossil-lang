@@ -15,9 +15,8 @@
 //! └── _types.parquet       # Type IRI → directory mapping
 //! ```
 
-use std::collections::HashMap;
-
 use polars::prelude::*;
+use polars::prelude::cloud::CloudOptions;
 use polars::prelude::sync_on_close::SyncOnCloseType;
 
 use fossil_lang::error::FossilError;
@@ -37,13 +36,13 @@ fn polars_write_err(e: PolarsError) -> RdfError {
     RdfError::Write(e.to_string())
 }
 
-fn sink(lf: LazyFrame, path: &str, _creds: &HashMap<String, String>) -> Result<(), FossilError> {
+fn sink(lf: LazyFrame, path: &str, cloud_opts: Option<CloudOptions>) -> Result<(), FossilError> {
     let target = SinkTarget::Path(PlPath::from_str(path));
     let options = ParquetWriteOptions {
         row_group_size: Some(50_000),
         ..Default::default()
     };
-    lf.sink_parquet(target, options, None, SINK_OPTIONS)
+    lf.sink_parquet(target, options, cloud_opts, SINK_OPTIONS)
         .map_err(polars_write_err)?
         .collect()
         .map_err(polars_write_err)?;
@@ -55,7 +54,7 @@ pub fn materialize(
     frame: &LazyFrame,
     configs: &[OutputConfig],
     base_path: &str,
-    creds: &HashMap<String, String>,
+    cloud_opts: Option<CloudOptions>,
 ) -> Result<(), FossilError> {
     let triple_frames: Vec<LazyFrame> = configs
         .iter()
@@ -75,7 +74,7 @@ pub fn materialize(
     sink(
         triples.clone().sort(["subject"], Default::default()),
         &format!("{base_path}/_subjects.parquet"),
-        creds,
+        cloud_opts.clone(),
     )?;
 
     // OPS index
@@ -84,7 +83,7 @@ pub fn materialize(
             .clone()
             .sort(["object_datatype", "object"], Default::default()),
         &format!("{base_path}/_objects.parquet"),
-        creds,
+        cloud_opts.clone(),
     )?;
 
     // PSO indices (one file per predicate)
@@ -98,7 +97,7 @@ pub fn materialize(
                 "{base_path}/_predicates/{}.parquet",
                 predicate_to_filename(pred)
             ),
-            creds,
+            cloud_opts.clone(),
         )?;
     }
 
@@ -123,7 +122,7 @@ pub fn materialize(
         .map_err(polars_write_err)?
         .lazy(),
         &format!("{base_path}/_types.parquet"),
-        creds,
+        cloud_opts.clone(),
     )?;
 
     // Predicate statistics (last use — no clone needed)
@@ -137,7 +136,7 @@ pub fn materialize(
                 col("object").max().alias("max"),
             ]),
         &format!("{base_path}/_meta.parquet"),
-        creds,
+        cloud_opts.clone(),
     )?;
 
     Ok(())
