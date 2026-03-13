@@ -1,11 +1,8 @@
 pub mod clean;
 pub mod rdf;
-pub mod report;
 pub mod string;
 
-pub use rdf::RdfFragmentFunction;
-pub use rdf::RdfSerializeFunction;
-pub use report::ReportCsvFunction;
+pub use rdf::RdfMaterializeFunction;
 
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::traits::provider::{FunctionDef, ModuleSpec};
@@ -13,12 +10,8 @@ use fossil_lang::traits::provider::{FunctionDef, ModuleSpec};
 pub fn init(gcx: &mut GlobalContext) {
     gcx.register_module("Rdf", ModuleSpec {
         functions: vec![
-            FunctionDef::new("serialize", RdfSerializeFunction),
-            FunctionDef::new("fragments", RdfFragmentFunction),
+            FunctionDef::new("materialize", RdfMaterializeFunction),
         ],
-    });
-    gcx.register_module("Report", ModuleSpec {
-        functions: vec![FunctionDef::new("csv", ReportCsvFunction)],
     });
 
     gcx.module_generators.push(clean::clean_module_generator());

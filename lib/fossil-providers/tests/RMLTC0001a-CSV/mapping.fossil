@@ -8,4 +8,4 @@ end
 
 input
 |> each row -> Output(row.Name) { Name = row.Name }
-|> Rdf.serialize("tests/RMLTC0001a-CSV/actual.nq")
+|> Rdf.materialize("tests/RMLTC0001a-CSV/actual")

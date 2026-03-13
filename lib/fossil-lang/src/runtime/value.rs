@@ -5,153 +5,36 @@ use polars::prelude::*;
 
 use crate::context::{DefId, Symbol};
 use crate::traits::function::FunctionImpl;
-use crate::traits::source::Source;
 
-#[derive(Debug, Clone)]
-pub struct JoinTransform {
-    pub right_source: Option<Box<dyn Source>>,
-    pub right_transforms: Vec<Transform>,
-    pub left_on: Vec<Expr>,
-    pub right_on: Vec<Expr>,
-    pub suffix: String,
-}
-
-#[derive(Debug, Clone)]
-pub enum Transform {
-    Select(Vec<Expr>),
-    Filter(Expr),
-    Join(JoinTransform),
-}
-
+/// A single emission definition produced by record instances in projection context.
 #[derive(Clone, Debug)]
-pub struct Plan {
-    pub source: Option<Box<dyn Source>>,
-    pub transforms: Vec<Transform>,
-    pub schema: Arc<Schema>,
-    pub outputs: Vec<OutputSpec>,
-}
-
-impl Plan {
-    pub fn from_source(source: Box<dyn Source>, schema: Schema) -> Self {
-        Self {
-            source: Some(source),
-            transforms: Vec::new(),
-            schema: Arc::new(schema),
-            outputs: Vec::new(),
-        }
-    }
-
-    pub fn empty(schema: Schema) -> Self {
-        Self {
-            source: None,
-            transforms: Vec::new(),
-            schema: Arc::new(schema),
-            outputs: Vec::new(),
-        }
-    }
-
-    /// Column selection/transformation — like lf.select([...])
-    pub fn select(mut self, exprs: Vec<Expr>) -> Self {
-        self.schema = Arc::new(schema_from_exprs(&exprs));
-        self.transforms.push(Transform::Select(exprs));
-        self.outputs.clear();
-        self
-    }
-
-    /// Row filtering — like lf.filter(...)
-    pub fn filter(mut self, expr: Expr) -> Self {
-        self.transforms.push(Transform::Filter(expr));
-        self.outputs.clear();
-        self
-    }
-
-    /// Join — like lf.join(...)
-    pub fn join(
-        mut self,
-        right: Plan,
-        left_on: Vec<Expr>,
-        right_on: Vec<Expr>,
-        suffix: String,
-    ) -> Self {
-        let merged = self.merge_schema(&right.schema, &suffix);
-        self.transforms.push(Transform::Join(JoinTransform {
-            right_source: right.source,
-            right_transforms: right.transforms,
-            left_on,
-            right_on,
-            suffix,
-        }));
-        self.schema = Arc::new(merged);
-        self.outputs.clear();
-        self
-    }
-
-    /// Projection: single-output with no ctor_args bakes Select into pipeline;
-    /// otherwise stores OutputSpecs for downstream consumers (e.g. RDF serializer).
-    pub fn project(self, outputs: Vec<OutputSpec>) -> Self {
-        let mut plan = if outputs.len() == 1 && outputs[0].ctor_args.is_empty() {
-            self.select(outputs[0].select_exprs.clone())
-        } else {
-            self
-        };
-        plan.outputs = outputs;
-        plan
-    }
-
-    pub fn has_outputs(&self) -> bool {
-        !self.outputs.is_empty()
-    }
-
-    fn merge_schema(&self, right: &Schema, suffix: &str) -> Schema {
-        let mut fields: Vec<Field> = self
-            .schema
-            .iter()
-            .map(|(name, dtype)| Field::new(name.clone(), dtype.clone()))
-            .collect();
-
-        let left_names: std::collections::HashSet<&str> =
-            self.schema.iter_names().map(|n| n.as_str()).collect();
-
-        for (name, dtype) in right.iter() {
-            let final_name = if left_names.contains(name.as_str()) {
-                format!("{}{}", name, suffix)
-            } else {
-                name.to_string()
-            };
-            fields.push(Field::new(final_name.into(), dtype.clone()));
-        }
-
-        Schema::from_iter(fields)
-    }
-}
-
-fn schema_from_exprs(exprs: &[Expr]) -> Schema {
-    Schema::from_iter(exprs.iter().filter_map(|expr| {
-        if let Expr::Alias(_, name) = expr {
-            Some(Field::new(
-                name.clone(),
-                DataType::Unknown(Default::default()),
-            ))
-        } else {
-            None
-        }
-    }))
-}
-
-#[derive(Clone, Debug)]
-pub struct OutputSpec {
+pub struct EmissionDef {
     pub type_def_id: DefId,
     pub select_exprs: Vec<Expr>,
     pub ctor_args: Vec<Expr>,
-    pub schema: Arc<Schema>,
+}
+
+/// A frame paired with its emission specifications (produced by projection).
+#[derive(Clone)]
+pub struct Emission {
+    pub frame: LazyFrame,
+    pub specs: Vec<EmissionDef>,
+}
+
+impl std::fmt::Debug for Emission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Emission")
+            .field("specs", &self.specs)
+            .finish()
+    }
 }
 
 #[derive(Clone)]
 pub enum Value {
     Unit,
     Expr(Expr),
-    Plan(Plan),
-    PendingOutput(OutputSpec),
+    Frame(LazyFrame),
+    Emission(Emission),
     /// Ephemeral value produced by `ref Type(args)` or constructor-only calls.
     /// Lives only during each-block evaluation; the serializer builds the
     /// subject IRI via `build_subject_expr`.
@@ -171,6 +54,14 @@ impl Value {
     pub fn as_expr(&self) -> Option<&Expr> {
         match self {
             Value::Expr(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    pub fn into_frame(self) -> Option<LazyFrame> {
+        match self {
+            Value::Frame(f) => Some(f),
+            Value::Emission(e) => Some(e.frame),
             _ => None,
         }
     }
@@ -216,6 +107,37 @@ impl Environment {
 
     pub fn lookup(&self, name: Symbol) -> Option<&Value> {
         self.bindings.get(&name)
+    }
+}
+
+/// Estimate optimal batch size based on schema.
+///
+/// Targets approximately 100MB per batch for balanced memory/performance.
+pub fn estimate_batch_size(schema: &Schema) -> usize {
+    let row_bytes: usize = schema
+        .iter()
+        .map(|(_, dtype)| estimate_dtype_size(dtype))
+        .sum();
+
+    const TARGET_BYTES: usize = 100 * 1024 * 1024;
+    (TARGET_BYTES / row_bytes.max(1)).clamp(10_000, 500_000)
+}
+
+fn estimate_dtype_size(dtype: &DataType) -> usize {
+    match dtype {
+        DataType::Boolean => 1,
+        DataType::Int8 | DataType::UInt8 => 1,
+        DataType::Int16 | DataType::UInt16 => 2,
+        DataType::Int32 | DataType::UInt32 | DataType::Float32 => 4,
+        DataType::Int64 | DataType::UInt64 | DataType::Float64 => 8,
+        DataType::Date => 4,
+        DataType::Datetime(_, _) | DataType::Duration(_) | DataType::Time => 8,
+        DataType::String => 64,
+        DataType::Binary => 128,
+        DataType::List(inner) => 8 + estimate_dtype_size(inner) * 10,
+        DataType::Struct(fields) => fields.iter().map(|f| estimate_dtype_size(f.dtype())).sum(),
+        DataType::Null => 0,
+        _ => 32,
     }
 }
 

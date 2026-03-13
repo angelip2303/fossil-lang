@@ -5,17 +5,12 @@
 
 use std::fmt::Debug;
 
-use polars::prelude::{DataFrame, LazyFrame, PolarsResult, Schema};
+use polars::prelude::{LazyFrame, PolarsResult, Schema};
 
-/// Forward-only batch iterator for streaming execution.
-pub trait BatchReader: Send {
-    fn next_batch(&mut self) -> PolarsResult<Option<DataFrame>>;
-}
-
-/// A data source that can produce a LazyFrame
+/// A data source that can produce a LazyFrame for lazy/streaming execution.
 ///
-/// Implementations provide the `to_lazy_frame` method to materialize
-/// the source into a Polars LazyFrame for processing.
+/// Implementations provide `scan()` which returns a Polars LazyFrame.
+/// All downstream operations (select, filter, join) compose lazily on this frame.
 ///
 /// # Example
 ///
@@ -23,7 +18,7 @@ pub trait BatchReader: Send {
 /// struct CsvSource { path: String, delimiter: u8, has_header: bool }
 ///
 /// impl Source for CsvSource {
-///     fn to_lazy_frame(&self) -> PolarsResult<LazyFrame> {
+///     fn scan(&self) -> PolarsResult<LazyFrame> {
 ///         LazyCsvReader::new(&self.path)
 ///             .with_separator(self.delimiter)
 ///             .with_has_header(self.has_header)
@@ -32,28 +27,13 @@ pub trait BatchReader: Send {
 /// }
 /// ```
 pub trait Source: Send + Sync + Debug {
-    /// Convert this source to a LazyFrame
-    fn to_lazy_frame(&self) -> PolarsResult<LazyFrame>;
-
-    /// Clone this source into a boxed trait object
-    fn box_clone(&self) -> Box<dyn Source>;
+    /// Produce a LazyFrame representing this data source.
+    fn scan(&self) -> PolarsResult<LazyFrame>;
 
     /// Infer the schema by collecting the lazy frame's schema.
     fn infer_schema(&self) -> PolarsResult<Schema> {
-        self.to_lazy_frame()?
+        self.scan()?
             .collect_schema()
             .map(|arc| arc.as_ref().clone())
-    }
-
-    /// Optional: return a forward-only batch reader for true streaming.
-    /// Default returns None (executor falls back to collect-once).
-    fn batch_reader(&self, _batch_size: usize) -> PolarsResult<Option<Box<dyn BatchReader>>> {
-        Ok(None)
-    }
-}
-
-impl Clone for Box<dyn Source> {
-    fn clone(&self) -> Self {
-        self.box_clone()
     }
 }

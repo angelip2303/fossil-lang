@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::context::DefId;
 use crate::error::FossilError;
 use crate::ir::{Ir, Polytype, TypeIndex, TypeVar};
 use crate::passes::GlobalContext;
-use crate::runtime::output::{LocalOutputResolver, OutputResolver};
+use crate::runtime::executor::{OutputKind, OutputRecord};
 use crate::runtime::value::Value;
 
 pub struct RuntimeContext<'a> {
@@ -13,8 +13,8 @@ pub struct RuntimeContext<'a> {
     pub ir: &'a Ir,
     pub type_index: &'a TypeIndex,
     pub current_type: Option<DefId>,
-    pub output_resolver: Arc<dyn OutputResolver>,
     pub storage: Arc<HashMap<String, String>>,
+    outputs: Arc<Mutex<Vec<OutputRecord>>>,
 }
 
 impl<'a> RuntimeContext<'a> {
@@ -24,8 +24,8 @@ impl<'a> RuntimeContext<'a> {
             ir,
             type_index,
             current_type: None,
-            output_resolver: Arc::new(LocalOutputResolver),
             storage: Arc::new(HashMap::new()),
+            outputs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -34,14 +34,22 @@ impl<'a> RuntimeContext<'a> {
         self
     }
 
-    pub fn with_output_resolver(mut self, resolver: Arc<dyn OutputResolver>) -> Self {
-        self.output_resolver = resolver;
-        self
-    }
-
     pub fn with_storage(mut self, storage: Arc<HashMap<String, String>>) -> Self {
         self.storage = storage;
         self
+    }
+
+    pub fn with_outputs(mut self, outputs: Arc<Mutex<Vec<OutputRecord>>>) -> Self {
+        self.outputs = outputs;
+        self
+    }
+
+    /// Register an output produced during execution.
+    pub fn register_output(&self, kind: OutputKind, path: String) {
+        self.outputs
+            .lock()
+            .expect("outputs lock poisoned")
+            .push(OutputRecord { kind, path });
     }
 }
 

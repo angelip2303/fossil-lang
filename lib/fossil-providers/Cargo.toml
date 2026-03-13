@@ -24,6 +24,6 @@ fossil-lang.workspace = true
 
 [dev-dependencies]
 thiserror.workspace = true
-oxrdfio = "0.2.2"
+polars.workspace = true
 
 fossil-stdlib.workspace = true

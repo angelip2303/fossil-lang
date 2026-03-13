@@ -1,0 +1,15 @@
+[package]
+name = "fossil-rdf"
+version.workspace = true
+description = "Client API for reading RDF Parquet datasets produced by Fossil"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+polars.workspace = true
+spargebra = "0.4"
+thiserror = "2"
+
+[features]
+default = []
+cloud = ["polars/cloud"]

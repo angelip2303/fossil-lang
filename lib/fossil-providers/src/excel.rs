@@ -35,14 +35,10 @@ impl ExcelSource {
 }
 
 impl Source for ExcelSource {
-    fn to_lazy_frame(&self) -> PolarsResult<LazyFrame> {
+    fn scan(&self) -> PolarsResult<LazyFrame> {
         let df = range_to_dataframe(&self.path, self.sheet.as_deref(), self.has_header)
             .map_err(|e| PolarsError::ComputeError(e.into()))?;
         Ok(df.lazy())
-    }
-
-    fn box_clone(&self) -> Box<dyn Source> {
-        Box::new(self.clone())
     }
 }
 
@@ -266,7 +262,6 @@ impl TypeProviderImpl for ExcelProvider {
                 "load",
                 ExcelLoadFunction {
                     source,
-                    schema: schema.clone(),
                     type_name: type_name.to_string(),
                 },
             )],
@@ -278,7 +273,6 @@ impl TypeProviderImpl for ExcelProvider {
 
 pub struct ExcelLoadFunction {
     source: ExcelSource,
-    schema: Schema,
     type_name: String,
 }
 
@@ -298,9 +292,10 @@ impl FunctionImpl for ExcelLoadFunction {
     }
 
     fn call(&self, _args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, FossilError> {
-        use fossil_lang::runtime::value::Plan;
+        let loc = fossil_lang::ast::Loc::generated();
+        let frame = self.source.scan()
+            .map_err(|e| FossilError::data_error(e.to_string(), loc))?;
 
-        let plan = Plan::from_source(self.source.box_clone(), self.schema.clone());
-        Ok(Value::Plan(plan))
+        Ok(Value::Frame(frame))
     }
 }

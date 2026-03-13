@@ -15,4 +15,4 @@ end
 student_sport
 |> each row -> Student("http://example.com/${row.Student}") { Name = row.Student }
 +> each row -> Sport("http://example.com/${row.Sport}") { Name = row.Sport }
-|> Rdf.serialize("tests/RMLTC0004a-CSV/actual.nq")
+|> Rdf.materialize("tests/RMLTC0004a-CSV/actual")

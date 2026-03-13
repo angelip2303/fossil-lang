@@ -94,7 +94,7 @@ impl IfcSource {
 }
 
 impl Source for IfcSource {
-    fn to_lazy_frame(&self) -> PolarsResult<LazyFrame> {
+    fn scan(&self) -> PolarsResult<LazyFrame> {
         let step_file = StepFile::open(&self.path, self.file_reader.as_ref()).map_err(|e| {
             PolarsError::ComputeError(format!("failed to parse IFC file: {}", e).into())
         })?;
@@ -103,9 +103,5 @@ impl Source for IfcSource {
         let df = build_dataframe(&entities, self.entity_def)?;
 
         Ok(df.lazy())
-    }
-
-    fn box_clone(&self) -> Box<dyn Source> {
-        Box::new(self.clone())
     }
 }

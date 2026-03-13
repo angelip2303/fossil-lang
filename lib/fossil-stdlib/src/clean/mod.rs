@@ -8,7 +8,7 @@ use fossil_lang::context::metadata::TypedAttribute;
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
-use fossil_lang::runtime::value::{Plan, Value};
+use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionImpl, RuntimeContext};
 use fossil_lang::traits::provider::{FunctionDef, ModuleSpec};
 
@@ -153,16 +153,14 @@ fn apply_clean_ops(field_name: &str, ops: &[CleanOp]) -> Expr {
     expr.alias(field_name)
 }
 
-fn take_plan(args: Vec<Value>, label: &str) -> Result<Plan, FossilError> {
+fn take_frame(args: Vec<Value>, label: &str) -> Result<LazyFrame, FossilError> {
     let loc = fossil_lang::ast::Loc::generated();
     let input = args
         .into_iter()
         .next()
-        .ok_or_else(|| FossilError::evaluation(format!("{label} requires a plan argument"), loc))?;
-    match input {
-        Value::Plan(p) => Ok(p),
-        _ => Err(FossilError::evaluation(format!("{label} expects a Plan"), loc)),
-    }
+        .ok_or_else(|| FossilError::evaluation(format!("{label} requires a frame argument"), loc))?;
+    input.into_frame()
+        .ok_or_else(|| FossilError::evaluation(format!("{label} expects a Frame"), loc))
 }
 
 struct CleanFunction {
@@ -182,15 +180,19 @@ impl FunctionImpl for CleanFunction {
     }
 
     fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
-        let plan = take_plan(args, "clean")?;
+        let mut frame = take_frame(args, "clean")?;
         let field_ops = extract_clean_ops(ctx, self.type_name);
+
+        let schema = frame.collect_schema()
+            .map_err(|e| FossilError::evaluation(
+                format!("Failed to collect schema for clean: {}", e),
+                fossil_lang::ast::Loc::generated(),
+            ))?;
 
         // Build a map of field_name → ops for quick lookup
         let ops_map: std::collections::HashMap<&str, &Vec<CleanOp>> =
             field_ops.iter().map(|(name, ops)| (name.as_str(), ops)).collect();
 
-        // Get all field names from the plan schema
-        let schema = &plan.schema;
         let select_exprs: Vec<Expr> = schema
             .iter_names()
             .map(|name| {
@@ -202,6 +204,6 @@ impl FunctionImpl for CleanFunction {
             })
             .collect();
 
-        Ok(Value::Plan(plan.select(select_exprs)))
+        Ok(Value::Frame(frame.select(select_exprs)))
     }
 }

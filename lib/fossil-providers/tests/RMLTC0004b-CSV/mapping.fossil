@@ -12,4 +12,4 @@ input
     id = "${row.Name}",
     Name = row.Name
 })
-|> Rdf.serialize("tests/RMLTC0004b-CSV/actual.nq")
+|> Rdf.materialize("tests/RMLTC0004b-CSV/actual")

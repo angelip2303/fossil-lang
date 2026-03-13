@@ -7,4 +7,4 @@ end
 
 input
 |> each row -> Output("http://example.com/${row.Name}") { Name = row.Name }
-|> Rdf.serialize("tests/RMLTC0002a-CSV/actual.nq")
+|> Rdf.materialize("tests/RMLTC0002a-CSV/actual")

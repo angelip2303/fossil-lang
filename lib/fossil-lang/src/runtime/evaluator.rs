@@ -1,15 +1,14 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use polars::prelude::*;
 
 use crate::ast::Loc;
 use crate::context::{DefId, DefKind, Symbol};
-use crate::context::global::BuiltInFieldType;
 use crate::error::FossilError;
 use crate::ir::{Argument, ExprId, ExprKind, Ir, Resolutions, TypeIndex, TypeKind, TypeckResults};
 use crate::passes::GlobalContext;
-use crate::runtime::output::OutputResolver;
-use crate::runtime::value::Value;
+use crate::runtime::executor::OutputRecord;
+use crate::runtime::value::{Emission, EmissionDef, Value};
 use crate::traits::function::RuntimeContext;
 
 pub use crate::runtime::value::Environment as IrEnvironment;
@@ -50,11 +49,8 @@ pub struct IrEvaluator<'a> {
     typeck_results: &'a TypeckResults,
     env: IrEnvironment,
     call_stack: CallStack,
-    output_resolver: Arc<dyn OutputResolver>,
     storage: Arc<std::collections::HashMap<String, String>>,
-    /// Accumulates auto-emitted outputs from constructor calls in field-value positions.
-    /// Drained by eval_projection after collecting main outputs.
-    auto_emit_outputs: Vec<crate::runtime::value::OutputSpec>,
+    outputs: Arc<Mutex<Vec<OutputRecord>>>,
 }
 
 impl<'a> IrEvaluator<'a> {
@@ -65,8 +61,8 @@ impl<'a> IrEvaluator<'a> {
         resolutions: &'a Resolutions,
         typeck_results: &'a TypeckResults,
         env: IrEnvironment,
-        output_resolver: Arc<dyn OutputResolver>,
         storage: Arc<std::collections::HashMap<String, String>>,
+        outputs: Arc<Mutex<Vec<OutputRecord>>>,
     ) -> Self {
         Self {
             ir,
@@ -76,9 +72,8 @@ impl<'a> IrEvaluator<'a> {
             typeck_results,
             env,
             call_stack: Default::default(),
-            output_resolver,
             storage,
-            auto_emit_outputs: Vec::new(),
+            outputs,
         }
     }
 
@@ -221,15 +216,82 @@ impl<'a> IrEvaluator<'a> {
         fields: &[(Symbol, ExprId)],
     ) -> Result<Value, FossilError> {
         use std::collections::HashSet;
-        use crate::runtime::value::{Plan, OutputSpec};
 
         let type_def_id = self.resolutions.expr_defs.get(&expr_id).copied();
 
-        let ctor_exprs: Vec<Expr> = if !ctor_args.is_empty() {
-            let type_def_id = type_def_id.ok_or_else(|| self.make_error("Record constructor arguments require a resolved type definition"))?;
-            let info = self.type_index.get(type_def_id);
-            let ctor_param_names = info.map(|i| &i.ctor_param_names[..]).unwrap_or(&[]);
+        if fields.is_empty() && ctor_args.is_empty() && spread.is_none() {
+            return Ok(Value::Frame(LazyFrame::default()));
+        }
 
+        // Reference-like usage: ctor_args present but no fields/spread.
+        if fields.is_empty() && spread.is_none() && !ctor_args.is_empty() {
+            let ctor_values: Vec<Value> = ctor_args
+                .iter()
+                .map(|arg| self.eval(arg.value()))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            if let Some(type_def_id) = type_def_id {
+                return Ok(Value::Reference { def_id: type_def_id, args: ctor_values });
+            }
+            if let Some(first) = ctor_values.into_iter().next() {
+                return Ok(first);
+            }
+        }
+
+        let resolved_type_def_id = type_def_id.ok_or_else(|| self.make_error("Named record must resolve to a type definition"))?;
+
+        // Evaluate fields: each produces an Expr + optionally nested EmissionDefs
+        let mut select_exprs: Vec<Expr> = Vec::with_capacity(fields.len());
+        let mut child_specs: Vec<EmissionDef> = Vec::new();
+
+        for &(name, expr_id) in fields {
+            let value = self.eval(expr_id)?;
+            let name_str = self.gcx.interner.resolve(name);
+
+            let field_expr = match value {
+                Value::Expr(expr) => expr,
+                Value::Reference { args, .. } => {
+                    let exprs: Vec<Expr> = args.into_iter()
+                        .map(|v| match v { Value::Expr(e) => e, _ => lit(NULL) })
+                        .collect();
+                    identity_from_exprs(&exprs)
+                }
+                Value::Emission(nested) => {
+                    let identity = nested.specs.first()
+                        .map(|s| identity_from_exprs(&s.ctor_args))
+                        .unwrap_or_else(|| lit(NULL));
+                    child_specs.extend(nested.specs);
+                    identity
+                }
+                _ => lit(NULL),
+            };
+
+            select_exprs.push(field_expr.alias(name_str));
+        }
+
+        // Expand spread
+        if spread.is_some() {
+            if let Some(type_def_id) = type_def_id {
+                let explicit: HashSet<Symbol> = fields.iter().map(|(n, _)| *n).collect();
+                if let Some(info) = self.type_index.get(type_def_id) {
+                    let spread_exprs: Vec<Expr> = info
+                        .field_names
+                        .iter()
+                        .filter(|n| !explicit.contains(n))
+                        .map(|n| {
+                            let s = self.gcx.interner.resolve(*n);
+                            col(s).alias(s)
+                        })
+                        .collect();
+                    select_exprs = [spread_exprs, select_exprs].concat();
+                }
+            }
+        }
+
+        // Build ctor_exprs
+        let ctor_exprs: Vec<Expr> = if !ctor_args.is_empty() {
+            let info = self.type_index.get(resolved_type_def_id);
+            let ctor_param_names = info.map(|i| &i.ctor_param_names[..]).unwrap_or(&[]);
             ctor_args
                 .iter()
                 .enumerate()
@@ -249,88 +311,18 @@ impl<'a> IrEvaluator<'a> {
             vec![]
         };
 
-        if fields.is_empty() && ctor_args.is_empty() && spread.is_none() {
-            return Ok(Value::Plan(Plan::empty(Schema::default())));
-        }
-
-        // Reference-like usage: ctor_args present but no fields/spread.
-        // Return a TypedRef so the serializer can build the identity IRI.
-        if fields.is_empty() && spread.is_none() && !ctor_args.is_empty() {
-            let ctor_values: Vec<Value> = ctor_args
-                .iter()
-                .map(|arg| self.eval(arg.value()))
-                .collect::<Result<Vec<_>, _>>()?;
-
-            if let Some(type_def_id) = type_def_id {
-                return Ok(Value::Reference { def_id: type_def_id, args: ctor_values });
-            }
-            if let Some(first) = ctor_values.into_iter().next() {
-                return Ok(first);
-            }
-        }
-
-        let mut select_exprs: Vec<Expr> = fields
-            .iter()
-            .map(|(name, expr_id)| {
-                let value = self.eval(*expr_id)?;
-                let name_str = self.gcx.interner.resolve(*name);
-                match value {
-                    Value::Expr(expr) => Ok(expr.alias(name_str)),
-                    Value::Reference { args, .. } => {
-                        let exprs: Vec<Expr> = args.into_iter()
-                            .map(|v| match v { Value::Expr(e) => e, _ => lit(NULL) })
-                            .collect();
-                        Ok(identity_from_exprs(&exprs).alias(name_str))
-                    }
-                    Value::PendingOutput(po) => {
-                        let identity = identity_from_exprs(&po.ctor_args);
-                        self.auto_emit_outputs.push(po);
-                        Ok(identity.alias(name_str))
-                    }
-                    _ => Ok(lit(NULL).alias(name_str)),
-                }
-            })
-            .collect::<Result<Vec<_>, FossilError>>()?;
-
-        // Expand spread: for every target-type field not explicitly listed,
-        // generate col(name).alias(name) from the spread source.
-        if spread.is_some() {
-            if let Some(type_def_id) = type_def_id {
-                let explicit: HashSet<Symbol> = fields.iter().map(|(n, _)| *n).collect();
-                if let Some(info) = self.type_index.get(type_def_id) {
-                    let spread_exprs: Vec<Expr> = info
-                        .field_names
-                        .iter()
-                        .filter(|n| !explicit.contains(n))
-                        .map(|n| {
-                            let s = self.gcx.interner.resolve(*n);
-                            col(s).alias(s)
-                        })
-                        .collect();
-                    select_exprs = [spread_exprs, select_exprs].concat();
-                }
-            }
-        }
-
-        let ctor_param_names: Vec<Symbol> = type_def_id
-            .and_then(|id| self.type_index.get(id))
-            .map(|info| info.ctor_param_names.clone())
-            .unwrap_or_default();
-
-        let all_exprs: Vec<Expr> = ctor_exprs
-            .iter()
-            .chain(select_exprs.iter())
-            .cloned()
-            .collect();
-        let schema = build_schema(&all_exprs, type_def_id, self.gcx, &ctor_param_names);
-
-        let resolved_type_def_id = type_def_id.ok_or_else(|| self.make_error("Named record must resolve to a type definition"))?;
-
-        Ok(Value::PendingOutput(OutputSpec {
+        // This record's own spec, followed by any child specs from nested constructors
+        let mut specs = Vec::with_capacity(1 + child_specs.len());
+        specs.push(EmissionDef {
             type_def_id: resolved_type_def_id,
             select_exprs,
             ctor_args: ctor_exprs,
-            schema: std::sync::Arc::new(schema),
+        });
+        specs.extend(child_specs);
+
+        Ok(Value::Emission(Emission {
+            frame: LazyFrame::default(), // placeholder — projection sets the real frame
+            specs,
         }))
     }
 
@@ -341,30 +333,33 @@ impl<'a> IrEvaluator<'a> {
         outputs: &[ExprId],
     ) -> Result<Value, FossilError> {
         let source_val = self.eval(source)?;
-        let Value::Plan(plan) = source_val else {
-            return Err(self.make_error("Projection source must be a Plan"));
-        };
+        let frame = source_val.into_frame()
+            .ok_or_else(|| self.make_error("Projection source must be a Frame"))?;
 
-        self.env.bind(binding, Value::Plan(plan.clone()));
+        self.env.bind(binding, Value::Frame(frame.clone()));
 
-        // Clear auto-emit buffer before evaluating outputs
-        self.auto_emit_outputs.clear();
+        let mut specs: Vec<EmissionDef> = Vec::new();
 
-        let mut output_specs: Vec<_> = outputs
-            .iter()
-            .filter_map(|&expr| match self.eval(expr) {
-                Ok(Value::PendingOutput(spec)) => Some(Ok(spec)),
-                Ok(_) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Drain auto-emitted outputs (from constructor calls in field-value positions)
-        for spec in self.auto_emit_outputs.drain(..) {
-            output_specs.push(spec);
+        for &expr_id in outputs {
+            let val = self.eval(expr_id)?;
+            match val {
+                Value::Emission(emission) => {
+                    specs.extend(emission.specs);
+                }
+                _ => {} // non-emission outputs ignored
+            }
         }
 
-        Ok(Value::Plan(plan.project(output_specs)))
+        if specs.len() == 1 && specs[0].ctor_args.is_empty() {
+            // Single output with no ctor_args: bake select into pipeline
+            let select = specs[0].select_exprs.clone();
+            Ok(Value::Emission(Emission {
+                frame: frame.select(select),
+                specs,
+            }))
+        } else {
+            Ok(Value::Emission(Emission { frame, specs }))
+        }
     }
 
     fn eval_join(
@@ -378,12 +373,10 @@ impl<'a> IrEvaluator<'a> {
         let left_val = self.eval(left_id)?;
         let right_val = self.eval(right_id)?;
 
-        let Value::Plan(left_plan) = left_val else {
-            return Err(self.make_error("Join left side must be a Plan"));
-        };
-        let Value::Plan(right_plan) = right_val else {
-            return Err(self.make_error("Join right side must be a Plan"));
-        };
+        let left_frame = left_val.into_frame()
+            .ok_or_else(|| self.make_error("Join left side must be a Frame"))?;
+        let right_frame = right_val.into_frame()
+            .ok_or_else(|| self.make_error("Join right side must be a Frame"))?;
 
         let suffix_str = suffix
             .map(|s| self.gcx.interner.resolve(s).to_string())
@@ -398,12 +391,11 @@ impl<'a> IrEvaluator<'a> {
             .map(|s| col(self.gcx.interner.resolve(*s)))
             .collect();
 
-        Ok(Value::Plan(left_plan.join(
-            right_plan,
-            left_on_exprs,
-            right_on_exprs,
-            suffix_str,
-        )))
+        let args = JoinArgs::new(JoinType::Inner)
+            .with_suffix(Some(suffix_str.into()));
+        let joined = left_frame.join(right_frame, left_on_exprs, right_on_exprs, args);
+
+        Ok(Value::Frame(joined))
     }
 
     fn check_recursion_depth(&self) -> Result<(), FossilError> {
@@ -446,8 +438,8 @@ impl<'a> IrEvaluator<'a> {
                 });
 
                 let mut ctx = RuntimeContext::new(self.gcx, self.ir, self.type_index)
-                    .with_output_resolver(self.output_resolver.clone())
-                    .with_storage(self.storage.clone());
+                    .with_storage(self.storage.clone())
+                    .with_outputs(self.outputs.clone());
 
                 if !args.is_empty() {
                     let first_arg_expr_id = args[0].value();
@@ -467,8 +459,6 @@ impl<'a> IrEvaluator<'a> {
             }
 
             Value::RecordConstructor(ctor_def_id) => {
-                use crate::runtime::value::OutputSpec;
-
                 let ctor_def = self.gcx.definitions.get(ctor_def_id);
                 let type_def_id = ctor_def.parent().unwrap_or(ctor_def_id);
 
@@ -483,7 +473,6 @@ impl<'a> IrEvaluator<'a> {
                 let ctor_param_names = info.ctor_param_names.clone();
 
                 // Identity construction: args match ctor param count (not field count).
-                // Return a TypedRef so the serializer can build the identity IRI.
                 if ctor_param_count > 0
                     && arg_values.len() == ctor_param_count
                     && arg_values.len() != field_names.len()
@@ -513,7 +502,7 @@ impl<'a> IrEvaluator<'a> {
                     })
                     .collect();
 
-                // Build ctor_exprs from the ctor_param_names — extract matching values
+                // Build ctor_exprs from the ctor_param_names
                 let ctor_exprs: Vec<Expr> = if !ctor_param_names.is_empty() {
                     ctor_param_names
                         .iter()
@@ -530,18 +519,13 @@ impl<'a> IrEvaluator<'a> {
                     vec![]
                 };
 
-                let all_exprs: Vec<Expr> = ctor_exprs
-                    .iter()
-                    .chain(select_exprs.iter())
-                    .cloned()
-                    .collect();
-                let schema = build_schema(&all_exprs, Some(type_def_id), self.gcx, &ctor_param_names);
-
-                Ok(Value::PendingOutput(OutputSpec {
-                    type_def_id,
-                    select_exprs,
-                    ctor_args: ctor_exprs,
-                    schema: std::sync::Arc::new(schema),
+                Ok(Value::Emission(Emission {
+                    frame: LazyFrame::default(),
+                    specs: vec![EmissionDef {
+                        type_def_id,
+                        select_exprs,
+                        ctor_args: ctor_exprs,
+                    }],
                 }))
             }
 
@@ -553,21 +537,23 @@ impl<'a> IrEvaluator<'a> {
         let value = self.eval(expr)?;
         let field_name = self.gcx.interner.resolve(field);
 
-        match value {
-            Value::Plan(plan) => {
-                if !plan.schema.contains(field_name) {
-                    return Err(self.make_error(format!(
-                        "Field '{}' not found in schema. Available: {:?}",
-                        field_name,
-                        plan.schema.iter_names().collect::<Vec<_>>()
-                    )));
-                }
+        let mut frame = match value {
+            Value::Frame(f) => f,
+            Value::Emission(e) => e.frame,
+            _ => return Err(self.make_error("Field access on non-record value")),
+        };
 
-                Ok(Value::Expr(col(field_name)))
-            }
-
-            _ => Err(self.make_error("Field access on non-record value")),
+        let schema = frame.collect_schema()
+            .map_err(|e| self.make_error(format!("Failed to collect schema: {}", e)))?;
+        if !schema.contains(field_name) {
+            return Err(self.make_error(format!(
+                "Field '{}' not found in schema. Available: {:?}",
+                field_name,
+                schema.iter_names().collect::<Vec<_>>()
+            )));
         }
+
+        Ok(Value::Expr(col(field_name)))
     }
 
     fn make_error(&self, msg: impl Into<String>) -> FossilError {
@@ -577,7 +563,7 @@ impl<'a> IrEvaluator<'a> {
 
 /// Build a single identity expression from ctor args.
 /// Single arg: used as-is (stripped of alias). Multiple: concatenated with "_".
-fn identity_from_exprs(exprs: &[Expr]) -> Expr {
+pub fn identity_from_exprs(exprs: &[Expr]) -> Expr {
     match exprs.len() {
         0 => lit(NULL),
         1 => strip_alias(&exprs[0]),
@@ -590,59 +576,9 @@ fn identity_from_exprs(exprs: &[Expr]) -> Expr {
     }
 }
 
-fn strip_alias(expr: &Expr) -> Expr {
+pub fn strip_alias(expr: &Expr) -> Expr {
     match expr {
         Expr::Alias(inner, _) => inner.as_ref().clone(),
         other => other.clone(),
     }
-}
-
-fn build_schema(
-    exprs: &[Expr],
-    type_def_id: Option<DefId>,
-    gcx: &GlobalContext,
-    ctor_param_names: &[Symbol],
-) -> Schema {
-    use std::collections::{HashMap, HashSet};
-
-    // Build name→DataType map from registered types if available
-    let type_map: HashMap<&str, DataType> = type_def_id
-        .and_then(|def_id| gcx.registered_types.get(&def_id))
-        .map(|fields| {
-            fields.iter().map(|(sym, ft)| {
-                let name = gcx.interner.resolve(*sym);
-                let prim = match ft {
-                    BuiltInFieldType::Required(p) | BuiltInFieldType::Optional(p) => *p,
-                };
-                (name, prim.to_polars_dtype())
-            }).collect()
-        })
-        .unwrap_or_default();
-
-    let ctor_names: HashSet<&str> = ctor_param_names.iter()
-        .map(|s| gcx.interner.resolve(*s))
-        .collect();
-
-    let fields: Vec<_> = exprs
-        .iter()
-        .filter_map(|expr| {
-            if let Expr::Alias(_, name) = expr {
-                let dtype = type_map
-                    .get(name.as_str())
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        if !ctor_names.contains(name.as_str()) {
-                            #[cfg(debug_assertions)]
-                            eprintln!("[fossil] field '{}' not found in type_map, using Unknown", name);
-                        }
-                        DataType::Unknown(Default::default())
-                    });
-                Some(Field::new(name.clone(), dtype))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    Schema::from_iter(fields)
 }

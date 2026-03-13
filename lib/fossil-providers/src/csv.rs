@@ -10,10 +10,8 @@ use fossil_lang::traits::provider::{
     FunctionDef, ModuleSpec, ProviderArgs, ProviderContext, ProviderInfo, ProviderKind,
     ProviderOutput, ProviderParamInfo, ProviderSchema, TypeProviderImpl,
 };
-use fossil_lang::traits::source::{BatchReader, Source};
+use fossil_lang::traits::source::Source;
 
-use polars::io::csv::read::{CsvParseOptions, CsvReadOptions, OwnedBatchedCsvReader};
-use polars::io::mmap::MmapBytesReader;
 use polars::prelude::*;
 
 use crate::cloud_options::build_cloud_options;
@@ -51,21 +49,8 @@ impl CsvSource {
     }
 }
 
-struct CsvBatchReader {
-    inner: OwnedBatchedCsvReader,
-}
-
-impl BatchReader for CsvBatchReader {
-    fn next_batch(&mut self) -> PolarsResult<Option<DataFrame>> {
-        match self.inner.next_batches(1)? {
-            Some(mut batches) if !batches.is_empty() => Ok(Some(batches.remove(0))),
-            _ => Ok(None),
-        }
-    }
-}
-
 impl Source for CsvSource {
-    fn to_lazy_frame(&self) -> PolarsResult<LazyFrame> {
+    fn scan(&self) -> PolarsResult<LazyFrame> {
         let cloud_opts = build_cloud_options(self.path.to_str(), &self.storage);
         LazyCsvReader::new(self.path.clone())
             .with_separator(self.options.delimiter)
@@ -74,36 +59,6 @@ impl Source for CsvSource {
             .with_infer_schema_length(self.options.infer_schema_length)
             .with_cloud_options(cloud_opts)
             .finish()
-    }
-
-    fn box_clone(&self) -> Box<dyn Source> {
-        Box::new(self.clone())
-    }
-
-    fn batch_reader(&self, batch_size: usize) -> PolarsResult<Option<Box<dyn BatchReader>>> {
-        // Only for local paths — cloud falls back to collect-once
-        if !self.path.is_local() {
-            return Ok(None);
-        }
-
-        let local_path = match self.path.as_ref() {
-            PlPathRef::Local(p) => p.to_path_buf(),
-            _ => return Ok(None),
-        };
-
-        let file = std::fs::File::open(&local_path)?;
-        let boxed: Box<dyn MmapBytesReader> = Box::new(file);
-        let reader = CsvReadOptions::default()
-            .with_has_header(self.options.has_header)
-            .with_parse_options(CsvParseOptions::default()
-                .with_separator(self.options.delimiter)
-                .with_quote_char(self.options.quote_char))
-            .with_infer_schema_length(self.options.infer_schema_length)
-            .with_chunk_size(batch_size)
-            .into_reader_with_file_handle(boxed)
-            .batched(None)?;
-
-        Ok(Some(Box::new(CsvBatchReader { inner: reader })))
     }
 }
 
@@ -207,19 +162,15 @@ impl FunctionImpl for CsvLoadFunction {
     }
 
     fn call(&self, _args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
-        use fossil_lang::runtime::value::Plan;
-
         let source = CsvSource {
             path: self.source.path.clone(),
             options: self.source.options.clone(),
             storage: (*ctx.storage).clone(),
         };
 
-        let schema = source
-            .infer_schema()
+        let frame = source.scan()
             .map_err(|e| FossilError::data_error(e.to_string(), self.loc))?;
 
-        let plan = Plan::from_source(source.box_clone(), schema);
-        Ok(Value::Plan(plan))
+        Ok(Value::Frame(frame))
     }
 }

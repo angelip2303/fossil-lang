@@ -1,40 +1,57 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::error::FossilError;
 use crate::ir::StmtKind;
 use crate::passes::IrProgram;
 use crate::runtime::evaluator::IrEvaluator;
-use crate::runtime::output::{LocalOutputResolver, OutputResolver};
 use crate::runtime::value::{Environment, Value};
 
 pub struct ExecutionConfig {
-    pub output_resolver: Arc<dyn OutputResolver>,
     pub storage: HashMap<String, String>,
 }
 
 impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
-            output_resolver: Arc::new(LocalOutputResolver),
             storage: HashMap::new(),
         }
     }
 }
 
+/// Describes a single output produced during script execution.
+#[derive(Debug, Clone)]
+pub struct OutputRecord {
+    pub kind: OutputKind,
+    pub path: String,
+}
+
+/// The type of output produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputKind {
+    RdfParquet,
+}
+
+/// Result of executing a fossil script.
+pub struct ExecutionResult {
+    pub values: Vec<Value>,
+    pub outputs: Vec<OutputRecord>,
+}
+
 pub struct IrExecutor;
 
 impl IrExecutor {
-    pub fn execute(program: IrProgram) -> Result<Vec<Value>, FossilError> {
+    pub fn execute(program: IrProgram) -> Result<ExecutionResult, FossilError> {
         Self::execute_with_config(program, ExecutionConfig::default())
     }
 
     pub fn execute_with_config(
         program: IrProgram,
         config: ExecutionConfig,
-    ) -> Result<Vec<Value>, FossilError> {
+    ) -> Result<ExecutionResult, FossilError> {
+        let outputs: Arc<Mutex<Vec<OutputRecord>>> = Arc::new(Mutex::new(Vec::new()));
+
         let IrProgram { ir, gcx, type_index, resolutions, typeck_results } = program;
-        let output_resolver = config.output_resolver.clone();
         let mut evaluator = IrEvaluator::new(
             &ir,
             &gcx,
@@ -42,40 +59,33 @@ impl IrExecutor {
             &resolutions,
             &typeck_results,
             Environment::default(),
-            config.output_resolver,
             Arc::new(config.storage),
+            outputs.clone(),
         );
-        let mut results = Vec::new();
+        let mut values = Vec::new();
 
-        let outcome = (|| {
-            for &stmt_id in &ir.root {
-                match &ir.stmts.get(stmt_id).kind {
-                    StmtKind::Let { name, value, .. } => {
-                        let val = evaluator.eval(*value)?;
-                        evaluator.bind(*name, val.clone());
-                        results.push(val);
-                    }
-
-                    StmtKind::Expr(expr_id) => {
-                        let val = evaluator.eval(*expr_id)?;
-                        results.push(val);
-                    }
-
-                    StmtKind::Type { .. } => {}
+        for &stmt_id in &ir.root {
+            match &ir.stmts.get(stmt_id).kind {
+                StmtKind::Let { name, value, .. } => {
+                    let val = evaluator.eval(*value)?;
+                    evaluator.bind(*name, val.clone());
+                    values.push(val);
                 }
-            }
-            Ok::<(), FossilError>(())
-        })();
 
-        match outcome {
-            Ok(()) => {
-                output_resolver.commit()?;
-                Ok(results)
-            }
-            Err(e) => {
-                output_resolver.abort();
-                Err(e)
+                StmtKind::Expr(expr_id) => {
+                    let val = evaluator.eval(*expr_id)?;
+                    values.push(val);
+                }
+
+                StmtKind::Type { .. } => {}
             }
         }
+
+        let outputs = match Arc::try_unwrap(outputs) {
+            Ok(mutex) => mutex.into_inner().unwrap_or_default(),
+            Err(arc) => arc.lock().expect("outputs lock poisoned").clone(),
+        };
+
+        Ok(ExecutionResult { values, outputs })
     }
 }

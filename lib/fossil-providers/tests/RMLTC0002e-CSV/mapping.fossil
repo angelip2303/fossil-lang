@@ -15,4 +15,4 @@ input
     ID = row.IDs,
     Name = row.Name
 })
-|> Rdf.serialize("tests/RMLTC0002e-CSV/actual.nq")
+|> Rdf.materialize("tests/RMLTC0002e-CSV/actual")

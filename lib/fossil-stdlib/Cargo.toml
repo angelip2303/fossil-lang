@@ -17,8 +17,6 @@ rust-version.workspace = true
 thiserror.workspace = true
 unicode-normalization = "0.1"
 polars.workspace = true
-oxrdfio = "0.2.2"
-oxrdf = "0.3.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

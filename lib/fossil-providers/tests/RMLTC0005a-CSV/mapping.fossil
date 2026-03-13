@@ -8,4 +8,4 @@ end
 
 input
 |> each row -> Output("http://example.com/${row.fname};${row.lname}") { owes = row.amount }
-|> Rdf.serialize("tests/RMLTC0005a-CSV/actual.nq")
+|> Rdf.materialize("tests/RMLTC0005a-CSV/actual")

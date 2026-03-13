@@ -16,8 +16,6 @@ use fossil_lang::traits::provider::{
 use fossil_lang::traits::source::Source;
 use fossil_providers::utils::{resolve_path, validate_extension, validate_path};
 
-use polars::prelude::*;
-
 use schema::{datatype_to_primitive, IfcEntityDef, IfcFieldDef, Optionality, ALL_ENTITIES};
 use source::IfcSource;
 
@@ -88,17 +86,10 @@ impl TypeProviderImpl for IfcProvider {
             })
             .collect();
 
-        let polars_schema = Schema::from_iter(
-            all_fields
-                .iter()
-                .map(|f| Field::new(f.name.into(), f.data_type.clone())),
-        );
-
         let module_spec = ModuleSpec {
             functions: vec![FunctionDef::new("load", IfcLoadFunction {
                 path: path.to_str().to_string(),
                 entity_def,
-                schema: polars_schema,
                 type_name: type_name.to_string(),
             })],
         };
@@ -111,7 +102,6 @@ impl TypeProviderImpl for IfcProvider {
 struct IfcLoadFunction {
     path: String,
     entity_def: &'static IfcEntityDef,
-    schema: Schema,
     type_name: String,
 }
 
@@ -130,15 +120,16 @@ impl FunctionImpl for IfcLoadFunction {
     }
 
     fn call(&self, _args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
-        use fossil_lang::runtime::value::Plan;
-
         let source = IfcSource::new(
             self.path.clone(),
             self.entity_def,
             ctx.gcx.file_reader.clone(),
         );
-        let plan = Plan::from_source(source.box_clone(), self.schema.clone());
-        Ok(Value::Plan(plan))
+        let loc = fossil_lang::ast::Loc::generated();
+        let frame = source.scan()
+            .map_err(|e| FossilError::data_error(e.to_string(), loc))?;
+
+        Ok(Value::Frame(frame))
     }
 }
 

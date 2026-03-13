@@ -14,6 +14,6 @@ pub enum TestSuiteError {
     #[error("Failed to read file")]
     IO(#[from] std::io::Error),
 
-    #[error("Failed to parse RDF")]
-    RDF(#[from] oxrdfio::RdfParseError),
+    #[error("{0}")]
+    Other(String),
 }
