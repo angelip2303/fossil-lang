@@ -166,8 +166,8 @@ impl FunctionImpl for RdfMaterializeFunction {
                 let configs = build_output_configs(&emission, ctx);
                 let resolved = ctx.gcx.path_resolver.resolve(&base_path)
                     .map_err(|e| FossilError::evaluation(e, fossil_lang::ast::Loc::generated()))?;
-                parquet_writer::materialize(&emission.frame, &configs, &resolved.url, resolved.cloud_options)?;
-                ctx.register_output(OutputKind::RdfParquet, resolved.url);
+                let manifest = parquet_writer::materialize(&emission.frame, &configs, &resolved.url, resolved.cloud_options)?;
+                ctx.register_output(OutputKind::RdfParquet, resolved.url, Some(manifest));
                 Ok(Value::Unit)
             }
             _ => Err(RdfError::SerializeInvalidInput.into()),

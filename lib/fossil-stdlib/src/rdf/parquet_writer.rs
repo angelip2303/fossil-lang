@@ -20,6 +20,7 @@ use polars::prelude::cloud::CloudOptions;
 use polars::prelude::sync_on_close::SyncOnCloseType;
 
 use fossil_lang::error::FossilError;
+use fossil_lang::runtime::executor::{PredicateStat, RdfManifest};
 
 use super::OutputConfig;
 use super::RdfError;
@@ -50,19 +51,26 @@ fn sink(lf: LazyFrame, path: &str, cloud_opts: Option<CloudOptions>) -> Result<(
 }
 
 /// Materialize a LazyFrame into Parquet RDF indices.
+/// Returns an `RdfManifest` with relative file paths and per-predicate statistics.
 pub fn materialize(
     frame: &LazyFrame,
     configs: &[OutputConfig],
     base_path: &str,
     cloud_opts: Option<CloudOptions>,
-) -> Result<(), FossilError> {
+) -> Result<RdfManifest, FossilError> {
     let triple_frames: Vec<LazyFrame> = configs
         .iter()
         .map(|config| triplify(frame, config))
         .collect::<Result<_, _>>()?;
 
     if triple_frames.is_empty() {
-        return Ok(());
+        return Ok(RdfManifest {
+            subjects: "_subjects.parquet".into(),
+            objects: "_objects.parquet".into(),
+            types: "_types.parquet".into(),
+            predicates: Vec::new(),
+            meta: Vec::new(),
+        });
     }
 
     // Single cache — source scanned once, shared across all sinks
@@ -87,18 +95,20 @@ pub fn materialize(
     )?;
 
     // PSO indices (one file per predicate)
-    for pred in &predicate_names(configs) {
+    let pred_names = predicate_names(configs);
+    let mut predicate_paths = Vec::with_capacity(pred_names.len());
+    for pred in &pred_names {
+        let filename = predicate_to_filename(pred);
+        let rel = format!("_predicates/{filename}.parquet");
         sink(
             triples
                 .clone()
                 .filter(col("predicate").eq(lit(pred.as_str())))
                 .select([col("subject"), col("object")]),
-            &format!(
-                "{base_path}/_predicates/{}.parquet",
-                predicate_to_filename(pred)
-            ),
+            &format!("{base_path}/{rel}"),
             cloud_opts.clone(),
         )?;
+        predicate_paths.push(rel);
     }
 
     // Type mappings
@@ -125,21 +135,73 @@ pub fn materialize(
         cloud_opts.clone(),
     )?;
 
-    // Predicate statistics (last use — no clone needed)
+    // Predicate statistics — collect into DataFrame to extract manifest meta
+    let meta_lf = triples
+        .group_by([col("predicate")])
+        .agg([
+            col("object").count().alias("count"),
+            col("object").n_unique().alias("n_unique"),
+            col("object").min().alias("min"),
+            col("object").max().alias("max"),
+        ]);
+
+    // Materialize meta into memory so we can both sink to parquet and extract stats
+    let meta_df = meta_lf.collect().map_err(polars_write_err)?;
+
+    // Sink meta to parquet
     sink(
-        triples
-            .group_by([col("predicate")])
-            .agg([
-                col("object").count().alias("count"),
-                col("object").n_unique().alias("n_unique"),
-                col("object").min().alias("min"),
-                col("object").max().alias("max"),
-            ]),
+        meta_df.clone().lazy(),
         &format!("{base_path}/_meta.parquet"),
         cloud_opts.clone(),
     )?;
 
-    Ok(())
+    // Extract PredicateStats from the collected DataFrame
+    let meta = extract_predicate_stats(&meta_df);
+
+    Ok(RdfManifest {
+        subjects: "_subjects.parquet".into(),
+        objects: "_objects.parquet".into(),
+        types: "_types.parquet".into(),
+        predicates: predicate_paths,
+        meta,
+    })
+}
+
+/// Extract `Vec<PredicateStat>` from the meta DataFrame.
+fn extract_predicate_stats(df: &DataFrame) -> Vec<PredicateStat> {
+    let len = df.height();
+    let pred_col = df.column("predicate").ok();
+    let count_col = df.column("count").ok();
+    let nunique_col = df.column("n_unique").ok();
+    let min_col = df.column("min").ok();
+    let max_col = df.column("max").ok();
+
+    (0..len)
+        .map(|i| {
+            let predicate = pred_col
+                .and_then(|c| c.str().ok())
+                .and_then(|s| s.get(i))
+                .unwrap_or("")
+                .to_string();
+            let count = count_col
+                .and_then(|c| c.u32().ok().map(|s| s.get(i).unwrap_or(0) as u64)
+                    .or_else(|| c.u64().ok().map(|s| s.get(i).unwrap_or(0))))
+                .unwrap_or(0);
+            let n_unique = nunique_col
+                .and_then(|c| c.u32().ok().map(|s| s.get(i).unwrap_or(0) as u64)
+                    .or_else(|| c.u64().ok().map(|s| s.get(i).unwrap_or(0))))
+                .unwrap_or(0);
+            let min = min_col
+                .and_then(|c| c.str().ok())
+                .and_then(|s| s.get(i))
+                .map(String::from);
+            let max = max_col
+                .and_then(|c| c.str().ok())
+                .and_then(|s| s.get(i))
+                .map(String::from);
+            PredicateStat { predicate, count, n_unique, min, max }
+        })
+        .collect()
 }
 
 /// Triplify an output config into (subject, predicate, object, object_datatype) rows.

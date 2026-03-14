@@ -37,11 +37,11 @@ impl<'a> RuntimeContext<'a> {
     }
 
     /// Register an output produced during execution.
-    pub fn register_output(&self, kind: OutputKind, path: String) {
+    pub fn register_output(&self, kind: OutputKind, path: String, manifest: Option<crate::runtime::executor::RdfManifest>) {
         self.outputs
             .lock()
             .expect("outputs lock poisoned")
-            .push(OutputRecord { kind, path });
+            .push(OutputRecord { kind, path, manifest });
     }
 }
 
