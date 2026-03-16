@@ -1,7 +1,7 @@
 pub mod metadata;
 pub mod parquet_writer;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use fossil_lang::common::PrimitiveType;
 use fossil_lang::context::{DefId, Symbol};
@@ -38,14 +38,30 @@ impl From<RdfError> for FossilError {
     }
 }
 
-/// Output configuration for a single RDF type.
+/// A reference (edge) from this type to another type.
+pub struct RefEdge {
+    /// Predicate URI (e.g. "http://schema.org/knows").
+    pub predicate_uri: String,
+    /// Short label for the edge (local name of predicate IRI).
+    pub label: String,
+    /// Target type directory name (e.g. "person").
+    pub target_type_dir: String,
+    /// The Polars expression that produces the ref value (target IRI).
+    pub expr: Expr,
+}
+
+/// Output configuration for a single vertex type.
 pub struct OutputConfig {
-    /// Polars selection expressions producing `_subject`, `_type`, and predicate columns.
+    /// Polars selection expressions producing `_subject` and scalar property columns (no refs).
     pub selection: Vec<Expr>,
+    /// The expression that produces the subject IRI (for edge generation).
+    pub subject_expr: Expr,
+    /// Short label → full predicate IRI for scalar columns.
+    pub label_to_iri: HashMap<String, String>,
     /// Predicate URI → XSD datatype IRI for typed literals.
     pub xsd_types: HashMap<String, &'static str>,
-    /// Predicate URIs whose values are references (URIs/blank nodes, not literals).
-    pub ref_predicates: HashSet<String>,
+    /// Reference edges from this type to other types.
+    pub ref_edges: Vec<RefEdge>,
     /// Directory name for this type (e.g., `"wall"`).
     pub type_dir: String,
     /// Full RDF type IRI (e.g., `"http://example.com/bim#Wall"`).
@@ -175,6 +191,15 @@ impl FunctionImpl for RdfMaterializeFunction {
     }
 }
 
+/// Extract the local name from a URI (part after last `#` or `/`).
+fn short_label(uri: &str) -> String {
+    uri.rsplit_once('#')
+        .or_else(|| uri.rsplit_once('/'))
+        .map(|(_, name)| name)
+        .unwrap_or(uri)
+        .to_string()
+}
+
 /// Build output configs from an Emission's specs.
 fn build_output_configs(emission: &Emission, ctx: &RuntimeContext) -> Vec<OutputConfig> {
     let interner = ctx.gcx.interner.clone();
@@ -198,42 +223,44 @@ fn build_output_configs(emission: &Emission, ctx: &RuntimeContext) -> Vec<Output
                 }
             }
 
-            // Build selection + track reference predicates
+            // Build selection (scalar only) + ref edges (separate)
             let mut selection: Vec<Expr> = Vec::new();
-            let mut ref_predicates: HashSet<String> = HashSet::new();
+            let mut ref_edges: Vec<RefEdge> = Vec::new();
+            let mut label_to_iri: HashMap<String, String> = HashMap::new();
 
-            if let Some(subject_expr) =
-                build_subject_expr(def_id, &spec.ctor_args, ctx.gcx, ctx.type_index)
-            {
-                selection.push(subject_expr.alias("_subject"));
-            }
-
-            if let Some(ref attrs) = type_attrs {
-                if let Some(ref rdf_type) = attrs.rdf_type {
-                    selection.push(lit(rdf_type.as_str()).alias("_type"));
-                }
-            }
+            let subject_expr = build_subject_expr(def_id, &spec.ctor_args, ctx.gcx, ctx.type_index)
+                .unwrap_or_else(|| lit("").alias("_subject"));
+            selection.push(subject_expr.clone().alias("_subject"));
 
             for transform_expr in &spec.select_exprs {
                 if let Expr::Alias(inner, field_name) = transform_expr
                     && let Some(field_sym) = interner.lookup(field_name)
                     && let Some(uri) = field_uris.get(&field_sym)
                 {
-                    // Reference field → URI/blank node object
+                    // Reference field → goes to ref_edges, NOT selection
                     if let Some(ref_def_id) =
                         field_ref_type(def_id, field_sym, ctx.ir, ctx.type_index)
                     {
-                        ref_predicates.insert(uri.clone());
                         let ref_expr = resolve_identity_expr(
                             ref_def_id,
                             &[inner.as_ref().clone()],
                             ctx.gcx,
                             ctx.type_index,
                         );
-                        selection.push(ref_expr.alias(uri));
+                        let ref_type_name = interner.resolve(
+                            ctx.gcx.definitions.get(ref_def_id).name,
+                        );
+                        ref_edges.push(RefEdge {
+                            predicate_uri: uri.clone(),
+                            label: short_label(uri),
+                            target_type_dir: ref_type_name.to_lowercase(),
+                            expr: ref_expr,
+                        });
                         continue;
                     }
-                    // Normal field
+                    // Scalar field → selection with short label alias
+                    let label = short_label(uri);
+                    label_to_iri.insert(label.clone(), uri.clone());
                     let prim = field_primitive_type(def_id, field_sym, ctx.gcx);
                     let expr = match prim {
                         Some(p) if p != PrimitiveType::String => {
@@ -241,7 +268,7 @@ fn build_output_configs(emission: &Emission, ctx: &RuntimeContext) -> Vec<Output
                         }
                         _ => inner.as_ref().clone(),
                     };
-                    selection.push(expr.alias(uri));
+                    selection.push(expr.alias(PlSmallStr::from(label.as_str())));
                 }
             }
 
@@ -257,8 +284,10 @@ fn build_output_configs(emission: &Emission, ctx: &RuntimeContext) -> Vec<Output
 
             OutputConfig {
                 selection,
+                subject_expr,
+                label_to_iri,
                 xsd_types,
-                ref_predicates,
+                ref_edges,
                 type_dir,
                 type_iri,
             }

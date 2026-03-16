@@ -97,25 +97,26 @@ impl RdfGraph {
             .unwrap_or(0)
     }
 
-    /// Query all triples for a specific subject (SPO index).
+    /// Query all triples for a specific subject.
     pub fn entity(&self, subject: &str) -> Result<LazyFrame, RdfGraphError> {
-        let path = format!("{}/_subjects.parquet", self.base);
+        let path = format!("{}/_triples.parquet", self.base);
         let lf = self.scan(&path)?;
         Ok(lf.filter(col("subject").eq(lit(subject))))
     }
 
-    /// Reverse lookup: find all triples that reference a given object (OPS index).
+    /// Reverse lookup: find all triples that reference a given object.
     pub fn references_to(&self, object: &str) -> Result<LazyFrame, RdfGraphError> {
-        let path = format!("{}/_objects.parquet", self.base);
+        let path = format!("{}/_triples.parquet", self.base);
         let lf = self.scan(&path)?;
         Ok(lf.filter(col("object").eq(lit(object))))
     }
 
-    /// Query all (subject, object) pairs for a predicate (PSO index).
+    /// Query all (subject, object) pairs for a predicate.
     pub fn predicate(&self, uri: &str) -> Result<LazyFrame, RdfGraphError> {
-        let name = predicate_to_filename(uri);
-        let path = format!("{}/_predicates/{}.parquet", self.base, name);
-        self.scan(&path)
+        let path = format!("{}/_triples.parquet", self.base);
+        let lf = self.scan(&path)?;
+        Ok(lf.filter(col("predicate").eq(lit(uri)))
+            .select([col("subject"), col("object")]))
     }
 
     /// Read a pre-computed join (ExtVP).
@@ -130,9 +131,9 @@ impl RdfGraph {
         self.scan(&path)
     }
 
-    /// All triples — scan `_subjects.parquet` unfiltered.
+    /// All triples — scan `_triples.parquet` unfiltered.
     pub fn all_triples(&self) -> Result<LazyFrame, RdfGraphError> {
-        let path = format!("{}/_subjects.parquet", self.base);
+        let path = format!("{}/_triples.parquet", self.base);
         self.scan(&path)
     }
 
@@ -145,10 +146,11 @@ impl RdfGraph {
     ) -> Result<LazyFrame, RdfGraphError> {
         let base = match (s, p, o) {
             (Some(subject), _, _) => self.entity(subject)?,
-            (_, Some(predicate), _) => self
-                .predicate(predicate)?
-                .with_column(lit(predicate).alias("predicate"))
-                .with_column(lit("").alias("object_datatype")),
+            (_, Some(predicate), _) => {
+                let path = format!("{}/_triples.parquet", self.base);
+                self.scan(&path)?
+                    .filter(col("predicate").eq(lit(predicate)))
+            }
             (_, _, Some(object)) => self.references_to(object)?,
             (None, None, None) => self.all_triples()?,
         };
@@ -225,12 +227,3 @@ impl RdfGraph {
     }
 }
 
-/// Convert a predicate URI to a filename (last segment after `#` or `/`, lowercased).
-fn predicate_to_filename(uri: &str) -> String {
-    let name = uri
-        .rsplit_once('#')
-        .or_else(|| uri.rsplit_once('/'))
-        .map(|(_, name)| name)
-        .unwrap_or(uri);
-    name.to_lowercase()
-}

@@ -1,33 +1,29 @@
-//! Parquet RDF materializer — produces HDT-style indices as static Parquet files.
+//! GraphAr-compatible property graph materializer.
 //!
-//! Everything stays as `LazyFrame` until `sink_parquet` flushes to disk/cloud.
-//! A single `.cache()` ensures the source is scanned only once.
+//! Produces vertex files (one per type) and edge files (CSR + CSC per edge type)
+//! as Parquet, plus YAML metadata following the GraphAr `gar/v1` spec.
 //!
 //! Output layout:
 //! ```text
 //! dataset/
-//! ├── _subjects.parquet    # SPO: sorted by subject
-//! ├── _objects.parquet     # OPS: sorted by object
-//! ├── _predicates/         # PSO: 1 file per predicate
-//! │   ├── height.parquet
-//! │   └── type.parquet
-//! ├── _meta.parquet        # Per-predicate statistics
-//! └── _types.parquet       # Type IRI → directory mapping
+//! ├── graph.yml
+//! ├── {type}.vertex.yml
+//! ├── {src}_{edge}_{dst}.edge.yml
+//! ├── vertex/{type}.parquet         # _id | subject | properties...
+//! └── edge/{src}_{edge}_{dst}/
+//!     ├── by_source.parquet         # source | target (sorted by source, CSR)
+//!     └── by_target.parquet         # source | target (sorted by target, CSC)
 //! ```
-
-use std::collections::HashMap;
 
 use polars::prelude::*;
 use polars::prelude::cloud::CloudOptions;
 use polars::prelude::sync_on_close::SyncOnCloseType;
 
 use fossil_lang::error::FossilError;
-use fossil_lang::runtime::executor::{PredicateStat, RdfManifest};
+use fossil_lang::runtime::executor::{ColumnStat, DataManifest, EdgeManifest, TypeManifest};
 
 use super::OutputConfig;
 use super::RdfError;
-
-const RDF_TYPE_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
 const SINK_OPTIONS: SinkOptions = SinkOptions {
     mkdir: true,
@@ -52,331 +48,385 @@ fn sink(lf: LazyFrame, path: &str, cloud_opts: Option<CloudOptions>) -> Result<(
     Ok(())
 }
 
-/// Materialize a LazyFrame into Parquet RDF indices.
-/// Returns an `RdfManifest` with relative file paths and per-predicate statistics.
+/// Map XSD datatype IRI to a human-readable name for the manifest.
+fn xsd_to_datatype_name(xsd: Option<&str>) -> &'static str {
+    match xsd {
+        Some(s) if s.ends_with("#integer") || s.ends_with("#int") || s.ends_with("#long") => "int64",
+        Some(s) if s.ends_with("#float") || s.ends_with("#double") || s.ends_with("#decimal") => "double",
+        Some(s) if s.ends_with("#boolean") => "boolean",
+        Some(s) if s.ends_with("#date") => "date",
+        _ => "string",
+    }
+}
+
+/// Materialize a property graph as GraphAr-compatible Parquet files.
 pub fn materialize(
     frame: &LazyFrame,
     configs: &[OutputConfig],
     base_path: &str,
     cloud_opts: Option<CloudOptions>,
-) -> Result<RdfManifest, FossilError> {
-    let triple_frames: Vec<LazyFrame> = configs
-        .iter()
-        .map(|config| triplify(frame, config))
-        .collect::<Result<_, _>>()?;
+) -> Result<DataManifest, FossilError> {
+    let mut types = Vec::new();
+    let mut edges = Vec::new();
 
-    if triple_frames.is_empty() {
-        return Ok(RdfManifest {
-            subjects: "_subjects.parquet".into(),
-            objects: "_objects.parquet".into(),
-            types: "_types.parquet".into(),
-            predicates: Vec::new(),
-            meta: Vec::new(),
-            entity_count: 0,
+    for config in configs {
+        // ── Vertex file ──
+        let vertex = frame
+            .clone()
+            .select(config.selection.clone())
+            .rename(["_subject"], ["subject"], true)
+            .with_row_index("_id", Some(0));
+
+        let vertex_path = format!("vertex/{}.parquet", config.type_dir);
+        sink(
+            vertex,
+            &format!("{base_path}/{vertex_path}"),
+            cloud_opts.clone(),
+        )?;
+
+        // Compute stats by scanning the written file
+        let type_manifest = compute_type_manifest(
+            config,
+            &vertex_path,
+            &format!("{base_path}/{vertex_path}"),
+            cloud_opts.clone(),
+        )?;
+        types.push(type_manifest);
+
+        // ── Edge files (per ref column) ──
+        let id_map = LazyFrame::scan_parquet(
+            PlPath::from_str(&format!("{base_path}/{vertex_path}")),
+            Default::default(),
+        )
+        .map_err(polars_write_err)?
+        .select([col("_id"), col("subject")]);
+
+        for ref_edge in &config.ref_edges {
+            let edge_dir = format!(
+                "{}_{}_{}",
+                config.type_dir, ref_edge.label, ref_edge.target_type_dir
+            );
+
+            // Build raw edges: subject IRI → ref target IRI
+            let raw_edges = frame
+                .clone()
+                .select([
+                    config.subject_expr.clone().alias("src_iri"),
+                    ref_edge.expr.clone().alias("tgt_iri"),
+                ])
+                .filter(col("tgt_iri").is_not_null().and(col("src_iri").is_not_null()));
+
+            // Map source IRI → source _id
+            let with_src_id = raw_edges.join(
+                id_map
+                    .clone()
+                    .rename(["subject", "_id"], ["src_iri", "source"], true),
+                [col("src_iri")],
+                [col("src_iri")],
+                JoinType::Inner.into(),
+            );
+
+            // Map target IRI → target _id (from target type's vertex file)
+            let target_vertex_path = format!(
+                "{base_path}/vertex/{}.parquet",
+                ref_edge.target_type_dir
+            );
+            let target_id_map = LazyFrame::scan_parquet(
+                PlPath::from_str(&target_vertex_path),
+                Default::default(),
+            )
+            .map_err(polars_write_err)?
+            .select([
+                col("_id").alias("target"),
+                col("subject").alias("tgt_iri"),
+            ]);
+
+            let edges_with_ids = with_src_id
+                .join(
+                    target_id_map,
+                    [col("tgt_iri")],
+                    [col("tgt_iri")],
+                    JoinType::Inner.into(),
+                )
+                .select([col("source"), col("target")]);
+
+            // CSR: sorted by (source, target)
+            let by_source_path = format!("edge/{edge_dir}/by_source.parquet");
+            sink(
+                edges_with_ids
+                    .clone()
+                    .sort(
+                        ["source", "target"],
+                        SortMultipleOptions::default(),
+                    ),
+                &format!("{base_path}/{by_source_path}"),
+                cloud_opts.clone(),
+            )?;
+
+            // CSC: sorted by (target, source)
+            let by_target_path = format!("edge/{edge_dir}/by_target.parquet");
+            sink(
+                edges_with_ids.sort(
+                    ["target", "source"],
+                    SortMultipleOptions::default(),
+                ),
+                &format!("{base_path}/{by_target_path}"),
+                cloud_opts.clone(),
+            )?;
+
+            // Edge count
+            let edge_count = LazyFrame::scan_parquet(
+                PlPath::from_str(&format!("{base_path}/{by_source_path}")),
+                Default::default(),
+            )
+            .ok()
+            .and_then(|lf| lf.select([col("source").count()]).collect().ok())
+            .and_then(|df| {
+                df.column("source")
+                    .ok()?
+                    .u32()
+                    .ok()
+                    .map(|ca| ca.get(0).unwrap_or(0) as u64)
+                    .or_else(|| {
+                        df.column("source")
+                            .ok()?
+                            .u64()
+                            .ok()
+                            .map(|ca| ca.get(0).unwrap_or(0))
+                    })
+            })
+            .unwrap_or(0);
+
+            edges.push(EdgeManifest {
+                name: ref_edge.label.clone(),
+                iri: ref_edge.predicate_uri.clone(),
+                source_type: config.type_dir.clone(),
+                target_type: ref_edge.target_type_dir.clone(),
+                by_source: by_source_path,
+                by_target: by_target_path,
+                count: edge_count,
+            });
+        }
+    }
+
+    // Write YAML metadata
+    write_yaml_metadata(base_path, &types, &edges, cloud_opts.as_ref())?;
+
+    Ok(DataManifest { types, edges })
+}
+
+/// Compute type manifest by scanning the written vertex file.
+fn compute_type_manifest(
+    config: &OutputConfig,
+    vertex_rel_path: &str,
+    vertex_abs_path: &str,
+    _cloud_opts: Option<CloudOptions>,
+) -> Result<TypeManifest, FossilError> {
+    let mut lf = LazyFrame::scan_parquet(PlPath::from_str(vertex_abs_path), Default::default())
+        .map_err(polars_write_err)?;
+
+    // Entity count
+    let entity_count = lf
+        .clone()
+        .select([col("_id").count()])
+        .collect()
+        .map_err(polars_write_err)?
+        .column("_id")
+        .ok()
+        .and_then(|c| {
+            c.u32()
+                .ok()
+                .map(|ca| ca.get(0).unwrap_or(0) as u64)
+                .or_else(|| c.u64().ok().map(|ca| ca.get(0).unwrap_or(0)))
+        })
+        .unwrap_or(0);
+
+    // Per-column stats (skip _id and subject)
+    let schema = lf.collect_schema().map_err(polars_write_err)?;
+    let mut columns = Vec::new();
+
+    let label_to_iri = &config.label_to_iri;
+
+    for (col_name, _dtype) in schema.iter() {
+        let name = col_name.to_string();
+        if name == "_id" || name == "subject" {
+            continue;
+        }
+
+        let iri = label_to_iri.get(&name).cloned().unwrap_or_default();
+        let xsd = config.xsd_types.get(iri.as_str()).copied();
+        let datatype = xsd_to_datatype_name(xsd).to_string();
+
+        // Compute stats for this column
+        let stats_df = lf
+            .clone()
+            .select([
+                col(PlSmallStr::from(name.as_str())).count().alias("count"),
+                col(PlSmallStr::from(name.as_str()))
+                    .n_unique()
+                    .alias("n_unique"),
+                col(PlSmallStr::from(name.as_str()))
+                    .cast(DataType::String)
+                    .min()
+                    .alias("min"),
+                col(PlSmallStr::from(name.as_str()))
+                    .cast(DataType::String)
+                    .max()
+                    .alias("max"),
+            ])
+            .collect()
+            .map_err(polars_write_err)?;
+
+        let count = extract_u64(&stats_df, "count");
+        let n_unique = extract_u64(&stats_df, "n_unique");
+        let min = extract_string(&stats_df, "min");
+        let max = extract_string(&stats_df, "max");
+
+        // Samples
+        let samples_df = lf
+            .clone()
+            .select([col(PlSmallStr::from(name.as_str()))
+                .cast(DataType::String)
+                .drop_nulls()
+                .head(Some(5))])
+            .collect()
+            .ok();
+        let samples = samples_df
+            .and_then(|df| {
+                df.column(&name)
+                    .ok()?
+                    .str()
+                    .ok()
+                    .map(|ca| {
+                        ca.into_iter()
+                            .filter_map(|v| v.map(String::from))
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .unwrap_or_default();
+
+        columns.push(ColumnStat {
+            name,
+            iri,
+            datatype,
+            count,
+            n_unique,
+            min,
+            max,
+            samples,
         });
     }
 
-    // Single cache — source scanned once, shared across all sinks
-    let triples = concat(&triple_frames, UnionArgs::default())
-        .map_err(polars_write_err)?
-        .cache();
-
-    // SPO index
-    sink(
-        triples.clone().sort(["subject"], Default::default()),
-        &format!("{base_path}/_subjects.parquet"),
-        cloud_opts.clone(),
-    )?;
-
-    // OPS index
-    sink(
-        triples
-            .clone()
-            .sort(["object_datatype", "object"], Default::default()),
-        &format!("{base_path}/_objects.parquet"),
-        cloud_opts.clone(),
-    )?;
-
-    // PSO indices (one file per predicate)
-    let pred_names = predicate_names(configs);
-    let mut predicate_paths = Vec::with_capacity(pred_names.len());
-    for pred in &pred_names {
-        let filename = predicate_to_filename(pred);
-        let rel = format!("_predicates/{filename}.parquet");
-        sink(
-            triples
-                .clone()
-                .filter(col("predicate").eq(lit(pred.as_str())))
-                .select([col("subject"), col("object")]),
-            &format!("{base_path}/{rel}"),
-            cloud_opts.clone(),
-        )?;
-        predicate_paths.push(rel);
-    }
-
-    // Type mappings
-    sink(
-        DataFrame::new(vec![
-            Column::new(
-                "type_iri".into(),
-                &configs
-                    .iter()
-                    .map(|c| c.type_iri.as_str())
-                    .collect::<Vec<_>>(),
-            ),
-            Column::new(
-                "type_dir".into(),
-                &configs
-                    .iter()
-                    .map(|c| c.type_dir.as_str())
-                    .collect::<Vec<_>>(),
-            ),
-        ])
-        .map_err(polars_write_err)?
-        .lazy(),
-        &format!("{base_path}/_types.parquet"),
-        cloud_opts.clone(),
-    )?;
-
-    // Build datatype map from configs
-    let mut datatype_map: HashMap<String, String> = HashMap::new();
-    datatype_map.insert(RDF_TYPE_IRI.to_string(), "uri".to_string());
-    for config in configs {
-        for (pred, xsd) in &config.xsd_types {
-            datatype_map.insert(pred.clone(), xsd.to_string());
-        }
-        for pred in &config.ref_predicates {
-            datatype_map.insert(pred.clone(), "uri".to_string());
-        }
-    }
-
-    // Predicate statistics — collect into DataFrame to extract manifest meta
-    let meta_lf = triples
-        .clone()
-        .group_by([col("predicate")])
-        .agg([
-            col("object").count().alias("count"),
-            col("object").n_unique().alias("n_unique"),
-            col("object").min().alias("min"),
-            col("object").max().alias("max"),
-        ]);
-
-    // Materialize meta into memory so we can both sink to parquet and extract stats
-    let meta_df = meta_lf.collect().map_err(polars_write_err)?;
-
-    // Sink meta to parquet
-    sink(
-        meta_df.clone().lazy(),
-        &format!("{base_path}/_meta.parquet"),
-        cloud_opts.clone(),
-    )?;
-
-    // Collect samples per predicate (5 representative values)
-    let samples_lf = triples
-        .clone()
-        .group_by([col("predicate")])
-        .agg([col("object").head(Some(5)).alias("samples")]);
-    let samples_df = samples_lf.collect().map_err(polars_write_err)?;
-    let mut samples_map: HashMap<String, Vec<String>> = HashMap::new();
-    if let (Some(pred_col), Some(samp_col)) =
-        (samples_df.column("predicate").ok(), samples_df.column("samples").ok())
-    {
-        for i in 0..samples_df.height() {
-            let pred = pred_col.str().ok().and_then(|s| s.get(i)).unwrap_or("");
-            let vals = if let Some(list_ca) = samp_col.list().ok() {
-                if let Some(series) = list_ca.get_as_series(i) {
-                    if let Ok(str_ca) = series.str() {
-                        str_ca.into_iter()
-                            .filter_map(|opt| opt.map(String::from))
-                            .collect::<Vec<_>>()
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            };
-            samples_map.insert(pred.to_string(), vals);
-        }
-    }
-
-    // Entity count — unique subjects
-    let entity_count = triples
-        .select([col("subject")])
-        .unique(None, UniqueKeepStrategy::First)
-        .collect()
-        .map(|df| df.height() as u64)
-        .unwrap_or(0);
-
-    // Extract PredicateStats from the collected DataFrame
-    let meta = extract_predicate_stats(&meta_df, &datatype_map, &samples_map);
-
-    Ok(RdfManifest {
-        subjects: "_subjects.parquet".into(),
-        objects: "_objects.parquet".into(),
-        types: "_types.parquet".into(),
-        predicates: predicate_paths,
-        meta,
+    Ok(TypeManifest {
+        name: config.type_dir.clone(),
+        iri: config.type_iri.clone(),
+        vertex_file: vertex_rel_path.to_string(),
         entity_count,
+        columns,
     })
 }
 
-/// Extract `Vec<PredicateStat>` from the meta DataFrame.
-fn extract_predicate_stats(
-    df: &DataFrame,
-    datatype_map: &HashMap<String, String>,
-    samples_map: &HashMap<String, Vec<String>>,
-) -> Vec<PredicateStat> {
-    let len = df.height();
-    let pred_col = df.column("predicate").ok();
-    let count_col = df.column("count").ok();
-    let nunique_col = df.column("n_unique").ok();
-    let min_col = df.column("min").ok();
-    let max_col = df.column("max").ok();
-
-    (0..len)
-        .map(|i| {
-            let predicate = pred_col
-                .and_then(|c| c.str().ok())
-                .and_then(|s| s.get(i))
-                .unwrap_or("")
-                .to_string();
-            let count = count_col
-                .and_then(|c| c.u32().ok().map(|s| s.get(i).unwrap_or(0) as u64)
-                    .or_else(|| c.u64().ok().map(|s| s.get(i).unwrap_or(0))))
-                .unwrap_or(0);
-            let n_unique = nunique_col
-                .and_then(|c| c.u32().ok().map(|s| s.get(i).unwrap_or(0) as u64)
-                    .or_else(|| c.u64().ok().map(|s| s.get(i).unwrap_or(0))))
-                .unwrap_or(0);
-            let min = min_col
-                .and_then(|c| c.str().ok())
-                .and_then(|s| s.get(i))
-                .map(String::from);
-            let max = max_col
-                .and_then(|c| c.str().ok())
-                .and_then(|s| s.get(i))
-                .map(String::from);
-            let datatype = datatype_map.get(&predicate).cloned();
-            let samples = samples_map.get(&predicate).cloned().unwrap_or_default();
-            PredicateStat { predicate, count, n_unique, min, max, datatype, samples }
+fn extract_u64(df: &DataFrame, col_name: &str) -> u64 {
+    df.column(col_name)
+        .ok()
+        .and_then(|c| {
+            c.u32()
+                .ok()
+                .map(|ca| ca.get(0).unwrap_or(0) as u64)
+                .or_else(|| c.u64().ok().map(|ca| ca.get(0).unwrap_or(0)))
         })
-        .collect()
+        .unwrap_or(0)
 }
 
-/// Triplify an output config into (subject, predicate, object, object_datatype) rows.
-fn triplify(plan_frame: &LazyFrame, config: &OutputConfig) -> Result<LazyFrame, FossilError> {
-    let loc = fossil_lang::ast::Loc::generated();
-    let selected = plan_frame.clone().select(config.selection.clone());
+fn extract_string(df: &DataFrame, col_name: &str) -> Option<String> {
+    df.column(col_name)
+        .ok()
+        .and_then(|c| c.str().ok())
+        .and_then(|ca| ca.get(0))
+        .map(String::from)
+}
 
-    let pred_cols: Vec<PlSmallStr> = config
-        .selection
+// ── YAML metadata (GraphAr gar/v1 spec) ──
+
+fn write_yaml_metadata(
+    base_path: &str,
+    types: &[TypeManifest],
+    edges: &[EdgeManifest],
+    _cloud_opts: Option<&CloudOptions>,
+) -> Result<(), FossilError> {
+    // For cloud storage, YAML writing is skipped (metadata lives in the manifest JSON).
+    // For local storage, write YAML files.
+    if base_path.starts_with("s3://")
+        || base_path.starts_with("gs://")
+        || base_path.starts_with("az://")
+        || base_path.starts_with("abfss://")
+    {
+        return Ok(());
+    }
+
+    // graph.yml
+    let vertex_ymls: Vec<String> = types
         .iter()
-        .filter_map(|e| match e {
-            Expr::Alias(_, name) if name.as_str() != "_subject" && name.as_str() != "_type" => {
-                Some(name.clone())
-            }
-            _ => None,
-        })
+        .map(|t| format!("{}.vertex.yml", t.name))
         .collect();
-
-    let mut frames: Vec<LazyFrame> = Vec::new();
-
-    // rdf:type triples
-    let has_type = config
-        .selection
+    let edge_ymls: Vec<String> = edges
         .iter()
-        .any(|e| matches!(e, Expr::Alias(_, n) if n.as_str() == "_type"));
-    if has_type {
-        frames.push(
-            selected
-                .clone()
-                .filter(col("_subject").is_not_null().and(col("_type").is_not_null()))
-                .select([
-                    col("_subject").alias("subject"),
-                    lit(RDF_TYPE_IRI).alias("predicate"),
-                    col("_type").alias("object"),
-                    lit("uri").alias("object_datatype"),
-                ]),
-        );
-    }
-
-    // Per-predicate triples
-    for pred_col in &pred_cols {
-        let is_ref = config.ref_predicates.contains(pred_col.as_str());
-        let xsd = config.xsd_types.get(pred_col.as_str()).copied();
-        let datatype_str = if is_ref {
-            "uri".to_string()
-        } else {
-            xsd.unwrap_or("").to_string()
-        };
-
-        frames.push(
-            selected
-                .clone()
-                .filter(
-                    col("_subject")
-                        .is_not_null()
-                        .and(col(pred_col.clone()).is_not_null()),
-                )
-                .select([
-                    col("_subject").alias("subject"),
-                    lit(pred_col.as_str()).alias("predicate"),
-                    col(pred_col.clone())
-                        .cast(DataType::String)
-                        .alias("object"),
-                    lit(datatype_str).alias("object_datatype"),
-                ]),
-        );
-    }
-
-    if frames.is_empty() {
-        let empty = DataFrame::new(vec![
-            Column::new_empty("subject".into(), &DataType::String),
-            Column::new_empty("predicate".into(), &DataType::String),
-            Column::new_empty("object".into(), &DataType::String),
-            Column::new_empty("object_datatype".into(), &DataType::String),
-        ])
-        .map_err(|e| FossilError::evaluation(e.to_string(), loc))?;
-        return Ok(empty.lazy());
-    }
-
-    concat(&frames, UnionArgs::default()).map_err(|e| FossilError::evaluation(e.to_string(), loc))
-}
-
-/// Collect predicate URIs statically from output configs.
-fn predicate_names(configs: &[OutputConfig]) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    for config in configs {
-        if config
-            .selection
+        .map(|e| format!("{}_{}_{}.edge.yml", e.source_type, e.name, e.target_type))
+        .collect();
+    let graph_yml = format!(
+        "name: dataset\nprefix: ./\nvertices:\n{}\nedges:\n{}\nversion: gar/v1\n",
+        vertex_ymls
             .iter()
-            .any(|e| matches!(e, Expr::Alias(_, n) if n.as_str() == "_type"))
-        {
-            if !names.contains(&RDF_TYPE_IRI.to_string()) {
-                names.push(RDF_TYPE_IRI.to_string());
-            }
-        }
-        for e in &config.selection {
-            if let Expr::Alias(_, name) = e {
-                let s = name.to_string();
-                if s != "_subject" && s != "_type" && !names.contains(&s) {
-                    names.push(s);
-                }
-            }
-        }
-    }
-    names
-}
+            .map(|v| format!("  - {v}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        edge_ymls
+            .iter()
+            .map(|e| format!("  - {e}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    std::fs::write(format!("{base_path}/graph.yml"), graph_yml)
+        .map_err(|e| RdfError::Write(e.to_string()))?;
 
-/// Convert a predicate URI to a safe filename.
-fn predicate_to_filename(uri: &str) -> String {
-    let name = uri
-        .rsplit_once('#')
-        .or_else(|| uri.rsplit_once('/'))
-        .map(|(_, name)| name)
-        .unwrap_or(uri);
-    name.to_lowercase()
+    // Vertex YMLs
+    for t in types {
+        let props: Vec<String> = t
+            .columns
+            .iter()
+            .map(|c| {
+                format!(
+                    "      - name: {}\n        data_type: {}\n        is_primary: false",
+                    c.name, c.datatype
+                )
+            })
+            .collect();
+        let subject_prop =
+            "      - name: subject\n        data_type: string\n        is_primary: true";
+        let yml = format!(
+            "type: {}\nchunk_size: 262144\nprefix: vertex/{}/\nproperty_groups:\n  - file_type: parquet\n    properties:\n{}\n{}\nversion: gar/v1\n",
+            t.name, t.name, subject_prop, props.join("\n")
+        );
+        std::fs::write(format!("{base_path}/{}.vertex.yml", t.name), yml)
+            .map_err(|e| RdfError::Write(e.to_string()))?;
+    }
+
+    // Edge YMLs
+    for e in edges {
+        let yml = format!(
+            "src_type: {}\nedge_type: {}\ndst_type: {}\nchunk_size: 4194304\nsrc_chunk_size: 262144\ndst_chunk_size: 262144\ndirected: true\nprefix: edge/{}_{}_{}/\nadj_lists:\n  - ordered: true\n    aligned_by: src\n    file_type: parquet\n  - ordered: true\n    aligned_by: dst\n    file_type: parquet\nversion: gar/v1\n",
+            e.source_type, e.name, e.target_type,
+            e.source_type, e.name, e.target_type,
+        );
+        std::fs::write(
+            format!(
+                "{base_path}/{}_{}_{}.edge.yml",
+                e.source_type, e.name, e.target_type
+            ),
+            yml,
+        )
+        .map_err(|e2| RdfError::Write(e2.to_string()))?;
+    }
+
+    Ok(())
 }

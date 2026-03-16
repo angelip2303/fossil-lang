@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use fossil_lang::compiler::{Compiler, CompilerInput};
 use fossil_lang::passes::GlobalContext;
-use fossil_lang::runtime::executor::IrExecutor;
+use fossil_lang::runtime::executor::{DataManifest, IrExecutor, OutputKind};
 use polars::prelude::*;
 
 use crate::TestSuiteError;
@@ -24,12 +24,28 @@ fn test(test_case: &str) -> Result<bool, TestSuiteError> {
     let compiler = Compiler::with_context(gcx);
     let mapping = PathBuf::from(format!("tests/{}/mapping.fossil", test_case));
     let result = compiler.compile(CompilerInput::File(mapping))?;
-    let _ = IrExecutor::execute(result.program)?;
+    let exec_result = IrExecutor::execute(result.program)?;
 
-    let actual = read_parquet_triples(test_case);
+    // Find the RdfParquet output and its manifest
+    let manifest = exec_result
+        .outputs
+        .iter()
+        .find(|o| o.kind == OutputKind::RdfParquet)
+        .and_then(|o| o.manifest.as_ref());
+
+    let base_path = exec_result
+        .outputs
+        .iter()
+        .find(|o| o.kind == OutputKind::RdfParquet)
+        .map(|o| o.path.as_str())
+        .unwrap_or("");
+
+    let actual = match manifest {
+        Some(m) => reconstruct_triples(base_path, m),
+        None => Ok(HashSet::new()),
+    };
     let expected = parse_ntriples_file(test_case)?;
 
-    // If no Parquet was produced and expected is empty, that's correct
     match actual {
         Ok(triples) => Ok(triples == expected),
         Err(_) if expected.is_empty() => Ok(true),
@@ -37,36 +53,192 @@ fn test(test_case: &str) -> Result<bool, TestSuiteError> {
     }
 }
 
-/// Read triples from the materialized `_subjects.parquet`.
-fn read_parquet_triples(test_case: &str) -> Result<HashSet<Triple>, TestSuiteError> {
-    let path = format!("tests/{}/actual/_subjects.parquet", test_case);
-    let df = LazyFrame::scan_parquet(PlPath::from_str(&path), Default::default())
-        .map_err(|e| TestSuiteError::Other(format!("Failed to read {path}: {e}")))?
-        .select([col("subject"), col("predicate"), col("object"), col("object_datatype")])
-        .collect()
-        .map_err(|e| TestSuiteError::Other(format!("Failed to collect {path}: {e}")))?;
-
-    let subjects = df.column("subject").map_err(polars_err)?.str().map_err(polars_err)?;
-    let predicates = df.column("predicate").map_err(polars_err)?.str().map_err(polars_err)?;
-    let objects = df.column("object").map_err(polars_err)?.str().map_err(polars_err)?;
-    let datatypes = df.column("object_datatype").map_err(polars_err)?.str().map_err(polars_err)?;
-
+/// Reconstruct RDF triples from GraphAr vertex + edge files.
+fn reconstruct_triples(
+    base_path: &str,
+    manifest: &DataManifest,
+) -> Result<HashSet<Triple>, TestSuiteError> {
     let mut triples = HashSet::new();
-    for i in 0..df.height() {
-        let s = subjects.get(i).unwrap_or("");
-        let p = predicates.get(i).unwrap_or("");
-        let o = objects.get(i).unwrap_or("");
-        let dt = datatypes.get(i).unwrap_or("");
 
-        let object_str = format_object(o, dt);
-        triples.insert(Triple {
-            subject: format_subject(s),
-            predicate: format!("<{p}>"),
-            object: object_str,
-        });
+    for type_manifest in &manifest.types {
+        let path = format!("{}/{}", base_path, type_manifest.vertex_file);
+        let df = LazyFrame::scan_parquet(PlPath::from_str(&path), Default::default())
+            .map_err(|e| TestSuiteError::Other(format!("Failed to read {path}: {e}")))?
+            .collect()
+            .map_err(|e| TestSuiteError::Other(format!("Failed to collect {path}: {e}")))?;
+
+        let subjects = df
+            .column("subject")
+            .map_err(polars_err)?
+            .str()
+            .map_err(polars_err)?;
+
+        // rdf:type triples — only when the IRI is a proper URI (not just the type name)
+        if type_manifest.iri.contains("://") || type_manifest.iri.contains('#') {
+            for i in 0..df.height() {
+                let s = subjects.get(i).unwrap_or("");
+                if !s.is_empty() {
+                    triples.insert(Triple {
+                        subject: format_subject(s),
+                        predicate: "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>".into(),
+                        object: format!("<{}>", type_manifest.iri),
+                    });
+                }
+            }
+        }
+
+        // Property triples (scalar columns)
+        for col_stat in &type_manifest.columns {
+            let col_data = df
+                .column(&col_stat.name)
+                .map_err(polars_err)?
+                .cast(&DataType::String)
+                .map_err(polars_err)?;
+            let str_col = col_data.str().map_err(polars_err)?;
+
+            for i in 0..df.height() {
+                let s = subjects.get(i).unwrap_or("");
+                if let Some(val) = str_col.get(i) {
+                    if !s.is_empty() {
+                        let object_str = if col_stat.datatype == "string" || col_stat.iri.is_empty()
+                        {
+                            format!("\"{}\"", val)
+                        } else {
+                            // Map datatype name back to XSD IRI
+                            let xsd = match col_stat.datatype.as_str() {
+                                "int64" => "http://www.w3.org/2001/XMLSchema#integer",
+                                "double" => "http://www.w3.org/2001/XMLSchema#double",
+                                "boolean" => "http://www.w3.org/2001/XMLSchema#boolean",
+                                "date" => "http://www.w3.org/2001/XMLSchema#date",
+                                _ => "",
+                            };
+                            if xsd.is_empty() {
+                                format!("\"{}\"", val)
+                            } else {
+                                format!("\"{}\"^^<{}>", val, xsd)
+                            }
+                        };
+                        triples.insert(Triple {
+                            subject: format_subject(s),
+                            predicate: format!("<{}>", col_stat.iri),
+                            object: object_str,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Edge triples (ref columns → URI objects)
+    for edge_manifest in &manifest.edges {
+        let path = format!("{}/{}", base_path, edge_manifest.by_source);
+        let edge_df = LazyFrame::scan_parquet(PlPath::from_str(&path), Default::default())
+            .map_err(|e| TestSuiteError::Other(format!("Failed to read {path}: {e}")))?
+            .collect()
+            .map_err(|e| TestSuiteError::Other(format!("Failed to collect {path}: {e}")))?;
+
+        // Load vertex ID→IRI maps for source and target types
+        let src_vertex_path = manifest
+            .types
+            .iter()
+            .find(|t| t.name == edge_manifest.source_type)
+            .map(|t| format!("{}/{}", base_path, t.vertex_file))
+            .ok_or_else(|| {
+                TestSuiteError::Other(format!(
+                    "Source type {} not found",
+                    edge_manifest.source_type
+                ))
+            })?;
+        let tgt_vertex_path = manifest
+            .types
+            .iter()
+            .find(|t| t.name == edge_manifest.target_type)
+            .map(|t| format!("{}/{}", base_path, t.vertex_file))
+            .ok_or_else(|| {
+                TestSuiteError::Other(format!(
+                    "Target type {} not found",
+                    edge_manifest.target_type
+                ))
+            })?;
+
+        let src_map = build_id_to_iri_map(&src_vertex_path)?;
+        let tgt_map = build_id_to_iri_map(&tgt_vertex_path)?;
+
+        let sources = edge_df
+            .column("source")
+            .map_err(polars_err)?;
+        let targets = edge_df
+            .column("target")
+            .map_err(polars_err)?;
+
+        for i in 0..edge_df.height() {
+            let src_id = sources
+                .i64()
+                .ok()
+                .and_then(|ca| ca.get(i))
+                .or_else(|| {
+                    sources
+                        .u32()
+                        .ok()
+                        .and_then(|ca| ca.get(i).map(|v| v as i64))
+                })
+                .unwrap_or(-1);
+            let tgt_id = targets
+                .i64()
+                .ok()
+                .and_then(|ca| ca.get(i))
+                .or_else(|| {
+                    targets
+                        .u32()
+                        .ok()
+                        .and_then(|ca| ca.get(i).map(|v| v as i64))
+                })
+                .unwrap_or(-1);
+
+            if let (Some(src_iri), Some(tgt_iri)) = (
+                src_map.get(&(src_id as u64)),
+                tgt_map.get(&(tgt_id as u64)),
+            ) {
+                triples.insert(Triple {
+                    subject: format_subject(src_iri),
+                    predicate: format!("<{}>", edge_manifest.iri),
+                    object: format_subject(tgt_iri), // URIs for refs
+                });
+            }
+        }
     }
 
     Ok(triples)
+}
+
+fn build_id_to_iri_map(
+    vertex_path: &str,
+) -> Result<std::collections::HashMap<u64, String>, TestSuiteError> {
+    let df = LazyFrame::scan_parquet(PlPath::from_str(vertex_path), Default::default())
+        .map_err(|e| TestSuiteError::Other(format!("Failed to read {vertex_path}: {e}")))?
+        .select([col("_id"), col("subject")])
+        .collect()
+        .map_err(|e| TestSuiteError::Other(format!("Failed to collect {vertex_path}: {e}")))?;
+
+    let ids = df.column("_id").map_err(polars_err)?;
+    let subjects = df
+        .column("subject")
+        .map_err(polars_err)?
+        .str()
+        .map_err(polars_err)?;
+
+    let mut map = std::collections::HashMap::new();
+    for i in 0..df.height() {
+        let id = ids
+            .u32()
+            .ok()
+            .and_then(|ca| ca.get(i).map(|v| v as u64))
+            .or_else(|| ids.u64().ok().and_then(|ca| ca.get(i)))
+            .unwrap_or(0);
+        let iri = subjects.get(i).unwrap_or("").to_string();
+        map.insert(id, iri);
+    }
+    Ok(map)
 }
 
 /// Format a subject: blank nodes as-is, URIs wrapped in `<>`.
@@ -75,24 +247,6 @@ fn format_subject(s: &str) -> String {
         s.to_string()
     } else {
         format!("<{s}>")
-    }
-}
-
-/// Format an object value with its datatype.
-fn format_object(value: &str, datatype: &str) -> String {
-    if datatype == "uri" {
-        // URI or blank node
-        if value.starts_with("_:") {
-            value.to_string()
-        } else {
-            format!("<{value}>")
-        }
-    } else if datatype.is_empty() {
-        // Plain string literal
-        format!("\"{}\"", value)
-    } else {
-        // Typed literal
-        format!("\"{}\"^^<{}>", value, datatype)
     }
 }
 
@@ -116,8 +270,6 @@ fn parse_ntriples_file(test_case: &str) -> Result<HashSet<Triple>, TestSuiteErro
 }
 
 /// Parse a single N-Triples line into a Triple.
-///
-/// Format: `<subject> <predicate> <object> .` or `<subject> <predicate> "literal"^^<type> .`
 fn parse_ntriples_line(line: &str) -> Option<Triple> {
     let line = line.trim().strip_suffix('.')?;
     let line = line.trim();
@@ -139,20 +291,15 @@ fn parse_ntriples_line(line: &str) -> Option<Triple> {
 fn parse_nt_term(s: &str) -> Option<(String, &str)> {
     let s = s.trim_start();
     if s.starts_with('<') {
-        // URI: <...>
         let end = s.find('>')?;
         Some((s[..=end].to_string(), &s[end + 1..]))
     } else if s.starts_with("_:") {
-        // Blank node: _:name
         let end = s[2..]
             .find(|c: char| c.is_whitespace())
             .map(|i| i + 2)
             .unwrap_or(s.len());
         Some((s[..end].to_string(), &s[end..]))
     } else if s.starts_with('"') {
-        // Literal: "value" or "value"^^<type> or "value"@lang
-        // N-Triples escape sequences are always ASCII (\", \\, \n, \r, \t, \uXXXX, \UXXXXXXXX)
-        // so i += 2 is safe for valid N-Triples. Guard against malformed input anyway.
         let mut i = 1;
         let bytes = s.as_bytes();
         while i < bytes.len() {
@@ -165,11 +312,10 @@ fn parse_nt_term(s: &str) -> Option<(String, &str)> {
             }
         }
         if i >= bytes.len() {
-            return None; // unterminated string
+            return None;
         }
         let after_quote = &s[i + 1..];
         let full = if after_quote.starts_with("^^") {
-            // Typed literal
             let type_part = &after_quote[2..];
             if type_part.starts_with('<') {
                 let type_end = type_part.find('>')?;
@@ -179,14 +325,12 @@ fn parse_nt_term(s: &str) -> Option<(String, &str)> {
                 s[..=i].to_string()
             }
         } else if after_quote.starts_with('@') {
-            // Language-tagged literal
             let lang_end = after_quote[1..]
                 .find(|c: char| c.is_whitespace())
                 .map(|j| i + 1 + 1 + j)
                 .unwrap_or(s.len());
             s[..lang_end].to_string()
         } else {
-            // Simple literal
             s[..=i].to_string()
         };
         let consumed = full.len();

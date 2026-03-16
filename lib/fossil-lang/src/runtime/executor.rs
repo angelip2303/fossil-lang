@@ -8,33 +8,62 @@ use crate::passes::IrProgram;
 use crate::runtime::evaluator::IrEvaluator;
 use crate::runtime::value::{Environment, Value};
 
-/// Per-predicate statistics produced by RDF materialization.
+/// Per-column statistics for a vertex property.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PredicateStat {
-    pub predicate: String,
+pub struct ColumnStat {
+    /// Short label used as Parquet column name.
+    pub name: String,
+    /// Full predicate IRI.
+    pub iri: String,
+    /// Data type: "string", "int64", "double", "boolean", "date".
+    pub datatype: String,
     pub count: u64,
     pub n_unique: u64,
-    pub min: Option<String>,
-    pub max: Option<String>,
-    /// XSD IRI (e.g. `http://www.w3.org/2001/XMLSchema#integer`) or `"uri"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub datatype: Option<String>,
-    /// 3-5 representative values for this predicate.
+    pub min: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub samples: Vec<String>,
 }
 
-/// Manifest describing all files and stats produced by RDF materialization.
+/// Manifest for a vertex type (one Parquet file per type).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RdfManifest {
-    pub subjects: String,
-    pub objects: String,
-    pub types: String,
-    pub predicates: Vec<String>,
-    pub meta: Vec<PredicateStat>,
-    /// Total unique subjects (entities) across all triples.
-    #[serde(default)]
+pub struct TypeManifest {
+    /// Short type name (e.g. "person").
+    pub name: String,
+    /// Full RDF type IRI.
+    pub iri: String,
+    /// Relative path to vertex Parquet file.
+    pub vertex_file: String,
     pub entity_count: u64,
+    pub columns: Vec<ColumnStat>,
+}
+
+/// Manifest for an edge type (CSR + CSC Parquet files).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeManifest {
+    /// Short edge label (e.g. "knows").
+    pub name: String,
+    /// Full predicate IRI.
+    pub iri: String,
+    /// Source vertex type name.
+    pub source_type: String,
+    /// Target vertex type name.
+    pub target_type: String,
+    /// Relative path to CSR file (sorted by source).
+    pub by_source: String,
+    /// Relative path to CSC file (sorted by target).
+    pub by_target: String,
+    pub count: u64,
+}
+
+/// GraphAr-compatible manifest describing a property graph stored as Parquet files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataManifest {
+    pub types: Vec<TypeManifest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<EdgeManifest>,
 }
 
 /// Describes a single output produced during script execution.
@@ -42,7 +71,7 @@ pub struct RdfManifest {
 pub struct OutputRecord {
     pub kind: OutputKind,
     pub path: String,
-    pub manifest: Option<RdfManifest>,
+    pub manifest: Option<DataManifest>,
 }
 
 /// The type of output produced.
