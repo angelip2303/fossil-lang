@@ -183,16 +183,21 @@ pub fn materialize(
     {
         for i in 0..samples_df.height() {
             let pred = pred_col.str().ok().and_then(|s| s.get(i)).unwrap_or("");
-            let vals = samp_col
-                .list()
-                .ok()
-                .and_then(|l| l.get_as_series(i).ok())
-                .map(|series| {
-                    (0..series.len())
-                        .filter_map(|j| series.str().ok().and_then(|s| s.get(j)).map(String::from))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let vals = if let Some(list_ca) = samp_col.list().ok() {
+                if let Some(series) = list_ca.get_as_series(i) {
+                    if let Ok(str_ca) = series.str() {
+                        str_ca.into_iter()
+                            .filter_map(|opt| opt.map(String::from))
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
             samples_map.insert(pred.to_string(), vals);
         }
     }
