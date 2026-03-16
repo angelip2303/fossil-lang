@@ -8,7 +8,7 @@
 
     #[clean(trim)]
     last_name: string,
-å
+
     #[clean(to_null = "Missing")]
     position: string?,
 

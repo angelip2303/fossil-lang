@@ -16,6 +16,12 @@ pub struct PredicateStat {
     pub n_unique: u64,
     pub min: Option<String>,
     pub max: Option<String>,
+    /// XSD IRI (e.g. `http://www.w3.org/2001/XMLSchema#integer`) or `"uri"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub datatype: Option<String>,
+    /// 3-5 representative values for this predicate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub samples: Vec<String>,
 }
 
 /// Manifest describing all files and stats produced by RDF materialization.
@@ -26,6 +32,9 @@ pub struct RdfManifest {
     pub types: String,
     pub predicates: Vec<String>,
     pub meta: Vec<PredicateStat>,
+    /// Total unique subjects (entities) across all triples.
+    #[serde(default)]
+    pub entity_count: u64,
 }
 
 /// Describes a single output produced during script execution.

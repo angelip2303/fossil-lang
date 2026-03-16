@@ -15,6 +15,8 @@
 //! └── _types.parquet       # Type IRI → directory mapping
 //! ```
 
+use std::collections::HashMap;
+
 use polars::prelude::*;
 use polars::prelude::cloud::CloudOptions;
 use polars::prelude::sync_on_close::SyncOnCloseType;
@@ -70,6 +72,7 @@ pub fn materialize(
             types: "_types.parquet".into(),
             predicates: Vec::new(),
             meta: Vec::new(),
+            entity_count: 0,
         });
     }
 
@@ -135,8 +138,21 @@ pub fn materialize(
         cloud_opts.clone(),
     )?;
 
+    // Build datatype map from configs
+    let mut datatype_map: HashMap<String, String> = HashMap::new();
+    datatype_map.insert(RDF_TYPE_IRI.to_string(), "uri".to_string());
+    for config in configs {
+        for (pred, xsd) in &config.xsd_types {
+            datatype_map.insert(pred.clone(), xsd.to_string());
+        }
+        for pred in &config.ref_predicates {
+            datatype_map.insert(pred.clone(), "uri".to_string());
+        }
+    }
+
     // Predicate statistics — collect into DataFrame to extract manifest meta
     let meta_lf = triples
+        .clone()
         .group_by([col("predicate")])
         .agg([
             col("object").count().alias("count"),
@@ -155,8 +171,42 @@ pub fn materialize(
         cloud_opts.clone(),
     )?;
 
+    // Collect samples per predicate (5 representative values)
+    let samples_lf = triples
+        .clone()
+        .group_by([col("predicate")])
+        .agg([col("object").head(Some(5)).alias("samples")]);
+    let samples_df = samples_lf.collect().map_err(polars_write_err)?;
+    let mut samples_map: HashMap<String, Vec<String>> = HashMap::new();
+    if let (Some(pred_col), Some(samp_col)) =
+        (samples_df.column("predicate").ok(), samples_df.column("samples").ok())
+    {
+        for i in 0..samples_df.height() {
+            let pred = pred_col.str().ok().and_then(|s| s.get(i)).unwrap_or("");
+            let vals = samp_col
+                .list()
+                .ok()
+                .and_then(|l| l.get_as_series(i).ok())
+                .map(|series| {
+                    (0..series.len())
+                        .filter_map(|j| series.str().ok().and_then(|s| s.get(j)).map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            samples_map.insert(pred.to_string(), vals);
+        }
+    }
+
+    // Entity count — unique subjects
+    let entity_count = triples
+        .select([col("subject")])
+        .unique(None, UniqueKeepStrategy::First)
+        .collect()
+        .map(|df| df.height() as u64)
+        .unwrap_or(0);
+
     // Extract PredicateStats from the collected DataFrame
-    let meta = extract_predicate_stats(&meta_df);
+    let meta = extract_predicate_stats(&meta_df, &datatype_map, &samples_map);
 
     Ok(RdfManifest {
         subjects: "_subjects.parquet".into(),
@@ -164,11 +214,16 @@ pub fn materialize(
         types: "_types.parquet".into(),
         predicates: predicate_paths,
         meta,
+        entity_count,
     })
 }
 
 /// Extract `Vec<PredicateStat>` from the meta DataFrame.
-fn extract_predicate_stats(df: &DataFrame) -> Vec<PredicateStat> {
+fn extract_predicate_stats(
+    df: &DataFrame,
+    datatype_map: &HashMap<String, String>,
+    samples_map: &HashMap<String, Vec<String>>,
+) -> Vec<PredicateStat> {
     let len = df.height();
     let pred_col = df.column("predicate").ok();
     let count_col = df.column("count").ok();
@@ -199,7 +254,9 @@ fn extract_predicate_stats(df: &DataFrame) -> Vec<PredicateStat> {
                 .and_then(|c| c.str().ok())
                 .and_then(|s| s.get(i))
                 .map(String::from);
-            PredicateStat { predicate, count, n_unique, min, max }
+            let datatype = datatype_map.get(&predicate).cloned();
+            let samples = samples_map.get(&predicate).cloned().unwrap_or_default();
+            PredicateStat { predicate, count, n_unique, min, max, datatype, samples }
         })
         .collect()
 }
