@@ -89,7 +89,6 @@ pub fn materialize(
             config,
             &vertex_path,
             &format!("{base_path}/{vertex_path}"),
-            cloud_opts.clone(),
         )?;
         types.push(type_manifest);
 
@@ -180,21 +179,8 @@ pub fn materialize(
                 Default::default(),
             )
             .ok()
-            .and_then(|lf| lf.select([col("source").count()]).collect().ok())
-            .and_then(|df| {
-                df.column("source")
-                    .ok()?
-                    .u32()
-                    .ok()
-                    .map(|ca| ca.get(0).unwrap_or(0) as u64)
-                    .or_else(|| {
-                        df.column("source")
-                            .ok()?
-                            .u64()
-                            .ok()
-                            .map(|ca| ca.get(0).unwrap_or(0))
-                    })
-            })
+            .and_then(|lf| lf.select([col("source").count().alias("n")]).collect().ok())
+            .map(|df| extract_u64(&df, "n"))
             .unwrap_or(0);
 
             edges.push(EdgeManifest {
@@ -216,106 +202,85 @@ pub fn materialize(
 }
 
 /// Compute type manifest by scanning the written vertex file.
+/// Uses a single batched query for all column stats (avoids N+1 scans).
 fn compute_type_manifest(
     config: &OutputConfig,
     vertex_rel_path: &str,
     vertex_abs_path: &str,
-    _cloud_opts: Option<CloudOptions>,
 ) -> Result<TypeManifest, FossilError> {
     let mut lf = LazyFrame::scan_parquet(PlPath::from_str(vertex_abs_path), Default::default())
         .map_err(polars_write_err)?;
 
-    // Entity count
-    let entity_count = lf
-        .clone()
-        .select([col("_id").count()])
-        .collect()
-        .map_err(polars_write_err)?
-        .column("_id")
-        .ok()
-        .and_then(|c| {
-            c.u32()
-                .ok()
-                .map(|ca| ca.get(0).unwrap_or(0) as u64)
-                .or_else(|| c.u64().ok().map(|ca| ca.get(0).unwrap_or(0)))
-        })
-        .unwrap_or(0);
-
-    // Per-column stats (skip _id and subject)
     let schema = lf.collect_schema().map_err(polars_write_err)?;
-    let mut columns = Vec::new();
-
     let label_to_iri = &config.label_to_iri;
 
-    for (col_name, _dtype) in schema.iter() {
-        let name = col_name.to_string();
-        if name == "_id" || name == "subject" {
-            continue;
-        }
+    // Collect property column names (skip _id and subject)
+    let prop_cols: Vec<String> = schema
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .filter(|name| name != "_id" && name != "subject")
+        .collect();
 
-        let iri = label_to_iri.get(&name).cloned().unwrap_or_default();
-        let xsd = config.xsd_types.get(iri.as_str()).copied();
-        let datatype = xsd_to_datatype_name(xsd).to_string();
+    // Single batched query: entity_count + per-column count/n_unique/min/max
+    let mut stat_exprs: Vec<Expr> = vec![col("_id").count().alias("__entity_count")];
+    for name in &prop_cols {
+        let c = col(PlSmallStr::from(name.as_str()));
+        stat_exprs.push(c.clone().count().alias(PlSmallStr::from(format!("{name}__count").as_str())));
+        stat_exprs.push(c.clone().n_unique().alias(PlSmallStr::from(format!("{name}__nunique").as_str())));
+        stat_exprs.push(c.clone().cast(DataType::String).min().alias(PlSmallStr::from(format!("{name}__min").as_str())));
+        stat_exprs.push(c.cast(DataType::String).max().alias(PlSmallStr::from(format!("{name}__max").as_str())));
+    }
+    let stats_df = lf.clone().select(stat_exprs).collect().map_err(polars_write_err)?;
+    let entity_count = extract_u64(&stats_df, "__entity_count");
 
-        // Compute stats for this column
-        let stats_df = lf
-            .clone()
-            .select([
-                col(PlSmallStr::from(name.as_str())).count().alias("count"),
-                col(PlSmallStr::from(name.as_str()))
-                    .n_unique()
-                    .alias("n_unique"),
-                col(PlSmallStr::from(name.as_str()))
-                    .cast(DataType::String)
-                    .min()
-                    .alias("min"),
-                col(PlSmallStr::from(name.as_str()))
-                    .cast(DataType::String)
-                    .max()
-                    .alias("max"),
-            ])
-            .collect()
-            .map_err(polars_write_err)?;
-
-        let count = extract_u64(&stats_df, "count");
-        let n_unique = extract_u64(&stats_df, "n_unique");
-        let min = extract_string(&stats_df, "min");
-        let max = extract_string(&stats_df, "max");
-
-        // Samples
-        let samples_df = lf
-            .clone()
-            .select([col(PlSmallStr::from(name.as_str()))
+    // Single batched query for samples (5 per column)
+    let sample_exprs: Vec<Expr> = prop_cols
+        .iter()
+        .map(|name| {
+            col(PlSmallStr::from(name.as_str()))
                 .cast(DataType::String)
                 .drop_nulls()
-                .head(Some(5))])
-            .collect()
-            .ok();
-        let samples = samples_df
-            .and_then(|df| {
-                df.column(&name)
-                    .ok()?
-                    .str()
-                    .ok()
-                    .map(|ca| {
-                        ca.into_iter()
-                            .filter_map(|v| v.map(String::from))
-                            .collect::<Vec<_>>()
-                    })
-            })
-            .unwrap_or_default();
+                .head(Some(5))
+                .alias(PlSmallStr::from(name.as_str()))
+        })
+        .collect();
+    let samples_df = if !sample_exprs.is_empty() {
+        lf.select(sample_exprs).collect().ok()
+    } else {
+        None
+    };
 
-        columns.push(ColumnStat {
-            name,
-            iri,
-            datatype,
-            count,
-            n_unique,
-            min,
-            max,
-            samples,
-        });
-    }
+    // Build ColumnStats from the two DataFrames
+    let columns: Vec<ColumnStat> = prop_cols
+        .iter()
+        .map(|name| {
+            let iri = label_to_iri.get(name).cloned().unwrap_or_default();
+            let xsd = config.xsd_types.get(iri.as_str()).copied();
+            let datatype = xsd_to_datatype_name(xsd).to_string();
+
+            let count = extract_u64(&stats_df, &format!("{name}__count"));
+            let n_unique = extract_u64(&stats_df, &format!("{name}__nunique"));
+            let min = extract_string(&stats_df, &format!("{name}__min"));
+            let max = extract_string(&stats_df, &format!("{name}__max"));
+
+            let samples = samples_df
+                .as_ref()
+                .and_then(|df| {
+                    df.column(name.as_str())
+                        .ok()?
+                        .str()
+                        .ok()
+                        .map(|ca| {
+                            ca.into_iter()
+                                .filter_map(|v| v.map(String::from))
+                                .collect::<Vec<_>>()
+                        })
+                })
+                .unwrap_or_default();
+
+            ColumnStat { name: name.clone(), iri, datatype, count, n_unique, min, max, samples }
+        })
+        .collect();
 
     Ok(TypeManifest {
         name: config.type_dir.clone(),

@@ -10,6 +10,7 @@ use crate::runtime::value::{Environment, Value};
 
 /// Per-column statistics for a vertex property.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ColumnStat {
     /// Short label used as Parquet column name.
     pub name: String,
@@ -29,6 +30,7 @@ pub struct ColumnStat {
 
 /// Manifest for a vertex type (one Parquet file per type).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct TypeManifest {
     /// Short type name (e.g. "person").
     pub name: String,
@@ -42,6 +44,7 @@ pub struct TypeManifest {
 
 /// Manifest for an edge type (CSR + CSC Parquet files).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct EdgeManifest {
     /// Short edge label (e.g. "knows").
     pub name: String,
@@ -60,6 +63,7 @@ pub struct EdgeManifest {
 
 /// GraphAr-compatible manifest describing a property graph stored as Parquet files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct DataManifest {
     pub types: Vec<TypeManifest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

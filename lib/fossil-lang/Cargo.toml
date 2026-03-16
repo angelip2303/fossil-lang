@@ -12,6 +12,9 @@ authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+utoipa = ["dep:utoipa"]
+
 [dependencies]
 # external dependencies
 thiserror.workspace = true
@@ -20,3 +23,4 @@ serde = { version = "1", features = ["derive"] }
 logos = "0.15.1"
 chumsky = { version= "0.11.1", features = ["pratt"]}
 miette = { version = "7", features = ["fancy"] }
+utoipa = { version = "5", optional = true }
