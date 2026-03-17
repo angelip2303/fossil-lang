@@ -1,13 +1,19 @@
+use std::collections::HashMap;
+
 use polars::prelude::PlPath;
 use polars::prelude::cloud::CloudOptions;
 
 /// A resolved path ready for I/O: physical URL + opaque cloud credentials.
 /// This is the transversal type that ensures credentials always travel with
 /// the path. Fields are private — use methods to interact.
+///
+/// Carries both Polars `CloudOptions` (for sink/scan) and raw config pairs
+/// (for DuckDB and other engines that need explicit credential configuration).
 #[derive(Clone)]
 pub struct ResolvedPath {
     path: PlPath,
     cloud_options: Option<CloudOptions>,
+    cloud_config: HashMap<String, String>,
 }
 
 impl ResolvedPath {
@@ -15,6 +21,19 @@ impl ResolvedPath {
         Self {
             path: PlPath::from_str(url),
             cloud_options,
+            cloud_config: HashMap::new(),
+        }
+    }
+
+    pub fn with_config(
+        url: &str,
+        cloud_options: Option<CloudOptions>,
+        cloud_config: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            path: PlPath::from_str(url),
+            cloud_options,
+            cloud_config,
         }
     }
 
@@ -23,6 +42,7 @@ impl ResolvedPath {
         Self {
             path: self.path.as_ref().join(rel),
             cloud_options: self.cloud_options.clone(),
+            cloud_config: self.cloud_config.clone(),
         }
     }
 
@@ -32,6 +52,13 @@ impl ResolvedPath {
 
     pub fn cloud_options(&self) -> Option<&CloudOptions> {
         self.cloud_options.as_ref()
+    }
+
+    /// Raw cloud credential key-value pairs for engines that need explicit
+    /// configuration (e.g. DuckDB). Keys are provider-specific
+    /// (e.g. `azure_storage_account_name`, `azure_storage_account_key`).
+    pub fn cloud_config(&self) -> &HashMap<String, String> {
+        &self.cloud_config
     }
 
     pub fn to_str(&self) -> &str {

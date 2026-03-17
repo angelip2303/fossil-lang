@@ -52,6 +52,45 @@ fn polars_write_err(e: PolarsError) -> RdfError {
     RdfError::Write(e.to_string())
 }
 
+/// Configure DuckDB with cloud credentials from the ResolvedPath.
+/// Maps Polars credential keys to DuckDB Azure/S3 settings.
+fn configure_duckdb_cloud(
+    conn: &duckdb::Connection,
+    resolved: &ResolvedPath,
+) -> Result<(), FossilError> {
+    let config = resolved.cloud_config();
+    if config.is_empty() {
+        return Ok(());
+    }
+
+    // DuckDB Azure configuration via SET statements.
+    // Key mapping: Polars uses lowercase snake_case, DuckDB uses the same.
+    let duckdb_settings: &[(&str, &str)] = &[
+        ("azure_storage_account_name", "azure_account_name"),
+        ("azure_storage_account_key", "azure_account_key"),
+        ("azure_storage_sas_token", "azure_sas_token"),
+        ("azure_storage_client_id", "azure_client_id"),
+        ("azure_storage_client_secret", "azure_client_secret"),
+        ("azure_storage_tenant_id", "azure_tenant_id"),
+    ];
+
+    let mut any_set = false;
+    for (polars_key, duckdb_key) in duckdb_settings {
+        if let Some(value) = config.get(*polars_key) {
+            conn.execute_batch(&format!("SET {duckdb_key} = '{value}'"))
+                .map_err(RdfError::from)?;
+            any_set = true;
+        }
+    }
+
+    if any_set {
+        // Load Azure extension if any Azure credential was set
+        let _ = conn.execute_batch("INSTALL azure; LOAD azure;");
+    }
+
+    Ok(())
+}
+
 // ── I/O adapters ──
 
 /// Polars-based I/O for streaming sink. Cloud credentials are inherited
@@ -92,6 +131,7 @@ pub fn materialize(
 ) -> Result<DataManifest, FossilError> {
     let store = GraphStore { root: resolved.clone() };
     let conn = duckdb::Connection::open_in_memory().map_err(RdfError::from)?;
+    configure_duckdb_cloud(&conn, resolved)?;
 
     let mut types = Vec::new();
     let mut edges = Vec::new();
