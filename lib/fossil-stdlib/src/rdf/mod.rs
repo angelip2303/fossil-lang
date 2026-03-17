@@ -30,6 +30,15 @@ pub enum RdfError {
 
     #[error("Failed to write RDF: {0}")]
     Write(String),
+
+    #[error("duckdb: {0}")]
+    DuckDb(String),
+}
+
+impl From<duckdb::Error> for RdfError {
+    fn from(e: duckdb::Error) -> Self {
+        RdfError::DuckDb(e.to_string())
+    }
 }
 
 impl From<RdfError> for FossilError {

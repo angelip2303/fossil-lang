@@ -1,7 +1,7 @@
 //! GraphAr-compatible property graph materializer.
 //!
 //! Two-pass architecture:
-//!   Pass 1 — Polars streaming sink for vertex parquets, then scan-back for stats
+//!   Pass 1 — Polars streaming sink for vertex parquets, then DuckDB stats
 //!   Pass 2 — DuckDB join + sort for CSR/CSC edge parquets (disk-spilling)
 //!
 //! Zero `.collect()` on data. Polars only calls `sink_parquet` (streaming writes).
@@ -22,8 +22,8 @@
 //!     └── by_target_offsets.parquet            # vertex_id | offset
 //! ```
 
-use polars::prelude::*;
 use polars::prelude::sync_on_close::SyncOnCloseType;
+use polars::prelude::*;
 
 use fossil_lang::error::FossilError;
 use fossil_lang::runtime::executor::{ColumnStat, DataManifest, EdgeManifest, TypeManifest};
@@ -52,14 +52,10 @@ fn polars_write_err(e: PolarsError) -> RdfError {
     RdfError::Write(e.to_string())
 }
 
-fn duckdb_err(e: duckdb::Error) -> RdfError {
-    RdfError::Write(format!("duckdb: {e}"))
-}
-
 // ── I/O adapters ──
 
-/// Polars-based I/O for streaming sink and scan. Cloud credentials are
-/// inherited from [`ResolvedPath`] — impossible to forget.
+/// Polars-based I/O for streaming sink. Cloud credentials are inherited
+/// from [`ResolvedPath`] — impossible to forget.
 struct GraphStore {
     root: ResolvedPath,
 }
@@ -95,7 +91,7 @@ pub fn materialize(
     resolved: &ResolvedPath,
 ) -> Result<DataManifest, FossilError> {
     let store = GraphStore { root: resolved.clone() };
-    let conn = duckdb::Connection::open_in_memory().map_err(duckdb_err)?;
+    let conn = duckdb::Connection::open_in_memory().map_err(RdfError::from)?;
 
     let mut types = Vec::new();
     let mut edges = Vec::new();
@@ -118,7 +114,8 @@ pub fn materialize(
         let vertex_rel = format!("vertex/{}.parquet", config.type_dir);
         store.sink(vertex.clone(), &vertex_rel)?;
 
-        let manifest = compute_type_manifest(&conn, config, &store.abs_path(&vertex_rel), &vertex_rel)?;
+        let manifest =
+            compute_type_manifest(&conn, config, &store.abs_path(&vertex_rel), &vertex_rel)?;
         types.push(manifest);
     }
 
@@ -131,11 +128,9 @@ pub fn materialize(
                 "{}_{}_{}",
                 config.type_dir, ref_edge.label, ref_edge.target_type_dir
             );
-            let csr_rel = format!("edge/{edge_dir}/by_source.parquet");
-            let csc_rel = format!("edge/{edge_dir}/by_target.parquet");
             let tgt_vertex_rel = format!("vertex/{}.parquet", ref_edge.target_type_dir);
 
-            let count = produce_edges(
+            let (csr_rel, csc_rel, count) = produce_edges(
                 &store,
                 &conn,
                 frame,
@@ -164,10 +159,40 @@ pub fn materialize(
 
 // ── Edge production (DuckDB) ──
 
+/// Write a sorted edge file + its offset table. Reused for both CSR and CSC.
+fn write_sorted_edges(
+    conn: &duckdb::Connection,
+    primary: &str,
+    secondary: &str,
+    sorted_path: &str,
+    offsets_path: &str,
+) -> Result<(), RdfError> {
+    conn.execute_batch(&format!(
+        "COPY (SELECT source, target FROM __edges ORDER BY {primary}, {secondary})
+         TO '{sorted_path}' (FORMAT PARQUET, ROW_GROUP_SIZE {VERTEX_CHUNK_SIZE})"
+    ))?;
+
+    conn.execute_batch(&format!(
+        "COPY (
+            WITH ranked AS (
+                SELECT {primary} AS vertex_id,
+                       ROW_NUMBER() OVER (ORDER BY {primary}, {secondary}) - 1 AS pos
+                FROM __edges
+            )
+            SELECT vertex_id, MIN(pos) AS start_offset
+            FROM ranked GROUP BY vertex_id ORDER BY vertex_id
+        ) TO '{offsets_path}' (FORMAT PARQUET)"
+    ))?;
+
+    Ok(())
+}
+
 /// Join raw edges with vertex id_maps and produce CSR + CSC parquets.
 ///
 /// DuckDB handles the hash join (IRI→ID), the ORDER BY (CSR/CSC), and
 /// offset table generation — all with automatic disk spilling.
+///
+/// Returns `(csr_rel, csc_rel, edge_count)`.
 fn produce_edges(
     store: &GraphStore,
     conn: &duckdb::Connection,
@@ -177,7 +202,7 @@ fn produce_edges(
     src_vertex_rel: &str,
     tgt_vertex_rel: &str,
     edge_dir: &str,
-) -> Result<u64, FossilError> {
+) -> Result<(String, String, u64), FossilError> {
     // 1. Sink raw edges via Polars streaming
     let staging_rel = format!("edge/{edge_dir}/_staging.parquet");
     let raw = frame
@@ -192,10 +217,6 @@ fn produce_edges(
     let staging = store.abs_path(&staging_rel);
     let src_vtx = store.abs_path(src_vertex_rel);
     let tgt_vtx = store.abs_path(tgt_vertex_rel);
-    let csr_out = store.abs_path(&format!("edge/{edge_dir}/by_source.parquet"));
-    let csc_out = store.abs_path(&format!("edge/{edge_dir}/by_target.parquet"));
-    let csr_offsets = store.abs_path(&format!("edge/{edge_dir}/by_source_offsets.parquet"));
-    let csc_offsets = store.abs_path(&format!("edge/{edge_dir}/by_target_offsets.parquet"));
 
     // 2. DuckDB: join once → temp table
     conn.execute_batch(&format!(
@@ -205,58 +226,40 @@ fn produce_edges(
             JOIN read_parquet('{src_vtx}') s ON e.src_iri = s.subject
             JOIN read_parquet('{tgt_vtx}') t ON e.tgt_iri = t.subject"
     ))
-    .map_err(duckdb_err)?;
+    .map_err(RdfError::from)?;
 
-    // 3. CSR: ordered by source
-    conn.execute_batch(&format!(
-        "COPY (SELECT source, target FROM __edges ORDER BY source, target)
-         TO '{csr_out}' (FORMAT PARQUET, ROW_GROUP_SIZE {VERTEX_CHUNK_SIZE})"
-    ))
-    .map_err(duckdb_err)?;
+    // 3. CSR + CSC with shared helper
+    let csr_rel = format!("edge/{edge_dir}/by_source.parquet");
+    let csc_rel = format!("edge/{edge_dir}/by_target.parquet");
+    let csr_offsets_rel = format!("edge/{edge_dir}/by_source_offsets.parquet");
+    let csc_offsets_rel = format!("edge/{edge_dir}/by_target_offsets.parquet");
 
-    // 4. CSC: ordered by target
-    conn.execute_batch(&format!(
-        "COPY (SELECT source, target FROM __edges ORDER BY target, source)
-         TO '{csc_out}' (FORMAT PARQUET, ROW_GROUP_SIZE {VERTEX_CHUNK_SIZE})"
-    ))
-    .map_err(duckdb_err)?;
+    write_sorted_edges(
+        conn,
+        "source",
+        "target",
+        &store.abs_path(&csr_rel),
+        &store.abs_path(&csr_offsets_rel),
+    )?;
+    write_sorted_edges(
+        conn,
+        "target",
+        "source",
+        &store.abs_path(&csc_rel),
+        &store.abs_path(&csc_offsets_rel),
+    )?;
 
-    // 5. Offset tables
-    conn.execute_batch(&format!(
-        "COPY (
-            WITH ranked AS (
-                SELECT source AS vertex_id, ROW_NUMBER() OVER (ORDER BY source, target) - 1 AS pos
-                FROM __edges
-            )
-            SELECT vertex_id, MIN(pos) AS start_offset
-            FROM ranked GROUP BY vertex_id ORDER BY vertex_id
-        ) TO '{csr_offsets}' (FORMAT PARQUET)"
-    ))
-    .map_err(duckdb_err)?;
-
-    conn.execute_batch(&format!(
-        "COPY (
-            WITH ranked AS (
-                SELECT target AS vertex_id, ROW_NUMBER() OVER (ORDER BY target, source) - 1 AS pos
-                FROM __edges
-            )
-            SELECT vertex_id, MIN(pos) AS start_offset
-            FROM ranked GROUP BY vertex_id ORDER BY vertex_id
-        ) TO '{csc_offsets}' (FORMAT PARQUET)"
-    ))
-    .map_err(duckdb_err)?;
-
-    // 6. Edge count
+    // 4. Edge count
     let count: u64 = conn
         .query_row("SELECT count(*) FROM __edges", [], |row| row.get(0))
-        .map_err(duckdb_err)?;
+        .map_err(RdfError::from)?;
 
-    // 7. Cleanup
+    // 5. Cleanup
     conn.execute_batch("DROP TABLE IF EXISTS __edges")
-        .map_err(duckdb_err)?;
+        .map_err(RdfError::from)?;
     let _ = std::fs::remove_file(store.abs_path(&staging_rel));
 
-    Ok(count)
+    Ok((csr_rel, csc_rel, count))
 }
 
 // ── Stats computation (DuckDB) ──
@@ -279,6 +282,8 @@ fn xsd_to_datatype_name(xsd: Option<&str>) -> &'static str {
 }
 
 /// Compute type manifest via DuckDB queries on the sunk vertex parquet.
+///
+/// Uses two batched queries (stats + samples) instead of per-column queries.
 fn compute_type_manifest(
     conn: &duckdb::Connection,
     config: &OutputConfig,
@@ -287,78 +292,104 @@ fn compute_type_manifest(
 ) -> Result<TypeManifest, FossilError> {
     let label_to_iri = &config.label_to_iri;
 
-    // Property column names from the config's label_to_iri (excludes _id, subject).
-    let prop_cols: Vec<String> = config
-        .selection
+    // Property column names from label_to_iri keys (the source of truth).
+    let prop_cols: Vec<&String> = label_to_iri.keys().collect();
+
+    // Entity count + all column stats in a single query (1 scan).
+    let stat_parts: Vec<String> = prop_cols
         .iter()
-        .filter_map(|expr| {
-            if let Expr::Alias(_, name) = expr {
-                let s = name.to_string();
-                if s != "_subject" {
-                    return Some(s);
-                }
-            }
-            None
+        .map(|name| {
+            format!(
+                "count(\"{name}\"), count(DISTINCT \"{name}\"), \
+                 min(\"{name}\")::VARCHAR, max(\"{name}\")::VARCHAR"
+            )
         })
         .collect();
 
-    // Entity count
-    let entity_count: u64 = conn
-        .query_row(
-            &format!("SELECT count(*) FROM read_parquet('{vertex_abs_path}')"),
-            [],
-            |row| row.get(0),
+    let stats_sql = if stat_parts.is_empty() {
+        format!("SELECT count(*) FROM read_parquet('{vertex_abs_path}')")
+    } else {
+        format!(
+            "SELECT count(*), {} FROM read_parquet('{vertex_abs_path}')",
+            stat_parts.join(", ")
         )
-        .map_err(duckdb_err)?;
+    };
 
-    // Per-column stats + samples via DuckDB
+    let mut stmt = conn.prepare(&stats_sql).map_err(RdfError::from)?;
+    let mut rows = stmt.query([]).map_err(RdfError::from)?;
+    let row = rows
+        .next()
+        .map_err(RdfError::from)?
+        .ok_or_else(|| RdfError::Write("stats query returned no rows".into()))?;
+
+    let entity_count: u64 = row.get::<_, u64>(0).unwrap_or(0);
+
     let columns: Vec<ColumnStat> = prop_cols
         .iter()
-        .map(|name| {
-            let iri = label_to_iri.get(name).cloned().unwrap_or_default();
+        .enumerate()
+        .map(|(i, name)| {
+            let iri = label_to_iri.get(*name).cloned().unwrap_or_default();
             let xsd = config.xsd_types.get(iri.as_str()).copied();
             let datatype = xsd_to_datatype_name(xsd).to_string();
 
-            let stats_sql = format!(
-                "SELECT count(\"{name}\"), count(DISTINCT \"{name}\"), \
-                 min(\"{name}\")::VARCHAR, max(\"{name}\")::VARCHAR \
-                 FROM read_parquet('{vertex_abs_path}')"
-            );
-            let (count, n_unique, min, max) = conn
-                .query_row(&stats_sql, [], |row| {
-                    Ok((
-                        row.get::<_, u64>(0).unwrap_or(0),
-                        row.get::<_, u64>(1).unwrap_or(0),
-                        row.get::<_, Option<String>>(2).unwrap_or(None),
-                        row.get::<_, Option<String>>(3).unwrap_or(None),
-                    ))
-                })
-                .unwrap_or((0, 0, None, None));
+            // 4 columns per prop, offset by 1 (entity_count is column 0)
+            let base = 1 + i * 4;
+            let count = row.get::<_, u64>(base).unwrap_or(0);
+            let n_unique = row.get::<_, u64>(base + 1).unwrap_or(0);
+            let min = row.get::<_, Option<String>>(base + 2).unwrap_or(None);
+            let max = row.get::<_, Option<String>>(base + 3).unwrap_or(None);
 
-            let samples_sql = format!(
-                "SELECT \"{name}\"::VARCHAR FROM read_parquet('{vertex_abs_path}') \
-                 WHERE \"{name}\" IS NOT NULL LIMIT 5"
-            );
-            let samples = conn
-                .prepare(&samples_sql)
-                .and_then(|mut stmt| {
-                    stmt.query_map([], |row| row.get::<_, String>(0))
-                        .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
-                })
-                .unwrap_or_default();
-
+            // Samples: deferred to a second query below
             ColumnStat {
-                name: name.clone(),
+                name: (*name).clone(),
                 iri,
                 datatype,
                 count,
                 n_unique,
                 min,
                 max,
-                samples,
+                samples: Vec::new(),
             }
         })
         .collect();
+
+    // Samples: single UNION ALL query (1 scan) instead of N separate queries.
+    if !prop_cols.is_empty() {
+        let sample_parts: Vec<String> = prop_cols
+            .iter()
+            .map(|name| {
+                format!(
+                    "SELECT '{name}' AS col_name, \"{name}\"::VARCHAR AS val \
+                     FROM read_parquet('{vertex_abs_path}') \
+                     WHERE \"{name}\" IS NOT NULL LIMIT 5"
+                )
+            })
+            .collect();
+        let samples_sql = sample_parts.join(" UNION ALL ");
+
+        if let Ok(mut stmt) = conn.prepare(&samples_sql) {
+            if let Ok(sample_rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0).unwrap_or_default(),
+                    r.get::<_, String>(1).unwrap_or_default(),
+                ))
+            }) {
+                let mut columns = columns;
+                for pair in sample_rows.flatten() {
+                    if let Some(col) = columns.iter_mut().find(|c| c.name == pair.0) {
+                        col.samples.push(pair.1);
+                    }
+                }
+                return Ok(TypeManifest {
+                    name: config.type_dir.clone(),
+                    iri: config.type_iri.clone(),
+                    vertex_file: vertex_rel_path.to_string(),
+                    entity_count,
+                    columns,
+                });
+            }
+        }
+    }
 
     Ok(TypeManifest {
         name: config.type_dir.clone(),
