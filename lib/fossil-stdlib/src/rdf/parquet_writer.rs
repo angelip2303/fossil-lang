@@ -21,9 +21,7 @@
 //! ├── vertex/{type}.parquet                    # _id | subject | properties...
 //! └── edge/{src}_{edge}_{dst}/
 //!     ├── by_source.parquet                    # source | target (CSR)
-//!     ├── by_source_offsets.parquet            # vertex_id | start_offset
-//!     ├── by_target.parquet                    # source | target (CSC)
-//!     └── by_target_offsets.parquet            # vertex_id | start_offset
+//!     └── by_target.parquet                    # source | target (CSC)
 //! ```
 
 use std::collections::HashMap;
@@ -234,8 +232,6 @@ pub fn materialize(
             if is_cloud && edge_out.count > 0 {
                 upload(&store, &edge_out.csr, &edge_out.csr_rel)?;
                 upload(&store, &edge_out.csc, &edge_out.csc_rel)?;
-                upload(&store, &edge_out.csr_offsets, &edge_out.csr_offsets_rel)?;
-                upload(&store, &edge_out.csc_offsets, &edge_out.csc_offsets_rel)?;
             }
 
             edges.push(EdgeManifest {
@@ -259,38 +255,9 @@ pub fn materialize(
 struct EdgeOutput {
     csr: PathBuf,
     csc: PathBuf,
-    csr_offsets: PathBuf,
-    csc_offsets: PathBuf,
     csr_rel: String,
     csc_rel: String,
-    csr_offsets_rel: String,
-    csc_offsets_rel: String,
     count: u64,
-}
-
-fn write_sorted_edges(
-    conn: &duckdb::Connection,
-    primary: &str,
-    secondary: &str,
-    sorted_path: &str,
-    offsets_path: &str,
-) -> Result<(), RdfError> {
-    conn.execute_batch(&format!(
-        "COPY (SELECT source, target FROM __edges ORDER BY {primary}, {secondary})
-         TO '{sorted_path}' (FORMAT PARQUET, ROW_GROUP_SIZE {VERTEX_CHUNK_SIZE})"
-    ))?;
-    conn.execute_batch(&format!(
-        "COPY (
-            WITH ranked AS (
-                SELECT {primary} AS vertex_id,
-                       ROW_NUMBER() OVER (ORDER BY {primary}, {secondary}) - 1 AS pos
-                FROM __edges
-            )
-            SELECT vertex_id, MIN(pos) AS start_offset
-            FROM ranked GROUP BY vertex_id ORDER BY vertex_id
-        ) TO '{offsets_path}' (FORMAT PARQUET)"
-    ))?;
-    Ok(())
 }
 
 fn produce_edges_local(
@@ -316,11 +283,19 @@ fn produce_edges_local(
 
     let csr = temps.track(local_temp("csr", edge_dir));
     let csc = temps.track(local_temp("csc", edge_dir));
-    let csr_off = temps.track(local_temp("csr_off", edge_dir));
-    let csc_off = temps.track(local_temp("csc_off", edge_dir));
 
-    write_sorted_edges(conn, "source", "target", path_to_str(&csr)?, path_to_str(&csr_off)?)?;
-    write_sorted_edges(conn, "target", "source", path_to_str(&csc)?, path_to_str(&csc_off)?)?;
+    conn.execute_batch(&format!(
+        "COPY (SELECT source, target FROM __edges ORDER BY source, target)
+         TO '{}' (FORMAT PARQUET, ROW_GROUP_SIZE {VERTEX_CHUNK_SIZE})",
+        path_to_str(&csr)?
+    ))
+    .map_err(RdfError::from)?;
+    conn.execute_batch(&format!(
+        "COPY (SELECT source, target FROM __edges ORDER BY target, source)
+         TO '{}' (FORMAT PARQUET, ROW_GROUP_SIZE {VERTEX_CHUNK_SIZE})",
+        path_to_str(&csc)?
+    ))
+    .map_err(RdfError::from)?;
 
     let count: u64 = conn
         .query_row("SELECT count(*) FROM __edges", [], |row| row.get(0))
@@ -332,12 +307,8 @@ fn produce_edges_local(
     Ok(EdgeOutput {
         csr,
         csc,
-        csr_offsets: csr_off,
-        csc_offsets: csc_off,
         csr_rel: format!("edge/{edge_dir}/by_source.parquet"),
         csc_rel: format!("edge/{edge_dir}/by_target.parquet"),
-        csr_offsets_rel: format!("edge/{edge_dir}/by_source_offsets.parquet"),
-        csc_offsets_rel: format!("edge/{edge_dir}/by_target_offsets.parquet"),
         count,
     })
 }
