@@ -105,22 +105,36 @@ pub fn materialize(
         })
         .collect();
 
-    // ── Pass 1: write vertex files + compute stats from source ──
+    // Id map cache: collect only (_id, subject) per vertex type.
+    // Bounded memory (~54MB/1M vertices). Used as hash join build side.
+    let mut id_maps: std::collections::HashMap<String, LazyFrame> =
+        std::collections::HashMap::new();
+
+    // ── Pass 1: sink (streaming) + stats (lazy) + cache id_map ──
     for (config, vertex) in &vertices {
         let vertex_path = format!("vertex/{}.parquet", config.type_dir);
         store.sink(vertex.clone(), &vertex_path)?;
 
         let type_manifest = compute_type_manifest(config, &vertex_path, vertex)?;
         types.push(type_manifest);
+
+        let id_df = vertex
+            .clone()
+            .select([col("_id"), col("subject")])
+            .collect()
+            .map_err(polars_write_err)?;
+        id_maps.insert(config.type_dir.clone(), id_df.lazy());
     }
 
-    // ── Pass 2: write edge files using lazy id maps from source ──
-    for (config, vertex) in &vertices {
+    // ── Pass 2: edge streaming with in-memory hash joins ──
+    for (config, _) in &vertices {
         if config.ref_edges.is_empty() {
             continue;
         }
 
-        let id_map = vertex.clone().select([col("_id"), col("subject")]);
+        let id_map = id_maps
+            .get(&config.type_dir)
+            .ok_or_else(|| RdfError::Write(format!("missing id map: {}", config.type_dir)))?;
 
         for ref_edge in &config.ref_edges {
             let edge_dir = format!(
@@ -145,21 +159,15 @@ pub fn materialize(
                 JoinType::Inner.into(),
             );
 
-            // Find the target type's vertex plan for the id map
-            let target_vertex = vertices
-                .iter()
-                .find(|(c, _)| c.type_dir == ref_edge.target_type_dir)
-                .map(|(_, v)| v)
+            let target_id_map = id_maps
+                .get(&ref_edge.target_type_dir)
                 .ok_or_else(|| {
-                    RdfError::Write(format!(
-                        "unknown target type: {}",
-                        ref_edge.target_type_dir
-                    ))
+                    RdfError::Write(format!("missing id map: {}", ref_edge.target_type_dir))
                 })?;
 
             let edges_with_ids = with_src_id
                 .join(
-                    target_vertex.clone().select([
+                    target_id_map.clone().select([
                         col("_id").alias("target"),
                         col("subject").alias("tgt_iri"),
                     ]),
