@@ -52,8 +52,11 @@ fn polars_write_err(e: PolarsError) -> RdfError {
     RdfError::Write(e.to_string())
 }
 
-/// Configure DuckDB with cloud credentials from the ResolvedPath.
-/// Maps Polars credential keys to DuckDB Azure/S3 settings.
+/// Configure DuckDB cloud credentials via `CREATE TEMPORARY SECRET`.
+///
+/// Detects the auth method from available credentials and creates a
+/// session-scoped secret. Credentials are passed as parameters (never
+/// interpolated in SQL) to prevent injection.
 fn configure_duckdb_cloud(
     conn: &duckdb::Connection,
     resolved: &ResolvedPath,
@@ -63,29 +66,60 @@ fn configure_duckdb_cloud(
         return Ok(());
     }
 
-    // DuckDB Azure configuration via SET statements.
-    // Key mapping: Polars uses lowercase snake_case, DuckDB uses the same.
-    let duckdb_settings: &[(&str, &str)] = &[
-        ("azure_storage_account_name", "azure_account_name"),
-        ("azure_storage_account_key", "azure_account_key"),
-        ("azure_storage_sas_token", "azure_sas_token"),
-        ("azure_storage_client_id", "azure_client_id"),
-        ("azure_storage_client_secret", "azure_client_secret"),
-        ("azure_storage_tenant_id", "azure_tenant_id"),
-    ];
+    // Case-insensitive lookup (keasy passes UPPERCASE env_var names).
+    let lower: std::collections::HashMap<String, &str> = config
+        .iter()
+        .map(|(k, v)| (k.to_lowercase(), v.as_str()))
+        .collect();
+    let get = |key: &str| -> Option<&str> { lower.get(key).copied() };
 
-    let mut any_set = false;
-    for (polars_key, duckdb_key) in duckdb_settings {
-        if let Some(value) = config.get(*polars_key) {
-            conn.execute_batch(&format!("SET {duckdb_key} = '{value}'"))
-                .map_err(RdfError::from)?;
-            any_set = true;
+    // Azure
+    if let Some(account_name) = get("azure_storage_account_name") {
+        conn.execute_batch("INSTALL azure; LOAD azure;")
+            .map_err(RdfError::from)?;
+
+        if let (Some(tenant), Some(client_id), Some(secret)) = (
+            get("azure_storage_tenant_id"),
+            get("azure_storage_client_id"),
+            get("azure_storage_client_secret"),
+        ) {
+            conn.execute(
+                "CREATE TEMPORARY SECRET __azure (
+                    TYPE AZURE,
+                    PROVIDER service_principal,
+                    ACCOUNT_NAME ?,
+                    TENANT_ID ?,
+                    CLIENT_ID ?,
+                    CLIENT_SECRET ?
+                )",
+                duckdb::params![account_name, tenant, client_id, secret],
+            )
+            .map_err(RdfError::from)?;
+        } else if let Some(account_key) = get("azure_storage_account_key") {
+            let conn_str = format!(
+                "AccountName={account_name};AccountKey={account_key};EndpointSuffix=core.windows.net"
+            );
+            conn.execute(
+                "CREATE TEMPORARY SECRET __azure (
+                    TYPE AZURE,
+                    CONNECTION_STRING ?
+                )",
+                [&conn_str],
+            )
+            .map_err(RdfError::from)?;
+        } else if let Some(sas) = get("azure_storage_sas_token") {
+            let conn_str = format!(
+                "AccountName={account_name};SharedAccessSignature={sas};EndpointSuffix=core.windows.net"
+            );
+            conn.execute(
+                "CREATE TEMPORARY SECRET __azure (
+                    TYPE AZURE,
+                    CONNECTION_STRING ?
+                )",
+                [&conn_str],
+            )
+            .map_err(RdfError::from)?;
         }
-    }
-
-    if any_set {
-        // Load Azure extension if any Azure credential was set
-        let _ = conn.execute_batch("INSTALL azure; LOAD azure;");
     }
 
     Ok(())
