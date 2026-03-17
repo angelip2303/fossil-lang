@@ -35,17 +35,48 @@ fn polars_write_err(e: PolarsError) -> RdfError {
     RdfError::Write(e.to_string())
 }
 
-fn sink(lf: LazyFrame, path: &str, cloud_opts: Option<CloudOptions>) -> Result<(), FossilError> {
-    let target = SinkTarget::Path(PlPath::from_str(path));
-    let options = ParquetWriteOptions {
-        row_group_size: Some(50_000),
-        ..Default::default()
-    };
-    lf.sink_parquet(target, options, cloud_opts, SINK_OPTIONS)
-        .map_err(polars_write_err)?
-        .collect()
-        .map_err(polars_write_err)?;
-    Ok(())
+/// Cloud-aware file store that ensures credentials are always attached to both
+/// reads and writes. Encapsulates base_path + cloud_opts so callers cannot
+/// accidentally omit credentials.
+struct GraphStore {
+    base: String,
+    cloud_opts: Option<CloudOptions>,
+}
+
+impl GraphStore {
+    fn path(&self, rel: &str) -> String {
+        format!("{}/{}", self.base, rel)
+    }
+
+    fn sink(&self, lf: LazyFrame, rel: &str) -> Result<(), FossilError> {
+        let target = SinkTarget::Path(PlPath::from_str(&self.path(rel)));
+        let options = ParquetWriteOptions {
+            row_group_size: Some(50_000),
+            ..Default::default()
+        };
+        lf.sink_parquet(target, options, self.cloud_opts.clone(), SINK_OPTIONS)
+            .map_err(polars_write_err)?
+            .collect()
+            .map_err(polars_write_err)?;
+        Ok(())
+    }
+
+    fn scan(&self, rel: &str) -> Result<LazyFrame, RdfError> {
+        LazyFrame::scan_parquet(
+            PlPath::from_str(&self.path(rel)),
+            ScanArgsParquet {
+                cloud_options: self.cloud_opts.clone(),
+                ..Default::default()
+            },
+        )
+        .map_err(polars_write_err)
+    }
+
+    fn is_cloud(&self) -> bool {
+        ["s3://", "gs://", "az://", "abfss://"]
+            .iter()
+            .any(|s| self.base.starts_with(s))
+    }
 }
 
 /// Map XSD datatype IRI to a human-readable name for the manifest.
@@ -66,6 +97,10 @@ pub fn materialize(
     base_path: &str,
     cloud_opts: Option<CloudOptions>,
 ) -> Result<DataManifest, FossilError> {
+    let store = GraphStore {
+        base: base_path.to_string(),
+        cloud_opts,
+    };
     let mut types = Vec::new();
     let mut edges = Vec::new();
 
@@ -78,27 +113,16 @@ pub fn materialize(
             .with_row_index("_id", Some(0));
 
         let vertex_path = format!("vertex/{}.parquet", config.type_dir);
-        sink(
-            vertex,
-            &format!("{base_path}/{vertex_path}"),
-            cloud_opts.clone(),
-        )?;
+        store.sink(vertex, &vertex_path)?;
 
         // Compute stats by scanning the written file
-        let type_manifest = compute_type_manifest(
-            config,
-            &vertex_path,
-            &format!("{base_path}/{vertex_path}"),
-        )?;
+        let type_manifest = compute_type_manifest(config, &vertex_path, &store)?;
         types.push(type_manifest);
 
         // ── Edge files (per ref column) ──
-        let id_map = LazyFrame::scan_parquet(
-            PlPath::from_str(&format!("{base_path}/{vertex_path}")),
-            Default::default(),
-        )
-        .map_err(polars_write_err)?
-        .select([col("_id"), col("subject")]);
+        let id_map = store
+            .scan(&vertex_path)?
+            .select([col("_id"), col("subject")]);
 
         for ref_edge in &config.ref_edges {
             let edge_dir = format!(
@@ -126,16 +150,9 @@ pub fn materialize(
             );
 
             // Map target IRI → target _id (from target type's vertex file)
-            let target_vertex_path = format!(
-                "{base_path}/vertex/{}.parquet",
-                ref_edge.target_type_dir
-            );
-            let target_id_map = LazyFrame::scan_parquet(
-                PlPath::from_str(&target_vertex_path),
-                Default::default(),
-            )
-            .map_err(polars_write_err)?
-            .select([
+            let target_vertex_path =
+                format!("vertex/{}.parquet", ref_edge.target_type_dir);
+            let target_id_map = store.scan(&target_vertex_path)?.select([
                 col("_id").alias("target"),
                 col("subject").alias("tgt_iri"),
             ]);
@@ -151,37 +168,33 @@ pub fn materialize(
 
             // CSR: sorted by (source, target)
             let by_source_path = format!("edge/{edge_dir}/by_source.parquet");
-            sink(
+            store.sink(
                 edges_with_ids
                     .clone()
                     .sort(
                         ["source", "target"],
                         SortMultipleOptions::default(),
                     ),
-                &format!("{base_path}/{by_source_path}"),
-                cloud_opts.clone(),
+                &by_source_path,
             )?;
 
             // CSC: sorted by (target, source)
             let by_target_path = format!("edge/{edge_dir}/by_target.parquet");
-            sink(
+            store.sink(
                 edges_with_ids.sort(
                     ["target", "source"],
                     SortMultipleOptions::default(),
                 ),
-                &format!("{base_path}/{by_target_path}"),
-                cloud_opts.clone(),
+                &by_target_path,
             )?;
 
             // Edge count
-            let edge_count = LazyFrame::scan_parquet(
-                PlPath::from_str(&format!("{base_path}/{by_source_path}")),
-                Default::default(),
-            )
-            .ok()
-            .and_then(|lf| lf.select([col("source").count().alias("n")]).collect().ok())
-            .map(|df| extract_u64(&df, "n"))
-            .unwrap_or(0);
+            let edge_count = store
+                .scan(&by_source_path)
+                .ok()
+                .and_then(|lf| lf.select([col("source").count().alias("n")]).collect().ok())
+                .map(|df| extract_u64(&df, "n"))
+                .unwrap_or(0);
 
             edges.push(EdgeManifest {
                 name: ref_edge.label.clone(),
@@ -196,7 +209,7 @@ pub fn materialize(
     }
 
     // Write YAML metadata
-    write_yaml_metadata(base_path, &types, &edges, cloud_opts.as_ref())?;
+    write_yaml_metadata(&store, &types, &edges)?;
 
     Ok(DataManifest { types, edges })
 }
@@ -206,10 +219,9 @@ pub fn materialize(
 fn compute_type_manifest(
     config: &OutputConfig,
     vertex_rel_path: &str,
-    vertex_abs_path: &str,
+    store: &GraphStore,
 ) -> Result<TypeManifest, FossilError> {
-    let mut lf = LazyFrame::scan_parquet(PlPath::from_str(vertex_abs_path), Default::default())
-        .map_err(polars_write_err)?;
+    let mut lf = store.scan(vertex_rel_path)?;
 
     let schema = lf.collect_schema().map_err(polars_write_err)?;
     let label_to_iri = &config.label_to_iri;
@@ -314,18 +326,12 @@ fn extract_string(df: &DataFrame, col_name: &str) -> Option<String> {
 // ── YAML metadata (GraphAr gar/v1 spec) ──
 
 fn write_yaml_metadata(
-    base_path: &str,
+    store: &GraphStore,
     types: &[TypeManifest],
     edges: &[EdgeManifest],
-    _cloud_opts: Option<&CloudOptions>,
 ) -> Result<(), FossilError> {
     // For cloud storage, YAML writing is skipped (metadata lives in the manifest JSON).
-    // For local storage, write YAML files.
-    if base_path.starts_with("s3://")
-        || base_path.starts_with("gs://")
-        || base_path.starts_with("az://")
-        || base_path.starts_with("abfss://")
-    {
+    if store.is_cloud() {
         return Ok(());
     }
 
@@ -351,7 +357,7 @@ fn write_yaml_metadata(
             .collect::<Vec<_>>()
             .join("\n"),
     );
-    std::fs::write(format!("{base_path}/graph.yml"), graph_yml)
+    std::fs::write(store.path("graph.yml"), graph_yml)
         .map_err(|e| RdfError::Write(e.to_string()))?;
 
     // Vertex YMLs
@@ -372,7 +378,7 @@ fn write_yaml_metadata(
             "type: {}\nchunk_size: 262144\nprefix: vertex/{}/\nproperty_groups:\n  - file_type: parquet\n    properties:\n{}\n{}\nversion: gar/v1\n",
             t.name, t.name, subject_prop, props.join("\n")
         );
-        std::fs::write(format!("{base_path}/{}.vertex.yml", t.name), yml)
+        std::fs::write(store.path(&format!("{}.vertex.yml", t.name)), yml)
             .map_err(|e| RdfError::Write(e.to_string()))?;
     }
 
@@ -384,10 +390,10 @@ fn write_yaml_metadata(
             e.source_type, e.name, e.target_type,
         );
         std::fs::write(
-            format!(
-                "{base_path}/{}_{}_{}.edge.yml",
+            store.path(&format!(
+                "{}_{}_{}.edge.yml",
                 e.source_type, e.name, e.target_type
-            ),
+            )),
             yml,
         )
         .map_err(|e2| RdfError::Write(e2.to_string()))?;
