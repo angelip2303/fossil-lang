@@ -93,8 +93,8 @@ pub fn materialize(
     let mut types = Vec::new();
     let mut edges = Vec::new();
 
+    // ── Pass 1: write all vertex files (edges may reference any type) ──
     for config in configs {
-        // ── Vertex file ──
         let vertex = frame
             .clone()
             .select(config.selection.clone())
@@ -104,11 +104,13 @@ pub fn materialize(
         let vertex_path = format!("vertex/{}.parquet", config.type_dir);
         store.sink(vertex, &vertex_path)?;
 
-        // Compute stats by scanning the written file
         let type_manifest = compute_type_manifest(config, &vertex_path, &store)?;
         types.push(type_manifest);
+    }
 
-        // ── Edge files (per ref column) ──
+    // ── Pass 2: write edge files (all vertex files now exist) ──
+    for config in configs {
+        let vertex_path = format!("vertex/{}.parquet", config.type_dir);
         let id_map = store
             .scan(&vertex_path)?
             .select([col("_id"), col("subject")]);
@@ -119,7 +121,6 @@ pub fn materialize(
                 config.type_dir, ref_edge.label, ref_edge.target_type_dir
             );
 
-            // Build raw edges: subject IRI → ref target IRI
             let raw_edges = frame
                 .clone()
                 .select([
@@ -128,7 +129,6 @@ pub fn materialize(
                 ])
                 .filter(col("tgt_iri").is_not_null().and(col("src_iri").is_not_null()));
 
-            // Map source IRI → source _id
             let with_src_id = raw_edges.join(
                 id_map
                     .clone()
@@ -138,7 +138,6 @@ pub fn materialize(
                 JoinType::Inner.into(),
             );
 
-            // Map target IRI → target _id (from target type's vertex file)
             let target_vertex_path =
                 format!("vertex/{}.parquet", ref_edge.target_type_dir);
             let target_id_map = store.scan(&target_vertex_path)?.select([
@@ -177,7 +176,6 @@ pub fn materialize(
                 &by_target_path,
             )?;
 
-            // Edge count
             let edge_count = store
                 .scan(&by_source_path)
                 .ok()
