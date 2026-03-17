@@ -1,12 +1,13 @@
 //! GraphAr-compatible property graph materializer.
 //!
-//! Two-pass architecture:
-//!   Pass 1 — Polars streaming sink for vertex parquets, then DuckDB stats
-//!   Pass 2 — DuckDB join + sort for CSR/CSC edge parquets (disk-spilling)
+//! Two-engine architecture:
+//!   Polars  — streaming sink for vertices, streaming aggregation for stats,
+//!             local staging for edge IRI pairs
+//!   DuckDB  — join IRI→ID + CSR/CSC sort for edges (disk-spilling)
 //!
-//! Zero `.collect()` on data. Polars only calls `sink_parquet` (streaming writes).
-//! DuckDB handles all analytical queries (joins, sorts, aggregations) with
-//! automatic disk spilling under memory pressure.
+//! Each engine does what it's best at:
+//!   - Polars: lazy evaluation, streaming sink, expression graphs
+//!   - DuckDB: larger-than-RAM hash joins + external merge sorts
 //!
 //! Output layout (GraphAr gar/v1):
 //! ```text
@@ -17,9 +18,9 @@
 //! ├── vertex/{type}.parquet                    # _id | subject | properties...
 //! └── edge/{src}_{edge}_{dst}/
 //!     ├── by_source.parquet                    # source | target (CSR)
-//!     ├── by_source_offsets.parquet            # vertex_id | offset
+//!     ├── by_source_offsets.parquet            # vertex_id | start_offset
 //!     ├── by_target.parquet                    # source | target (CSC)
-//!     └── by_target_offsets.parquet            # vertex_id | offset
+//!     └── by_target_offsets.parquet            # vertex_id | start_offset
 //! ```
 
 use polars::prelude::sync_on_close::SyncOnCloseType;
@@ -52,6 +53,8 @@ fn polars_write_err(e: PolarsError) -> RdfError {
     RdfError::Write(e.to_string())
 }
 
+// ── DuckDB cloud credentials ──
+
 /// Configure DuckDB cloud credentials via `CREATE TEMPORARY SECRET`.
 ///
 /// Detects the auth method from available credentials and creates a
@@ -73,7 +76,6 @@ fn configure_duckdb_cloud(
         .collect();
     let get = |key: &str| -> Option<&str> { lower.get(key).copied() };
 
-    // Azure
     if let Some(account_name) = get("azure_storage_account_name") {
         conn.execute_batch("INSTALL azure; LOAD azure;")
             .map_err(RdfError::from)?;
@@ -85,38 +87,24 @@ fn configure_duckdb_cloud(
         ) {
             conn.execute(
                 "CREATE TEMPORARY SECRET __azure (
-                    TYPE AZURE,
-                    PROVIDER service_principal,
-                    ACCOUNT_NAME ?,
-                    TENANT_ID ?,
-                    CLIENT_ID ?,
-                    CLIENT_SECRET ?
+                    TYPE AZURE, PROVIDER service_principal,
+                    ACCOUNT_NAME ?, TENANT_ID ?, CLIENT_ID ?, CLIENT_SECRET ?
                 )",
                 duckdb::params![account_name, tenant, client_id, secret],
             )
             .map_err(RdfError::from)?;
-        } else if let Some(account_key) = get("azure_storage_account_key") {
-            let conn_str = format!(
-                "AccountName={account_name};AccountKey={account_key};EndpointSuffix=core.windows.net"
-            );
+        } else if let Some(key) = get("azure_storage_account_key") {
+            let cs = format!("AccountName={account_name};AccountKey={key};EndpointSuffix=core.windows.net");
             conn.execute(
-                "CREATE TEMPORARY SECRET __azure (
-                    TYPE AZURE,
-                    CONNECTION_STRING ?
-                )",
-                [&conn_str],
+                "CREATE TEMPORARY SECRET __azure (TYPE AZURE, CONNECTION_STRING ?)",
+                [&cs],
             )
             .map_err(RdfError::from)?;
         } else if let Some(sas) = get("azure_storage_sas_token") {
-            let conn_str = format!(
-                "AccountName={account_name};SharedAccessSignature={sas};EndpointSuffix=core.windows.net"
-            );
+            let cs = format!("AccountName={account_name};SharedAccessSignature={sas};EndpointSuffix=core.windows.net");
             conn.execute(
-                "CREATE TEMPORARY SECRET __azure (
-                    TYPE AZURE,
-                    CONNECTION_STRING ?
-                )",
-                [&conn_str],
+                "CREATE TEMPORARY SECRET __azure (TYPE AZURE, CONNECTION_STRING ?)",
+                [&cs],
             )
             .map_err(RdfError::from)?;
         }
@@ -127,37 +115,54 @@ fn configure_duckdb_cloud(
 
 // ── I/O adapters ──
 
-/// Polars-based I/O for streaming sink. Cloud credentials are inherited
-/// from [`ResolvedPath`] — impossible to forget.
+/// Polars-based I/O for streaming sink to cloud. Cloud credentials are
+/// inherited from [`ResolvedPath`] — impossible to forget.
 struct GraphStore {
     root: ResolvedPath,
 }
 
 impl GraphStore {
-    /// Streaming sink: Polars writes the LazyFrame to Parquet without
-    /// materializing the full dataset.
+    /// Streaming sink to the destination (cloud or local).
     fn sink(&self, lf: LazyFrame, rel: &str) -> Result<(), FossilError> {
         let sub = self.root.join(rel);
-        let target = SinkTarget::Path(sub.pl_path().clone());
-        lf.sink_parquet(target, parquet_options(), sub.cloud_options().cloned(), SINK_OPTIONS)
-            .map_err(polars_write_err)?
-            .collect()
-            .map_err(polars_write_err)?;
+        lf.sink_parquet(
+            SinkTarget::Path(sub.pl_path().clone()),
+            parquet_options(),
+            sub.cloud_options().cloned(),
+            SINK_OPTIONS,
+        )
+        .map_err(polars_write_err)?
+        .collect()
+        .map_err(polars_write_err)?;
         Ok(())
     }
 
-    /// Absolute path string for a relative path (used by DuckDB).
+    /// Absolute path string for DuckDB queries.
     fn abs_path(&self, rel: &str) -> String {
         self.root.join(rel).to_str().to_string()
     }
+}
+
+/// Sink a LazyFrame to a local temp path (no cloud credentials).
+fn sink_local(lf: LazyFrame, path: &std::path::Path) -> Result<(), FossilError> {
+    lf.sink_parquet(
+        SinkTarget::Path(PlPath::from_str(path.to_str().unwrap_or("/tmp/fossil_fallback.parquet"))),
+        parquet_options(),
+        None,
+        SINK_OPTIONS,
+    )
+    .map_err(polars_write_err)?
+    .collect()
+    .map_err(polars_write_err)?;
+    Ok(())
 }
 
 // ── Main entry point ──
 
 /// Materialize a property graph as GraphAr-compatible Parquet files.
 ///
-/// Pass 1: Polars streaming sink for vertices + DuckDB stats from sunk parquets.
-/// Pass 2: DuckDB join + CSR/CSC sort for edges with disk-spilling.
+/// Pass 1: Polars streaming sink for vertices + Polars streaming stats.
+/// Pass 2: Polars local staging + DuckDB join/sort for edges.
 pub fn materialize(
     frame: &LazyFrame,
     configs: &[OutputConfig],
@@ -170,7 +175,7 @@ pub fn materialize(
     let mut types = Vec::new();
     let mut edges = Vec::new();
 
-    // Build lazy vertex plans (reused for sink only).
+    // Build lazy vertex plans (reused for sink + stats).
     let vertices: Vec<_> = configs
         .iter()
         .map(|config| {
@@ -183,17 +188,16 @@ pub fn materialize(
         })
         .collect();
 
-    // ── Pass 1: sink vertices (Polars streaming) + stats (DuckDB) ──
+    // ── Pass 1: sink vertices (Polars → cloud) + stats (Polars streaming) ──
     for (config, vertex) in &vertices {
         let vertex_rel = format!("vertex/{}.parquet", config.type_dir);
         store.sink(vertex.clone(), &vertex_rel)?;
 
-        let manifest =
-            compute_type_manifest(&conn, config, &store.abs_path(&vertex_rel), &vertex_rel)?;
+        let manifest = compute_type_manifest(config, &vertex_rel, vertex)?;
         types.push(manifest);
     }
 
-    // ── Pass 2: edges via DuckDB (join + CSR/CSC sort + offset tables) ──
+    // ── Pass 2: edges via local staging + DuckDB join/sort → cloud ──
     for (config, _) in &vertices {
         let src_vertex_rel = format!("vertex/{}.parquet", config.type_dir);
 
@@ -231,9 +235,9 @@ pub fn materialize(
     Ok(DataManifest { types, edges })
 }
 
-// ── Edge production (DuckDB) ──
+// ── Edge production (Polars staging + DuckDB join/sort) ──
 
-/// Write a sorted edge file + its offset table. Reused for both CSR and CSC.
+/// Write a sorted edge file + its offset table. Reused for CSR and CSC.
 fn write_sorted_edges(
     conn: &duckdb::Connection,
     primary: &str,
@@ -245,7 +249,6 @@ fn write_sorted_edges(
         "COPY (SELECT source, target FROM __edges ORDER BY {primary}, {secondary})
          TO '{sorted_path}' (FORMAT PARQUET, ROW_GROUP_SIZE {VERTEX_CHUNK_SIZE})"
     ))?;
-
     conn.execute_batch(&format!(
         "COPY (
             WITH ranked AS (
@@ -257,16 +260,13 @@ fn write_sorted_edges(
             FROM ranked GROUP BY vertex_id ORDER BY vertex_id
         ) TO '{offsets_path}' (FORMAT PARQUET)"
     ))?;
-
     Ok(())
 }
 
-/// Join raw edges with vertex id_maps and produce CSR + CSC parquets.
+/// Produce CSR + CSC edge parquets with offset tables.
 ///
-/// DuckDB handles the hash join (IRI→ID), the ORDER BY (CSR/CSC), and
-/// offset table generation — all with automatic disk spilling.
-///
-/// Returns `(csr_rel, csc_rel, edge_count)`.
+/// 1. Polars sinks raw edge IRIs to LOCAL temp (no cloud round-trip)
+/// 2. DuckDB reads local staging + cloud vertex parquets → join + sort → cloud
 fn produce_edges(
     store: &GraphStore,
     conn: &duckdb::Connection,
@@ -277,8 +277,9 @@ fn produce_edges(
     tgt_vertex_rel: &str,
     edge_dir: &str,
 ) -> Result<(String, String, u64), FossilError> {
-    // 1. Sink raw edges via Polars streaming
-    let staging_rel = format!("edge/{edge_dir}/_staging.parquet");
+    // 1. Polars sink raw edges to LOCAL temp (fast, no cloud)
+    let staging_local = std::env::temp_dir()
+        .join(format!("fossil_{}.parquet", edge_dir.replace('/', "_")));
     let raw = frame
         .clone()
         .select([
@@ -286,44 +287,42 @@ fn produce_edges(
             tgt_iri_expr.alias("tgt_iri"),
         ])
         .filter(col("src_iri").is_not_null().and(col("tgt_iri").is_not_null()));
-    store.sink(raw, &staging_rel)?;
+    sink_local(raw, &staging_local)?;
 
-    let staging = store.abs_path(&staging_rel);
+    let local_str = staging_local.to_str().unwrap_or("").to_string();
     let src_vtx = store.abs_path(src_vertex_rel);
     let tgt_vtx = store.abs_path(tgt_vertex_rel);
 
-    // 2. DuckDB: join once → temp table
+    // 2. DuckDB: join local staging + cloud vertices → temp table
     conn.execute_batch(&format!(
         "CREATE OR REPLACE TEMP TABLE __edges AS
             SELECT s._id AS source, t._id AS target
-            FROM read_parquet('{staging}') e
+            FROM read_parquet('{local_str}') e
             JOIN read_parquet('{src_vtx}') s ON e.src_iri = s.subject
             JOIN read_parquet('{tgt_vtx}') t ON e.tgt_iri = t.subject"
     ))
     .map_err(RdfError::from)?;
 
-    // 3. CSR + CSC with shared helper
+    // 3. CSR + CSC + offsets (reads from temp table, writes to cloud)
     let csr_rel = format!("edge/{edge_dir}/by_source.parquet");
     let csc_rel = format!("edge/{edge_dir}/by_target.parquet");
-    let csr_offsets_rel = format!("edge/{edge_dir}/by_source_offsets.parquet");
-    let csc_offsets_rel = format!("edge/{edge_dir}/by_target_offsets.parquet");
 
     write_sorted_edges(
         conn,
         "source",
         "target",
         &store.abs_path(&csr_rel),
-        &store.abs_path(&csr_offsets_rel),
+        &store.abs_path(&format!("edge/{edge_dir}/by_source_offsets.parquet")),
     )?;
     write_sorted_edges(
         conn,
         "target",
         "source",
         &store.abs_path(&csc_rel),
-        &store.abs_path(&csc_offsets_rel),
+        &store.abs_path(&format!("edge/{edge_dir}/by_target_offsets.parquet")),
     )?;
 
-    // 4. Edge count
+    // 4. Edge count (from temp table, no cloud read)
     let count: u64 = conn
         .query_row("SELECT count(*) FROM __edges", [], |row| row.get(0))
         .map_err(RdfError::from)?;
@@ -331,14 +330,13 @@ fn produce_edges(
     // 5. Cleanup
     conn.execute_batch("DROP TABLE IF EXISTS __edges")
         .map_err(RdfError::from)?;
-    let _ = std::fs::remove_file(store.abs_path(&staging_rel));
+    let _ = std::fs::remove_file(&staging_local);
 
     Ok((csr_rel, csc_rel, count))
 }
 
-// ── Stats computation (DuckDB) ──
+// ── Stats computation (Polars streaming aggregation) ──
 
-/// Map XSD datatype IRI to a human-readable name for the manifest.
 fn xsd_to_datatype_name(xsd: Option<&str>) -> &'static str {
     match xsd {
         Some(s) if s.ends_with("#integer") || s.ends_with("#int") || s.ends_with("#long") => {
@@ -355,115 +353,77 @@ fn xsd_to_datatype_name(xsd: Option<&str>) -> &'static str {
     }
 }
 
-/// Compute type manifest via DuckDB queries on the sunk vertex parquet.
+/// Compute type manifest via Polars streaming aggregation.
 ///
-/// Uses two batched queries (stats + samples) instead of per-column queries.
+/// Stats are 1-row aggregations — Polars processes in batches and only
+/// keeps running state. No disk spilling needed.
 fn compute_type_manifest(
-    conn: &duckdb::Connection,
     config: &OutputConfig,
-    vertex_abs_path: &str,
     vertex_rel_path: &str,
+    vertex: &LazyFrame,
 ) -> Result<TypeManifest, FossilError> {
     let label_to_iri = &config.label_to_iri;
-
-    // Property column names from label_to_iri keys (the source of truth).
     let prop_cols: Vec<&String> = label_to_iri.keys().collect();
 
-    // Entity count + all column stats in a single query (1 scan).
-    let stat_parts: Vec<String> = prop_cols
+    // Single batched query: entity_count + per-column count/n_unique/min/max
+    let mut stat_exprs: Vec<Expr> = vec![col("_id").count().alias("__entity_count")];
+    for name in &prop_cols {
+        let c = col(PlSmallStr::from(name.as_str()));
+        stat_exprs.push(c.clone().count().alias(PlSmallStr::from(format!("{name}__count").as_str())));
+        stat_exprs.push(c.clone().n_unique().alias(PlSmallStr::from(format!("{name}__nunique").as_str())));
+        stat_exprs.push(c.clone().cast(DataType::String).min().alias(PlSmallStr::from(format!("{name}__min").as_str())));
+        stat_exprs.push(c.cast(DataType::String).max().alias(PlSmallStr::from(format!("{name}__max").as_str())));
+    }
+    let stats_df = vertex.clone().select(stat_exprs).collect().map_err(polars_write_err)?;
+    let entity_count = extract_u64(&stats_df, "__entity_count");
+
+    // Samples: 5 values per column
+    let sample_exprs: Vec<Expr> = prop_cols
         .iter()
         .map(|name| {
-            format!(
-                "count(\"{name}\"), count(DISTINCT \"{name}\"), \
-                 min(\"{name}\")::VARCHAR, max(\"{name}\")::VARCHAR"
-            )
+            col(PlSmallStr::from(name.as_str()))
+                .cast(DataType::String)
+                .drop_nulls()
+                .head(Some(5))
+                .alias(PlSmallStr::from(name.as_str()))
         })
         .collect();
-
-    let stats_sql = if stat_parts.is_empty() {
-        format!("SELECT count(*) FROM read_parquet('{vertex_abs_path}')")
+    let samples_df = if !sample_exprs.is_empty() {
+        vertex.clone().select(sample_exprs).collect().ok()
     } else {
-        format!(
-            "SELECT count(*), {} FROM read_parquet('{vertex_abs_path}')",
-            stat_parts.join(", ")
-        )
+        None
     };
-
-    let mut stmt = conn.prepare(&stats_sql).map_err(RdfError::from)?;
-    let mut rows = stmt.query([]).map_err(RdfError::from)?;
-    let row = rows
-        .next()
-        .map_err(RdfError::from)?
-        .ok_or_else(|| RdfError::Write("stats query returned no rows".into()))?;
-
-    let entity_count: u64 = row.get::<_, u64>(0).unwrap_or(0);
 
     let columns: Vec<ColumnStat> = prop_cols
         .iter()
-        .enumerate()
-        .map(|(i, name)| {
+        .map(|name| {
             let iri = label_to_iri.get(*name).cloned().unwrap_or_default();
             let xsd = config.xsd_types.get(iri.as_str()).copied();
             let datatype = xsd_to_datatype_name(xsd).to_string();
 
-            // 4 columns per prop, offset by 1 (entity_count is column 0)
-            let base = 1 + i * 4;
-            let count = row.get::<_, u64>(base).unwrap_or(0);
-            let n_unique = row.get::<_, u64>(base + 1).unwrap_or(0);
-            let min = row.get::<_, Option<String>>(base + 2).unwrap_or(None);
-            let max = row.get::<_, Option<String>>(base + 3).unwrap_or(None);
+            let count = extract_u64(&stats_df, &format!("{name}__count"));
+            let n_unique = extract_u64(&stats_df, &format!("{name}__nunique"));
+            let min = extract_string(&stats_df, &format!("{name}__min"));
+            let max = extract_string(&stats_df, &format!("{name}__max"));
 
-            // Samples: deferred to a second query below
-            ColumnStat {
-                name: (*name).clone(),
-                iri,
-                datatype,
-                count,
-                n_unique,
-                min,
-                max,
-                samples: Vec::new(),
-            }
+            let samples = samples_df
+                .as_ref()
+                .and_then(|df| {
+                    df.column(name.as_str())
+                        .ok()?
+                        .str()
+                        .ok()
+                        .map(|ca| {
+                            ca.into_iter()
+                                .filter_map(|v| v.map(String::from))
+                                .collect::<Vec<_>>()
+                        })
+                })
+                .unwrap_or_default();
+
+            ColumnStat { name: (*name).clone(), iri, datatype, count, n_unique, min, max, samples }
         })
         .collect();
-
-    // Samples: single UNION ALL query (1 scan) instead of N separate queries.
-    if !prop_cols.is_empty() {
-        let sample_parts: Vec<String> = prop_cols
-            .iter()
-            .map(|name| {
-                format!(
-                    "SELECT '{name}' AS col_name, \"{name}\"::VARCHAR AS val \
-                     FROM read_parquet('{vertex_abs_path}') \
-                     WHERE \"{name}\" IS NOT NULL LIMIT 5"
-                )
-            })
-            .collect();
-        let samples_sql = sample_parts.join(" UNION ALL ");
-
-        if let Ok(mut stmt) = conn.prepare(&samples_sql) {
-            if let Ok(sample_rows) = stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0).unwrap_or_default(),
-                    r.get::<_, String>(1).unwrap_or_default(),
-                ))
-            }) {
-                let mut columns = columns;
-                for pair in sample_rows.flatten() {
-                    if let Some(col) = columns.iter_mut().find(|c| c.name == pair.0) {
-                        col.samples.push(pair.1);
-                    }
-                }
-                return Ok(TypeManifest {
-                    name: config.type_dir.clone(),
-                    iri: config.type_iri.clone(),
-                    vertex_file: vertex_rel_path.to_string(),
-                    entity_count,
-                    columns,
-                });
-            }
-        }
-    }
 
     Ok(TypeManifest {
         name: config.type_dir.clone(),
@@ -474,6 +434,26 @@ fn compute_type_manifest(
     })
 }
 
+fn extract_u64(df: &DataFrame, col_name: &str) -> u64 {
+    df.column(col_name)
+        .ok()
+        .and_then(|c| {
+            c.u32()
+                .ok()
+                .map(|ca| ca.get(0).unwrap_or(0) as u64)
+                .or_else(|| c.u64().ok().map(|ca| ca.get(0).unwrap_or(0)))
+        })
+        .unwrap_or(0)
+}
+
+fn extract_string(df: &DataFrame, col_name: &str) -> Option<String> {
+    df.column(col_name)
+        .ok()
+        .and_then(|c| c.str().ok())
+        .and_then(|ca| ca.get(0))
+        .map(String::from)
+}
+
 // ── YAML metadata (GraphAr gar/v1 spec) ──
 
 fn write_yaml_metadata(
@@ -482,79 +462,43 @@ fn write_yaml_metadata(
     edges: &[EdgeManifest],
 ) -> Result<(), FossilError> {
     if store.root.pl_path().is_cloud_url() {
-        // YAML metadata is local-only. For cloud, the DataManifest JSON
-        // (stored in keasy's SQLite) serves as the canonical metadata.
         return Ok(());
     }
 
-    let vertex_ymls: Vec<String> = types
-        .iter()
-        .map(|t| format!("{}.vertex.yml", t.name))
-        .collect();
+    let vertex_ymls: Vec<String> = types.iter().map(|t| format!("{}.vertex.yml", t.name)).collect();
     let edge_ymls: Vec<String> = edges
         .iter()
-        .map(|e| {
-            format!(
-                "{}_{}_{}.edge.yml",
-                e.source_type, e.name, e.target_type
-            )
-        })
+        .map(|e| format!("{}_{}_{}.edge.yml", e.source_type, e.name, e.target_type))
         .collect();
+
     let graph_yml = format!(
         "name: dataset\nprefix: ./\nvertices:\n{}\nedges:\n{}\nversion: gar/v1\n",
-        vertex_ymls
-            .iter()
-            .map(|v| format!("  - {v}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        edge_ymls
-            .iter()
-            .map(|e| format!("  - {e}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        vertex_ymls.iter().map(|v| format!("  - {v}")).collect::<Vec<_>>().join("\n"),
+        edge_ymls.iter().map(|e| format!("  - {e}")).collect::<Vec<_>>().join("\n"),
     );
     std::fs::write(store.root.join("graph.yml").to_str(), graph_yml)
         .map_err(|e| RdfError::Write(e.to_string()))?;
 
     for t in types {
-        let props: Vec<String> = t
-            .columns
-            .iter()
-            .map(|c| {
-                format!(
-                    "      - name: {}\n        data_type: {}\n        is_primary: false",
-                    c.name, c.datatype
-                )
-            })
-            .collect();
-        let subject_prop =
-            "      - name: subject\n        data_type: string\n        is_primary: true";
+        let props: Vec<String> = t.columns.iter().map(|c| {
+            format!("      - name: {}\n        data_type: {}\n        is_primary: false", c.name, c.datatype)
+        }).collect();
+        let subject_prop = "      - name: subject\n        data_type: string\n        is_primary: true";
         let yml = format!(
             "type: {}\nchunk_size: {VERTEX_CHUNK_SIZE}\nprefix: vertex/{}/\nproperty_groups:\n  - file_type: parquet\n    properties:\n{}\n{}\nversion: gar/v1\n",
             t.name, t.name, subject_prop, props.join("\n")
         );
-        std::fs::write(
-            store.root.join(&format!("{}.vertex.yml", t.name)).to_str(),
-            yml,
-        )
-        .map_err(|e| RdfError::Write(e.to_string()))?;
+        std::fs::write(store.root.join(&format!("{}.vertex.yml", t.name)).to_str(), yml)
+            .map_err(|e| RdfError::Write(e.to_string()))?;
     }
 
     for e in edges {
         let yml = format!(
             "src_type: {src}\nedge_type: {edge}\ndst_type: {dst}\nchunk_size: 4194304\nsrc_chunk_size: {VERTEX_CHUNK_SIZE}\ndst_chunk_size: {VERTEX_CHUNK_SIZE}\ndirected: true\nprefix: edge/{src}_{edge}_{dst}/\nadj_lists:\n  - ordered: true\n    aligned_by: src\n    file_type: parquet\n  - ordered: true\n    aligned_by: dst\n    file_type: parquet\nversion: gar/v1\n",
-            src = e.source_type,
-            edge = e.name,
-            dst = e.target_type,
+            src = e.source_type, edge = e.name, dst = e.target_type,
         );
         std::fs::write(
-            store
-                .root
-                .join(&format!(
-                    "{}_{}_{}.edge.yml",
-                    e.source_type, e.name, e.target_type
-                ))
-                .to_str(),
+            store.root.join(&format!("{}_{}_{}.edge.yml", e.source_type, e.name, e.target_type)).to_str(),
             yml,
         )
         .map_err(|e2| RdfError::Write(e2.to_string()))?;
