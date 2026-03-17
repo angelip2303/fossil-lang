@@ -42,7 +42,7 @@ pub struct TypeManifest {
     pub columns: Vec<ColumnStat>,
 }
 
-/// Manifest for an edge type (CSR + CSC Parquet files).
+/// Manifest for an edge type (GraphAr v1 unordered adjacency list).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct EdgeManifest {
@@ -54,10 +54,8 @@ pub struct EdgeManifest {
     pub source_type: String,
     /// Target vertex type name.
     pub target_type: String,
-    /// Relative path to CSR file (sorted by source).
-    pub by_source: String,
-    /// Relative path to CSC file (sorted by target).
-    pub by_target: String,
+    /// Relative path to edge Parquet file (source, target columns).
+    pub file: String,
     pub count: u64,
 }
 

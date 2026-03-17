@@ -169,25 +169,10 @@ pub fn materialize(
                 )
                 .select([col("source"), col("target")]);
 
-            // CSR: sorted by (source, target)
-            let by_source_path = format!("edge/{edge_dir}/by_source.parquet");
-            store.sink(
-                edges_with_ids
-                    .clone()
-                    .sort(["source", "target"], SortMultipleOptions::default()),
-                &by_source_path,
-            )?;
+            // Single unordered edge file — fully streaming, no sort needed.
+            let edge_file = format!("edge/{edge_dir}/edges.parquet");
+            store.sink(edges_with_ids, &edge_file)?;
 
-            // CSC: sorted by (target, source)
-            let by_target_path = format!("edge/{edge_dir}/by_target.parquet");
-            store.sink(
-                edges_with_ids.sort(["target", "source"], SortMultipleOptions::default()),
-                &by_target_path,
-            )?;
-
-            // Edge count: derive from source type entity count (upper bound)
-            // Actual count would require materializing the join — deferred to
-            // the manifest consumer which can read the parquet metadata.
             let edge_count = types
                 .iter()
                 .find(|t| t.name == config.type_dir)
@@ -199,8 +184,7 @@ pub fn materialize(
                 iri: ref_edge.predicate_uri.clone(),
                 source_type: config.type_dir.clone(),
                 target_type: ref_edge.target_type_dir.clone(),
-                by_source: by_source_path,
-                by_target: by_target_path,
+                file: edge_file,
                 count: edge_count,
             });
         }
@@ -368,7 +352,7 @@ fn write_yaml_metadata(
 
     for e in edges {
         let yml = format!(
-            "src_type: {}\nedge_type: {}\ndst_type: {}\nchunk_size: 4194304\nsrc_chunk_size: 262144\ndst_chunk_size: 262144\ndirected: true\nprefix: edge/{}_{}_{}/\nadj_lists:\n  - ordered: true\n    aligned_by: src\n    file_type: parquet\n  - ordered: true\n    aligned_by: dst\n    file_type: parquet\nversion: gar/v1\n",
+            "src_type: {}\nedge_type: {}\ndst_type: {}\nchunk_size: 4194304\nsrc_chunk_size: 262144\ndst_chunk_size: 262144\ndirected: true\nprefix: edge/{}_{}_{}/\nadj_lists:\n  - ordered: false\n    aligned_by: src\n    file_type: parquet\nversion: gar/v1\n",
             e.source_type, e.name, e.target_type,
             e.source_type, e.name, e.target_type,
         );
