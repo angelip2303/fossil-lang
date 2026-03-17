@@ -65,7 +65,7 @@ impl TypeProviderImpl for IfcProvider {
         let (_, resolved) = args.resolve_path("path", ctx.path_resolver, "ifc", loc)?;
         let entity_str = args.require_string("entity", "ifc", loc)?;
 
-        let path = polars::prelude::PlPath::from_str(&resolved.url);
+        let path = resolved.pl_path().clone();
         validate_extension(path.as_ref(), &["ifc"], loc)?;
         validate_path(path.as_ref(), loc)?;
 

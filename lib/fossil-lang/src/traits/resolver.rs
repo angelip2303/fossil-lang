@@ -1,16 +1,48 @@
+use polars::prelude::PlPath;
 use polars::prelude::cloud::CloudOptions;
 
 /// A resolved path ready for I/O: physical URL + opaque cloud credentials.
+/// This is the transversal type that ensures credentials always travel with
+/// the path. Fields are private — use methods to interact.
 #[derive(Clone)]
 pub struct ResolvedPath {
-    pub url: String,
-    pub cloud_options: Option<CloudOptions>,
+    path: PlPath,
+    cloud_options: Option<CloudOptions>,
+}
+
+impl ResolvedPath {
+    pub fn new(url: &str, cloud_options: Option<CloudOptions>) -> Self {
+        Self {
+            path: PlPath::from_str(url),
+            cloud_options,
+        }
+    }
+
+    /// Derive a sub-path that inherits cloud credentials.
+    pub fn join(&self, rel: &str) -> Self {
+        Self {
+            path: self.path.as_ref().join(rel),
+            cloud_options: self.cloud_options.clone(),
+        }
+    }
+
+    pub fn pl_path(&self) -> &PlPath {
+        &self.path
+    }
+
+    pub fn cloud_options(&self) -> Option<&CloudOptions> {
+        self.cloud_options.as_ref()
+    }
+
+    pub fn to_str(&self) -> &str {
+        self.path.to_str()
+    }
 }
 
 impl std::fmt::Debug for ResolvedPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResolvedPath")
-            .field("url", &self.url)
+            .field("path", &self.to_str())
             .field("cloud_options", &self.cloud_options.as_ref().map(|_| "***"))
             .finish()
     }
@@ -33,9 +65,6 @@ impl PathResolver for DefaultPathResolver {
                 "Host references ({raw_path}) not available in standalone mode"
             ));
         }
-        Ok(ResolvedPath {
-            url: raw_path.to_string(),
-            cloud_options: None,
-        })
+        Ok(ResolvedPath::new(raw_path, None))
     }
 }

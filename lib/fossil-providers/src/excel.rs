@@ -233,7 +233,7 @@ impl TypeProviderImpl for ExcelProvider {
         loc: Loc,
     ) -> Result<ProviderOutput, FossilError> {
         let (_, resolved) = args.resolve_path("path", ctx.path_resolver, "excel", loc)?;
-        let path = PlPath::from_str(&resolved.url);
+        let path = resolved.pl_path().clone();
         validate_extension(path.as_ref(), EXCEL_EXTENSIONS, loc)?;
         validate_path(path.as_ref(), loc)?;
 

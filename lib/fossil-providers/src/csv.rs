@@ -97,7 +97,7 @@ impl TypeProviderImpl for CsvProvider {
         loc: Loc,
     ) -> Result<ProviderOutput, FossilError> {
         let (raw_path, resolved) = args.resolve_path("path", ctx.path_resolver, "csv", loc)?;
-        let path = PlPath::from_str(&resolved.url);
+        let path = resolved.pl_path().clone();
         validate_extension(path.as_ref(), &["csv"], loc)?;
         validate_path(path.as_ref(), loc)?;
 
@@ -117,7 +117,7 @@ impl TypeProviderImpl for CsvProvider {
             options.has_header = has_header;
         }
 
-        let csv_source = CsvSource::new(path, options.clone(), resolved.cloud_options);
+        let csv_source = CsvSource::new(path, options.clone(), resolved.cloud_options().cloned());
         let schema = csv_source
             .infer_schema()
             .map_err(|e| FossilError::data_error(e.to_string(), loc))?;
@@ -165,9 +165,9 @@ impl FunctionImpl for CsvLoadFunction {
             .map_err(|e| FossilError::data_error(e, self.loc))?;
 
         let source = CsvSource {
-            path: PlPath::from_str(&resolved.url),
+            path: resolved.pl_path().clone(),
             options: self.options.clone(),
-            cloud_options: resolved.cloud_options,
+            cloud_options: resolved.cloud_options().cloned(),
         };
 
         let frame = source.scan()

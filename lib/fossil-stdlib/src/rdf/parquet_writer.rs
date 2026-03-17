@@ -16,11 +16,11 @@
 //! ```
 
 use polars::prelude::*;
-use polars::prelude::cloud::CloudOptions;
 use polars::prelude::sync_on_close::SyncOnCloseType;
 
 use fossil_lang::error::FossilError;
 use fossil_lang::runtime::executor::{ColumnStat, DataManifest, EdgeManifest, TypeManifest};
+use fossil_lang::traits::resolver::ResolvedPath;
 
 use super::OutputConfig;
 use super::RdfError;
@@ -31,30 +31,28 @@ const SINK_OPTIONS: SinkOptions = SinkOptions {
     sync_on_close: SyncOnCloseType::None,
 };
 
+fn parquet_options() -> ParquetWriteOptions {
+    ParquetWriteOptions {
+        row_group_size: Some(50_000),
+        ..Default::default()
+    }
+}
+
 fn polars_write_err(e: PolarsError) -> RdfError {
     RdfError::Write(e.to_string())
 }
 
-/// Cloud-aware file store that ensures credentials are always attached to both
-/// reads and writes. Encapsulates base_path + cloud_opts so callers cannot
-/// accidentally omit credentials.
+/// Parquet-specific I/O adapter built from a `ResolvedPath`. Cloud credentials
+/// are inherited by every operation — impossible to forget.
 struct GraphStore {
-    base: String,
-    cloud_opts: Option<CloudOptions>,
+    root: ResolvedPath,
 }
 
 impl GraphStore {
-    fn path(&self, rel: &str) -> String {
-        format!("{}/{}", self.base, rel)
-    }
-
     fn sink(&self, lf: LazyFrame, rel: &str) -> Result<(), FossilError> {
-        let target = SinkTarget::Path(PlPath::from_str(&self.path(rel)));
-        let options = ParquetWriteOptions {
-            row_group_size: Some(50_000),
-            ..Default::default()
-        };
-        lf.sink_parquet(target, options, self.cloud_opts.clone(), SINK_OPTIONS)
+        let sub = self.root.join(rel);
+        let target = SinkTarget::Path(sub.pl_path().clone());
+        lf.sink_parquet(target, parquet_options(), sub.cloud_options().cloned(), SINK_OPTIONS)
             .map_err(polars_write_err)?
             .collect()
             .map_err(polars_write_err)?;
@@ -62,20 +60,15 @@ impl GraphStore {
     }
 
     fn scan(&self, rel: &str) -> Result<LazyFrame, RdfError> {
+        let sub = self.root.join(rel);
         LazyFrame::scan_parquet(
-            PlPath::from_str(&self.path(rel)),
+            sub.pl_path().clone(),
             ScanArgsParquet {
-                cloud_options: self.cloud_opts.clone(),
+                cloud_options: sub.cloud_options().cloned(),
                 ..Default::default()
             },
         )
         .map_err(polars_write_err)
-    }
-
-    fn is_cloud(&self) -> bool {
-        ["s3://", "gs://", "az://", "abfss://"]
-            .iter()
-            .any(|s| self.base.starts_with(s))
     }
 }
 
@@ -94,13 +87,9 @@ fn xsd_to_datatype_name(xsd: Option<&str>) -> &'static str {
 pub fn materialize(
     frame: &LazyFrame,
     configs: &[OutputConfig],
-    base_path: &str,
-    cloud_opts: Option<CloudOptions>,
+    resolved: &ResolvedPath,
 ) -> Result<DataManifest, FossilError> {
-    let store = GraphStore {
-        base: base_path.to_string(),
-        cloud_opts,
-    };
+    let store = GraphStore { root: resolved.clone() };
     let mut types = Vec::new();
     let mut edges = Vec::new();
 
@@ -208,7 +197,7 @@ pub fn materialize(
         }
     }
 
-    // Write YAML metadata
+    // Write YAML metadata (local only)
     write_yaml_metadata(&store, &types, &edges)?;
 
     Ok(DataManifest { types, edges })
@@ -331,7 +320,7 @@ fn write_yaml_metadata(
     edges: &[EdgeManifest],
 ) -> Result<(), FossilError> {
     // For cloud storage, YAML writing is skipped (metadata lives in the manifest JSON).
-    if store.is_cloud() {
+    if store.root.pl_path().is_cloud_url() {
         return Ok(());
     }
 
@@ -357,7 +346,7 @@ fn write_yaml_metadata(
             .collect::<Vec<_>>()
             .join("\n"),
     );
-    std::fs::write(store.path("graph.yml"), graph_yml)
+    std::fs::write(store.root.join("graph.yml").to_str(), graph_yml)
         .map_err(|e| RdfError::Write(e.to_string()))?;
 
     // Vertex YMLs
@@ -378,8 +367,11 @@ fn write_yaml_metadata(
             "type: {}\nchunk_size: 262144\nprefix: vertex/{}/\nproperty_groups:\n  - file_type: parquet\n    properties:\n{}\n{}\nversion: gar/v1\n",
             t.name, t.name, subject_prop, props.join("\n")
         );
-        std::fs::write(store.path(&format!("{}.vertex.yml", t.name)), yml)
-            .map_err(|e| RdfError::Write(e.to_string()))?;
+        std::fs::write(
+            store.root.join(&format!("{}.vertex.yml", t.name)).to_str(),
+            yml,
+        )
+        .map_err(|e| RdfError::Write(e.to_string()))?;
     }
 
     // Edge YMLs
@@ -390,10 +382,10 @@ fn write_yaml_metadata(
             e.source_type, e.name, e.target_type,
         );
         std::fs::write(
-            store.path(&format!(
+            store.root.join(&format!(
                 "{}_{}_{}.edge.yml",
                 e.source_type, e.name, e.target_type
-            )),
+            )).to_str(),
             yml,
         )
         .map_err(|e2| RdfError::Write(e2.to_string()))?;
