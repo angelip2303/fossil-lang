@@ -1,12 +1,12 @@
 //! GraphAr-compatible property graph materializer.
 //!
-//! Two-engine architecture with local materialization points:
-//!   Polars  — streaming sink, stats aggregation, local staging, cloud upload
-//!   DuckDB  — join IRI→ID + CSR/CSC sort (disk-spilling), writes edges to cloud
+//! Two-engine architecture: cloud I/O at the edges, pure local compute in the center.
 //!
-//! Source data is read ONCE per vertex type (Polars sink → local temp).
-//! All subsequent operations (stats, upload, join) read from local.
-//! Equivalent to Spark's `persist(DISK_ONLY)`.
+//!   Polars  — all cloud I/O (read source, upload vertices + edges), stats
+//!   DuckDB  — pure local compute: join IRI→ID + CSR/CSC sort (disk-spilling)
+//!   /tmp    — materialization points (Spark `persist(DISK_ONLY)` equivalent)
+//!
+//! DuckDB never touches cloud storage. No azure extension, no credentials.
 //!
 //! Output layout (GraphAr gar/v1):
 //! ```text
@@ -56,77 +56,19 @@ fn polars_write_err(e: PolarsError) -> RdfError {
     RdfError::Write(e.to_string())
 }
 
-/// Convert a `Path` to a UTF-8 string, returning an error on non-UTF-8 paths.
 fn path_to_str(path: &Path) -> Result<&str, RdfError> {
     path.to_str()
         .ok_or_else(|| RdfError::Write(format!("non-UTF-8 path: {}", path.display())))
 }
 
 fn scan_local(path: &Path) -> Result<LazyFrame, RdfError> {
-    LazyFrame::scan_parquet(
-        PlPath::from_str(path_to_str(path)?),
-        ScanArgsParquet::default(),
-    )
-    .map_err(polars_write_err)
+    LazyFrame::scan_parquet(PlPath::from_str(path_to_str(path)?), ScanArgsParquet::default())
+        .map_err(polars_write_err)
 }
 
-// ── DuckDB cloud credentials ──
+// ── I/O ──
 
-fn configure_duckdb_cloud(
-    conn: &duckdb::Connection,
-    resolved: &ResolvedPath,
-) -> Result<(), FossilError> {
-    let config = resolved.cloud_config();
-    if config.is_empty() {
-        return Ok(());
-    }
-    // Case-insensitive lookup without allocating a lowercase copy of the map.
-    let get = |key: &str| -> Option<&str> {
-        config
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(key))
-            .map(|(_, v)| v.as_str())
-    };
-
-    if let Some(account_name) = get("azure_storage_account_name") {
-        conn.execute_batch("INSTALL azure; LOAD azure;")
-            .map_err(RdfError::from)?;
-
-        if let (Some(tenant), Some(client_id), Some(secret)) = (
-            get("azure_storage_tenant_id"),
-            get("azure_storage_client_id"),
-            get("azure_storage_client_secret"),
-        ) {
-            conn.execute(
-                "CREATE TEMPORARY SECRET __azure (
-                    TYPE AZURE, PROVIDER service_principal,
-                    ACCOUNT_NAME ?, TENANT_ID ?, CLIENT_ID ?, CLIENT_SECRET ?
-                )",
-                duckdb::params![account_name, tenant, client_id, secret],
-            )
-            .map_err(RdfError::from)?;
-        } else if let Some(key) = get("azure_storage_account_key") {
-            let cs = format!("AccountName={account_name};AccountKey={key};EndpointSuffix=core.windows.net");
-            conn.execute(
-                "CREATE TEMPORARY SECRET __azure (TYPE AZURE, CONNECTION_STRING ?)",
-                [&cs],
-            )
-            .map_err(RdfError::from)?;
-        } else if let Some(sas) = get("azure_storage_sas_token") {
-            let cs = format!("AccountName={account_name};SharedAccessSignature={sas};EndpointSuffix=core.windows.net");
-            conn.execute(
-                "CREATE TEMPORARY SECRET __azure (TYPE AZURE, CONNECTION_STRING ?)",
-                [&cs],
-            )
-            .map_err(RdfError::from)?;
-        }
-    }
-    Ok(())
-}
-
-// ── I/O adapters ──
-
-/// Polars-based cloud I/O. Credentials inherited from [`ResolvedPath`].
+/// Polars cloud I/O. Credentials inherited from [`ResolvedPath`].
 struct GraphStore {
     root: ResolvedPath,
 }
@@ -144,10 +86,6 @@ impl GraphStore {
         .collect()
         .map_err(polars_write_err)?;
         Ok(())
-    }
-
-    fn abs_path(&self, rel: &str) -> String {
-        self.root.join(rel).to_str().to_string()
     }
 }
 
@@ -168,10 +106,14 @@ fn sink_local(lf: LazyFrame, path: &Path) -> Result<(), FossilError> {
     Ok(())
 }
 
-/// Monotonic counter for unique temp file names (avoids nanosecond collisions).
+/// Upload a local parquet to the cloud destination via Polars streaming.
+fn upload(store: &GraphStore, local: &Path, rel: &str) -> Result<(), FossilError> {
+    let lf = scan_local(local)?;
+    store.sink(lf, rel)
+}
+
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Generate a unique local temp path for a given edge/vertex dir.
 fn local_temp(prefix: &str, name: &str) -> PathBuf {
     let id = std::process::id();
     let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -181,9 +123,15 @@ fn local_temp(prefix: &str, name: &str) -> PathBuf {
     ))
 }
 
-/// RAII guard that removes temp files on drop, ensuring cleanup even on early return.
 struct TempGuard {
     paths: Vec<PathBuf>,
+}
+
+impl TempGuard {
+    fn track(&mut self, path: PathBuf) -> PathBuf {
+        self.paths.push(path.clone());
+        path
+    }
 }
 
 impl Drop for TempGuard {
@@ -203,15 +151,14 @@ pub fn materialize(
 ) -> Result<DataManifest, FossilError> {
     let store = GraphStore { root: resolved.clone() };
     let conn = duckdb::Connection::open_in_memory().map_err(RdfError::from)?;
-    configure_duckdb_cloud(&conn, resolved)?;
 
     let mut types = Vec::new();
     let mut edges = Vec::new();
-    // Maps type_dir -> local path for DuckDB join (vertex materialization points).
     let mut local_vertices: HashMap<String, PathBuf> = HashMap::new();
-    let mut temp_guard = TempGuard { paths: Vec::new() };
+    let mut temps = TempGuard { paths: Vec::new() };
 
-    // Build lazy vertex plans.
+    let is_cloud = resolved.pl_path().is_cloud_url();
+
     let vertices: Vec<_> = configs
         .iter()
         .map(|config| {
@@ -224,38 +171,30 @@ pub fn materialize(
         })
         .collect();
 
-    // ── Pass 1: source -> local materialization -> stats + upload ──
-    let is_cloud = resolved.pl_path().is_cloud_url();
-
+    // ── Pass 1: source → local vertex → stats + upload ──
     for (config, vertex) in &vertices {
         let vertex_rel = format!("vertex/{}.parquet", config.type_dir);
 
-        // Both cloud and local paths need a local file for DuckDB joins later.
-        // Cloud: stage locally first, then upload.
-        // Local: sink to destination directly; it already *is* the local file.
         let local_path = if is_cloud {
-            let local = local_temp("vtx", &config.type_dir);
+            let local = temps.track(local_temp("vtx", &config.type_dir));
             sink_local(vertex.clone(), &local)?;
-            let upload_lf = scan_local(&local)?;
-            store.sink(upload_lf, &vertex_rel)?;
-            temp_guard.paths.push(local.clone());
+            upload(&store, &local, &vertex_rel)?;
             local
         } else {
             store.sink(vertex.clone(), &vertex_rel)?;
-            PathBuf::from(store.abs_path(&vertex_rel))
+            PathBuf::from(resolved.join(&vertex_rel).to_str().to_string())
         };
 
-        let written = scan_local(&local_path)?;
-        let manifest = compute_type_manifest(config, &vertex_rel, &written)?;
+        let manifest = compute_type_manifest(config, &vertex_rel, &scan_local(&local_path)?)?;
         types.push(manifest);
         local_vertices.insert(config.type_dir.clone(), local_path);
     }
 
-    // ── Pass 2: edges via local staging + DuckDB join/sort -> cloud ──
+    // ── Pass 2: source → local staging → DuckDB local join/sort → local edges → upload ──
     for (config, _) in &vertices {
         let src_local = local_vertices
             .get(&config.type_dir)
-            .ok_or_else(|| RdfError::Write(format!("missing local vertex: {}", config.type_dir)))?;
+            .ok_or_else(|| RdfError::Write(format!("missing vertex: {}", config.type_dir)))?;
 
         for ref_edge in &config.ref_edges {
             let edge_dir = format!(
@@ -264,11 +203,13 @@ pub fn materialize(
             );
             let tgt_local = local_vertices
                 .get(&ref_edge.target_type_dir)
-                .ok_or_else(|| RdfError::Write(format!("missing local vertex: {}", ref_edge.target_type_dir)))?;
+                .ok_or_else(|| {
+                    RdfError::Write(format!("missing vertex: {}", ref_edge.target_type_dir))
+                })?;
 
-            let (csr_rel, csc_rel, count) = produce_edges(
-                &store,
+            let edge_locals = produce_edges_local(
                 &conn,
+                &mut temps,
                 frame,
                 config.subject_expr.clone(),
                 ref_edge.expr.clone(),
@@ -277,25 +218,45 @@ pub fn materialize(
                 &edge_dir,
             )?;
 
+            // Upload local edge files → cloud (Polars streaming)
+            if is_cloud {
+                upload(&store, &edge_locals.csr, &edge_locals.csr_rel)?;
+                upload(&store, &edge_locals.csc, &edge_locals.csc_rel)?;
+                upload(&store, &edge_locals.csr_offsets, &edge_locals.csr_offsets_rel)?;
+                upload(&store, &edge_locals.csc_offsets, &edge_locals.csc_offsets_rel)?;
+            } else {
+                // Local: DuckDB already wrote to the correct location
+            }
+
             edges.push(EdgeManifest {
                 name: ref_edge.label.clone(),
                 iri: ref_edge.predicate_uri.clone(),
                 source_type: config.type_dir.clone(),
                 target_type: ref_edge.target_type_dir.clone(),
-                by_source: csr_rel,
-                by_target: csc_rel,
-                count,
+                by_source: edge_locals.csr_rel,
+                by_target: edge_locals.csc_rel,
+                count: edge_locals.count,
             });
         }
     }
 
-    // YAML is written while temp files still exist (temp_guard drops after return).
     write_yaml_metadata(&store, &types, &edges)?;
-    // temp_guard drops here, cleaning up all cloud temp files.
     Ok(DataManifest { types, edges })
 }
 
-// ── Edge production ──
+// ── Edge production (DuckDB pure local) ──
+
+struct EdgeOutput {
+    csr: PathBuf,
+    csc: PathBuf,
+    csr_offsets: PathBuf,
+    csc_offsets: PathBuf,
+    csr_rel: String,
+    csc_rel: String,
+    csr_offsets_rel: String,
+    csc_offsets_rel: String,
+    count: u64,
+}
 
 fn write_sorted_edges(
     conn: &duckdb::Connection,
@@ -322,19 +283,19 @@ fn write_sorted_edges(
     Ok(())
 }
 
-/// DuckDB join + CSR/CSC sort. Reads LOCAL files, writes edges to cloud.
-fn produce_edges(
-    store: &GraphStore,
+/// DuckDB join + CSR/CSC sort. ALL reads and writes are LOCAL.
+fn produce_edges_local(
     conn: &duckdb::Connection,
+    temps: &mut TempGuard,
     frame: &LazyFrame,
     src_iri_expr: Expr,
     tgt_iri_expr: Expr,
     src_vertex_local: &Path,
     tgt_vertex_local: &Path,
     edge_dir: &str,
-) -> Result<(String, String, u64), FossilError> {
-    // 1. Polars: source → local staging (1 source read, streaming)
-    let staging = local_temp("stg", edge_dir);
+) -> Result<EdgeOutput, FossilError> {
+    // 1. Polars: source → local staging
+    let staging = temps.track(local_temp("stg", edge_dir));
     let raw = frame
         .clone()
         .select([
@@ -344,11 +305,11 @@ fn produce_edges(
         .filter(col("src_iri").is_not_null().and(col("tgt_iri").is_not_null()));
     sink_local(raw, &staging)?;
 
+    // 2. DuckDB: join LOCAL files → temp table
     let stg = path_to_str(&staging)?;
     let src = path_to_str(src_vertex_local)?;
     let tgt = path_to_str(tgt_vertex_local)?;
 
-    // 2. DuckDB: join LOCAL files → temp table (0 cloud reads)
     conn.execute_batch(&format!(
         "CREATE OR REPLACE TEMP TABLE __edges AS
             SELECT s._id AS source, t._id AS target
@@ -358,24 +319,14 @@ fn produce_edges(
     ))
     .map_err(RdfError::from)?;
 
-    // 3. CSR + CSC + offsets → cloud
-    let csr_rel = format!("edge/{edge_dir}/by_source.parquet");
-    let csc_rel = format!("edge/{edge_dir}/by_target.parquet");
+    // 3. CSR + CSC + offsets → LOCAL temp files
+    let csr = temps.track(local_temp("csr", edge_dir));
+    let csc = temps.track(local_temp("csc", edge_dir));
+    let csr_off = temps.track(local_temp("csr_off", edge_dir));
+    let csc_off = temps.track(local_temp("csc_off", edge_dir));
 
-    write_sorted_edges(
-        conn,
-        "source",
-        "target",
-        &store.abs_path(&csr_rel),
-        &store.abs_path(&format!("edge/{edge_dir}/by_source_offsets.parquet")),
-    )?;
-    write_sorted_edges(
-        conn,
-        "target",
-        "source",
-        &store.abs_path(&csc_rel),
-        &store.abs_path(&format!("edge/{edge_dir}/by_target_offsets.parquet")),
-    )?;
+    write_sorted_edges(conn, "source", "target", path_to_str(&csr)?, path_to_str(&csr_off)?)?;
+    write_sorted_edges(conn, "target", "source", path_to_str(&csc)?, path_to_str(&csc_off)?)?;
 
     let count: u64 = conn
         .query_row("SELECT count(*) FROM __edges", [], |row| row.get(0))
@@ -383,9 +334,18 @@ fn produce_edges(
 
     conn.execute_batch("DROP TABLE IF EXISTS __edges")
         .map_err(RdfError::from)?;
-    let _ = std::fs::remove_file(&staging);
 
-    Ok((csr_rel, csc_rel, count))
+    Ok(EdgeOutput {
+        csr,
+        csc,
+        csr_offsets: csr_off,
+        csc_offsets: csc_off,
+        csr_rel: format!("edge/{edge_dir}/by_source.parquet"),
+        csc_rel: format!("edge/{edge_dir}/by_target.parquet"),
+        csr_offsets_rel: format!("edge/{edge_dir}/by_source_offsets.parquet"),
+        csc_offsets_rel: format!("edge/{edge_dir}/by_target_offsets.parquet"),
+        count,
+    })
 }
 
 // ── Stats (Polars streaming aggregation) ──
