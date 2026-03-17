@@ -165,30 +165,43 @@ pub fn materialize(
     for config in configs {
         let vertex_rel = format!("vertex/{}.parquet", config.type_dir);
 
-        // Select vertex columns + _id from the local full file (no cloud read)
-        let mut vertex_exprs = config.selection.clone();
-        vertex_exprs.push(col("_id"));
-        let vertex_lf = scan_local(&full_local)?
-            .select(vertex_exprs)
+        // 1. Polars: select vertex columns from local full (streaming, no dedup yet)
+        let raw_vertex_lf = scan_local(&full_local)?
+            .select(config.selection.clone())
             .rename(["_subject"], ["subject"], true);
 
+        // 2. Sink raw vertex to local temp (streaming, may have duplicate subjects)
+        let raw_vtx = temps.track(local_temp("raw_vtx", &config.type_dir));
+        sink_local(raw_vertex_lf, &raw_vtx)?;
+
+        // 3. DuckDB: deduplicate by subject + assign sequential _id (disk-spilling)
+        //    Multiple source rows can map to the same subject (e.g., many players
+        //    from the same city). Without dedup, the edge join cross-products explode.
+        let deduped_vtx = temps.track(local_temp("vtx", &config.type_dir));
+        let raw_str = path_to_str(&raw_vtx)?;
+        let deduped_str = path_to_str(&deduped_vtx)?;
+        conn.execute_batch(&format!(
+            "COPY (
+                SELECT row_number() OVER () - 1 AS _id, *
+                FROM (SELECT DISTINCT ON (subject) * FROM read_parquet('{raw_str}'))
+            ) TO '{deduped_str}' (FORMAT PARQUET, ROW_GROUP_SIZE {VERTEX_CHUNK_SIZE})"
+        ))
+        .map_err(RdfError::from)?;
+
+        let vertex_lf = scan_local(&deduped_vtx)?;
+
+        // Stats from the deduped local vertex (fast local scan)
+        let manifest = compute_type_manifest(config, &vertex_rel, &vertex_lf)?;
+        types.push(manifest);
+
+        // Upload deduped vertex to destination
         if is_cloud {
-            let vtx_local = temps.track(local_temp("vtx", &config.type_dir));
-            sink_local(vertex_lf, &vtx_local)?;
-
-            let manifest = compute_type_manifest(config, &vertex_rel, &scan_local(&vtx_local)?)?;
-            types.push(manifest);
-
-            upload(&store, &vtx_local, &vertex_rel)?;
-            local_vertices.insert(config.type_dir.clone(), vtx_local);
+            upload(&store, &deduped_vtx, &vertex_rel)?;
         } else {
-            store.sink(vertex_lf.clone(), &vertex_rel)?;
-            let dest = PathBuf::from(resolved.join(&vertex_rel).to_str().to_string());
-
-            let manifest = compute_type_manifest(config, &vertex_rel, &scan_local(&dest)?)?;
-            types.push(manifest);
-            local_vertices.insert(config.type_dir.clone(), dest);
+            store.sink(scan_local(&deduped_vtx)?, &vertex_rel)?;
         }
+
+        local_vertices.insert(config.type_dir.clone(), deduped_vtx);
     }
 
     // ── Phase 2: local → edge staging + DuckDB join/sort + upload ──
