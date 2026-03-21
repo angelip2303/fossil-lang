@@ -4,43 +4,56 @@
     player_id: int,
 
     #[clean(trim)]
+    #[clean(to_null = "")]
     first_name: string?,
 
     #[clean(trim)]
     last_name: string,
 
-    #[clean(to_null = "Missing")]
-    position: string?,
+    #[clean(to_null = "")]
+    country_of_birth: string?,
+
+    #[clean(to_null = "")]
+    city_of_birth: string?,
+
+    #[clean(to_null = "")]
+    country_of_citizenship: string?,
+
+    #[clean(to_null = "")]
+    date_of_birth: string?,
 
     #[clean(to_null = "Missing")]
+    #[clean(to_null = "")]
     sub_position: string?,
+
+    #[clean(to_null = "Missing")]
+    #[clean(to_null = "")]
+    position: string?,
+
+    #[clean(to_null = "")]
+    foot: string?,
 
     #[clean(min = 159)]
     height_in_cm: int?,
 
-    #[clean(trim)]
-    #[clean(replace = "UdSSR", with = "USSR")]
-    #[clean(replace = "CSSR", with = "Czechoslovakia")]
-    #[clean(replace = "Jugoslawien \\(SFR\\)", with = "Yugoslavia")]
-    country_of_citizenship: string,
+    #[clean(to_null = "")]
+    contract_expiration_date: string?,
 
     #[clean(trim)]
-    city_of_birth: string?,
-
-    foot: string?,
-    date_of_birth: string?,
-    image_url: string?,
-    url: string?,
-
-    #[clean(trim)]
+    #[clean(to_null = "")]
     agent_name: string?,
 
+    #[clean(to_null = "")]
+    image_url: string?,
+
+    url: string?,
     current_club_id: int?,
     current_club_name: string?,
     current_club_domestic_competition_id: string?,
+
     market_value_in_eur: int?,
+
     highest_market_value_in_eur: int?,
-    contract_expiration_date: string?
   end
 
   let clean = CleanData.clean(data)
@@ -69,7 +82,7 @@
     #[rdf(uri = "http://schema.org/birthPlace")]
     birthPlace: City?,
     #[rdf(uri = "http://schema.org/nationality")]
-    nationality: Country,
+    nationality: Country?,
     #[rdf(uri = "http://schema.org/hasOccupation")]
     hasOccupation: Role,
     #[rdf(uri = "http://schema.org/netWorth")]
@@ -86,7 +99,7 @@
     #[rdf(uri = "http://schema.org/name")]
     name: string,
     #[rdf(uri = "http://schema.org/containedInPlace")]
-    containedInPlace: Country
+    containedInPlace: Country?
   end
 
   #[rdf(subject = "http://example.org/country/{id|slug}")]

@@ -1,6 +1,9 @@
 pub mod metadata;
 pub mod parquet_writer;
 
+// Re-export generic materializer types for external callers (e.g. keasy catalog).
+pub use parquet_writer::{EdgeSpec, VertexSpec, materialize_frames};
+
 use std::collections::HashMap;
 
 use fossil_lang::common::PrimitiveType;
@@ -13,7 +16,7 @@ use fossil_lang::runtime::value::{Emission, Value};
 use fossil_lang::traits::function::{FunctionEffect, FunctionImpl, RuntimeContext};
 
 use crate::string::template::parse_template;
-use metadata::{RdfFieldAttrs, RdfTypeAttrs, build_xsd_type_map, field_primitive_type};
+use metadata::{RdfFieldAttrs, RdfTypeAttrs, field_primitive_type};
 
 use polars::prelude::*;
 use thiserror::Error;
@@ -67,8 +70,6 @@ pub struct OutputConfig {
     pub subject_expr: Expr,
     /// Short label → full predicate IRI for scalar columns.
     pub label_to_iri: HashMap<String, String>,
-    /// Predicate URI → XSD datatype IRI for typed literals.
-    pub xsd_types: HashMap<String, &'static str>,
     /// Reference edges from this type to other types.
     pub ref_edges: Vec<RefEdge>,
     /// Directory name for this type (e.g., `"wall"`).
@@ -281,8 +282,6 @@ fn build_output_configs(emission: &Emission, ctx: &RuntimeContext) -> Vec<Output
                 }
             }
 
-            let xsd_types = build_xsd_type_map(def_id, &field_uris, ctx.gcx);
-
             // Derive type directory and IRI
             let type_name = interner.resolve(ctx.gcx.definitions.get(def_id).name);
             let type_dir = type_name.to_lowercase();
@@ -295,7 +294,6 @@ fn build_output_configs(emission: &Emission, ctx: &RuntimeContext) -> Vec<Output
                 selection,
                 subject_expr,
                 label_to_iri,
-                xsd_types,
                 ref_edges,
                 type_dir,
                 type_iri,
