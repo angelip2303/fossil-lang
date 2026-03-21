@@ -39,35 +39,6 @@ impl RdfTypeAttrs {
     }
 }
 
-/// Build a map of predicate URI → XSD datatype IRI from a type's registered fields.
-///
-/// Returns `&'static str` values since XSD IRIs are compile-time constants.
-pub fn build_xsd_type_map(
-    def_id: DefId,
-    field_uris: &HashMap<Symbol, String>,
-    gcx: &GlobalContext,
-) -> HashMap<String, &'static str> {
-    let Some(registered) = gcx.registered_types.get(&def_id) else {
-        return HashMap::new();
-    };
-
-    let field_types: HashMap<Symbol, PrimitiveType> = registered
-        .iter()
-        .map(|(sym, ft)| (*sym, match ft {
-            BuiltInFieldType::Required(p) | BuiltInFieldType::Optional(p) => *p,
-        }))
-        .collect();
-
-    field_uris
-        .iter()
-        .filter_map(|(sym, uri)| {
-            let prim = field_types.get(sym)?;
-            let xsd = primitive_to_xsd(*prim)?;
-            Some((uri.clone(), xsd))
-        })
-        .collect()
-}
-
 /// Get the primitive type for a field from the registered types.
 pub fn field_primitive_type(
     def_id: DefId,
