@@ -27,11 +27,10 @@ pub struct FieldStats {
 }
 
 impl DatasetMeta {
-    pub(crate) fn load(base: &str) -> Result<Self, RdfGraphError> {
-        Self::load_with_args(base, &ScanArgsParquet::default())
-    }
-
-    pub(crate) fn load_with_args(base: &str, args: &ScanArgsParquet) -> Result<Self, RdfGraphError> {
+    pub(crate) fn load_with_args(
+        base: &str,
+        args: &ScanArgsParquet,
+    ) -> Result<Self, RdfGraphError> {
         let meta_path = format!("{base}/_meta.parquet");
         let types_path = format!("{base}/_types.parquet");
 

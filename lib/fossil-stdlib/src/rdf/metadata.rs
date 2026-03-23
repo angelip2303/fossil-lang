@@ -1,8 +1,6 @@
-use std::collections::HashMap;
-
 use fossil_lang::common::PrimitiveType;
-use fossil_lang::context::{DefId, Symbol};
 use fossil_lang::context::global::BuiltInFieldType;
+use fossil_lang::context::{DefId, Symbol};
 use fossil_lang::passes::GlobalContext;
 use fossil_macros::FromAttrs;
 
@@ -45,7 +43,8 @@ pub fn field_primitive_type(
     field: Symbol,
     gcx: &GlobalContext,
 ) -> Option<PrimitiveType> {
-    gcx.registered_types.get(&def_id)?
+    gcx.registered_types
+        .get(&def_id)?
         .iter()
         .find(|(sym, _)| *sym == field)
         .map(|(_, ft)| match ft {
