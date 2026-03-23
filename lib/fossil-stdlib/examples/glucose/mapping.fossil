@@ -1,0 +1,82 @@
+  let glucose_data = csv!("glucose_readings.csv")
+
+  # ── Tipo con limpieza + anonimización ──
+
+  type GlucoseReading(patient_id, name, age, glucose_mg_dl, diagnosis, hospital, date) do
+    #[clean(trim)]
+    #[anon(hash)]
+    patient_id: string,
+
+    #[clean(trim)]
+    #[anon(mask)]
+    name: string,
+
+    #[clean(min = 0, max = 120)]
+    #[anon(generalize, bin = 10)]
+    age: int,
+
+    #[clean(min = 20, max = 600)]
+    #[anon(shuffle)]
+    glucose_mg_dl: float,
+
+    #[clean(trim)]
+    #[anon(suppress, k = 3)]
+    diagnosis: string,
+
+    #[clean(trim)]
+    #[anon(suppress, k = 2)]
+    hospital: string,
+
+    #[clean(trim)]
+    #[anon(generalize, truncate = "month")]
+    date: string,
+  end
+
+  # ── Pipeline: clean → anonymize ──
+
+  let anonymized = glucose_data
+    |> GlucoseReading.clean()
+    |> GlucoseReading.anonymize()
+
+  # ── Mapeo a RDF (FHIR) y materialización ──
+
+  #[rdf(subject = "http://example.org/observation/{id}")]
+  #[rdf(type = "http://hl7.org/fhir/Observation")]
+  type Observation(id: string) do
+    #[rdf(uri = "http://hl7.org/fhir/subject")]
+    subject: Patient,
+    #[rdf(uri = "http://hl7.org/fhir/valueQuantity")]
+    value: float,
+    #[rdf(uri = "http://hl7.org/fhir/code")]
+    code: string,
+    #[rdf(uri = "http://hl7.org/fhir/effectiveDateTime")]
+    date: string,
+    #[rdf(uri = "http://hl7.org/fhir/performer")]
+    performer: string?,
+  end
+
+  #[rdf(subject = "http://example.org/patient/{id}")]
+  #[rdf(type = "http://hl7.org/fhir/Patient")]
+  type Patient(id: string) do
+    #[rdf(uri = "http://www.w3.org/2000/01/rdf-schema#label")]
+    label: string,
+    #[rdf(uri = "http://hl7.org/fhir/age")]
+    age: int,
+    #[rdf(uri = "http://hl7.org/fhir/condition")]
+    condition: string?,
+  end
+
+  anonymized
+  |> each row -> Observation(row.patient_id) {
+    subject = ref Patient(row.patient_id),
+    value = row.glucose_mg_dl,
+    code = "glucose",
+    date = row.date,
+    performer = row.hospital
+  }
+  +> each row -> Patient(row.patient_id) {
+    label = row.name,
+    age = row.age,
+    condition = row.diagnosis
+  }
+  |> Rdf.materialize("glucose-observations")

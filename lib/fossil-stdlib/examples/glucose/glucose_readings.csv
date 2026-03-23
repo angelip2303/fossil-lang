@@ -1,0 +1,9 @@
+patient_id,name,age,glucose_mg_dl,diagnosis,hospital,date
+PAT-001,María García,45,126.5,Prediabetes,Hospital Central,2024-03-15
+PAT-002,Juan López,67,210.3,Diabetes Tipo 2,Clínica Norte,2024-03-15
+PAT-003,Ana Martínez,34,95.0,Normal,Hospital Central,2024-03-16
+PAT-004,Carlos Ruiz,52,185.7,Diabetes Tipo 2,Hospital Central,2024-03-16
+PAT-005,Elena Díaz,28,88.2,Normal,Clínica Sur,2024-03-17
+PAT-006,Pedro Sánchez,71,250.1,Diabetes Tipo 2,Clínica Norte,2024-03-17
+PAT-007,Laura Torres,43,132.0,Prediabetes,Hospital Central,2024-03-18
+PAT-008,Miguel Flores,55,198.4,Diabetes Tipo 2,Clínica Norte,2024-03-18

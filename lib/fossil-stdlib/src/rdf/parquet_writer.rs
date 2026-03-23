@@ -29,6 +29,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use polars::prelude::sync_on_close::SyncOnCloseType;
 use polars::prelude::*;
 
+use serde::Serialize;
+
 use fossil_lang::error::FossilError;
 use fossil_lang::runtime::executor::{ColumnStat, DataManifest, EdgeManifest, TypeManifest};
 use fossil_lang::traits::resolver::ResolvedPath;
@@ -91,6 +93,11 @@ fn polars_write_err(e: PolarsError) -> RdfError {
 fn path_to_str(path: &Path) -> Result<&str, RdfError> {
     path.to_str()
         .ok_or_else(|| RdfError::Write(format!("non-UTF-8 path: {}", path.display())))
+}
+
+/// Escape single quotes for safe interpolation into DuckDB SQL strings.
+fn escape_sql_str(s: &str) -> String {
+    s.replace('\'', "''")
 }
 
 fn scan_local(path: &Path) -> Result<LazyFrame, RdfError> {
@@ -354,7 +361,7 @@ pub fn materialize(
     resolved: &ResolvedPath,
 ) -> Result<DataManifest, FossilError> {
     let store = GraphStore { root: resolved.clone() };
-    let conn = duckdb::Connection::open_in_memory().map_err(RdfError::from)?;
+    let engine = DuckDbEngine::open()?;
 
     let mut types = Vec::new();
     let mut edges = Vec::new();
@@ -369,7 +376,7 @@ pub fn materialize(
     for config in configs {
         let vertex_rel = format!("vertex/{}.parquet", config.type_dir);
 
-        // Polars: select vertex columns from local full (streaming)
+        // Polars: select vertex columns from local full
         let raw_vertex_lf = scan_local(&full_local)?
             .select(config.selection.clone())
             .rename(["_subject"], ["subject"], true);
@@ -378,17 +385,9 @@ pub fn materialize(
         let raw_vtx = temps.track(local_temp("raw_vtx", &config.type_dir));
         sink_local(raw_vertex_lf, &raw_vtx)?;
 
-        // DuckDB: deduplicate by subject + assign sequential _id
+        // Deduplicate by subject + assign sequential _id
         let deduped_vtx = temps.track(local_temp("vtx", &config.type_dir));
-        let raw_str = path_to_str(&raw_vtx)?;
-        let deduped_str = path_to_str(&deduped_vtx)?;
-        conn.execute_batch(&format!(
-            "COPY (
-                SELECT row_number() OVER () - 1 AS _id, *
-                FROM (SELECT DISTINCT ON (subject) * FROM read_parquet('{raw_str}'))
-            ) TO '{deduped_str}' (FORMAT PARQUET, ROW_GROUP_SIZE {VERTEX_CHUNK_SIZE})"
-        ))
-        .map_err(RdfError::from)?;
+        engine.dedup_by_subject(&raw_vtx, &deduped_vtx, &config.type_dir)?;
 
         // Stats from deduped vertex (shared function)
         let vertex_lf = scan_local(&deduped_vtx)?;
@@ -430,9 +429,9 @@ pub fn materialize(
                 .filter(col("src_iri").is_not_null().and(col("tgt_iri").is_not_null()));
             sink_local(staging_lf, &staging)?;
 
-            // DuckDB: join + sort
-            let edge_out = produce_edges_local(
-                &conn, &mut temps, &staging, src_local, tgt_local, &edge_dir,
+            // Join + sort via engine
+            let edge_out = engine.produce_edges(
+                &mut temps, &staging, src_local, tgt_local, &edge_dir,
             )?;
 
             if edge_out.count > 0 {
@@ -456,7 +455,7 @@ pub fn materialize(
     Ok(DataManifest { types, edges })
 }
 
-// ── DuckDB edge production (Fossil-specific) ────────────────────────────
+// ── Graph engine abstraction ─────────────────────────────────────────────
 
 struct EdgeOutput {
     csr: PathBuf,
@@ -466,60 +465,181 @@ struct EdgeOutput {
     count: u64,
 }
 
-fn produce_edges_local(
-    conn: &duckdb::Connection,
-    temps: &mut TempGuard,
-    staging_local: &Path,
-    src_vertex_local: &Path,
-    tgt_vertex_local: &Path,
-    edge_dir: &str,
-) -> Result<EdgeOutput, FossilError> {
-    let stg = path_to_str(staging_local)?;
-    let src = path_to_str(src_vertex_local)?;
-    let tgt = path_to_str(tgt_vertex_local)?;
+/// Abstraction over the deduplication and edge-join engine.
+///
+/// The default implementation uses DuckDB, but this trait allows swapping
+/// to a different engine (e.g. pure Polars) for testing or licensing reasons.
+trait GraphEngine {
+    /// Deduplicate rows by `subject`, assign sequential `_id`, write to `output`.
+    fn dedup_by_subject(
+        &self,
+        input: &Path,
+        output: &Path,
+        type_dir: &str,
+    ) -> Result<(), FossilError>;
 
-    conn.execute_batch(&format!(
-        "CREATE OR REPLACE TEMP TABLE __edges AS
-            SELECT s._id AS source, t._id AS target
-            FROM read_parquet('{stg}') e
-            JOIN read_parquet('{src}') s ON e.src_iri = s.subject
-            JOIN read_parquet('{tgt}') t ON e.tgt_iri = t.subject"
-    ))
-    .map_err(RdfError::from)?;
-
-    let csr = temps.track(local_temp("csr", edge_dir));
-    let csc = temps.track(local_temp("csc", edge_dir));
-
-    conn.execute_batch(&format!(
-        "COPY (SELECT source, target FROM __edges ORDER BY source, target)
-         TO '{}' (FORMAT PARQUET, ROW_GROUP_SIZE {VERTEX_CHUNK_SIZE})",
-        path_to_str(&csr)?
-    ))
-    .map_err(RdfError::from)?;
-    conn.execute_batch(&format!(
-        "COPY (SELECT source, target FROM __edges ORDER BY target, source)
-         TO '{}' (FORMAT PARQUET, ROW_GROUP_SIZE {VERTEX_CHUNK_SIZE})",
-        path_to_str(&csc)?
-    ))
-    .map_err(RdfError::from)?;
-
-    let count: u64 = conn
-        .query_row("SELECT count(*) FROM __edges", [], |row| row.get(0))
-        .map_err(RdfError::from)?;
-
-    conn.execute_batch("DROP TABLE IF EXISTS __edges")
-        .map_err(RdfError::from)?;
-
-    Ok(EdgeOutput {
-        csr,
-        csc,
-        csr_rel: format!("edge/{edge_dir}/by_source.parquet"),
-        csc_rel: format!("edge/{edge_dir}/by_target.parquet"),
-        count,
-    })
+    /// Join staging edges with source/target vertices and produce CSR + CSC parquets.
+    fn produce_edges(
+        &self,
+        temps: &mut TempGuard,
+        staging: &Path,
+        src_vertex: &Path,
+        tgt_vertex: &Path,
+        edge_dir: &str,
+    ) -> Result<EdgeOutput, FossilError>;
 }
 
-// ── YAML metadata ───────────────────────────────────────────────────────
+// ── DuckDB engine implementation ─────────────────────────────────────────
+
+struct DuckDbEngine {
+    conn: duckdb::Connection,
+}
+
+impl DuckDbEngine {
+    fn open() -> Result<Self, RdfError> {
+        let conn = duckdb::Connection::open_in_memory().map_err(RdfError::from)?;
+        Ok(Self { conn })
+    }
+}
+
+impl GraphEngine for DuckDbEngine {
+    fn dedup_by_subject(
+        &self,
+        input: &Path,
+        output: &Path,
+        type_dir: &str,
+    ) -> Result<(), FossilError> {
+        let raw_str = escape_sql_str(path_to_str(input)?);
+        let deduped_str = escape_sql_str(path_to_str(output)?);
+        self.conn.execute_batch(&format!(
+            "COPY (
+                SELECT row_number() OVER () - 1 AS _id, *
+                FROM (SELECT DISTINCT ON (subject) * FROM read_parquet('{raw_str}'))
+            ) TO '{deduped_str}' (FORMAT PARQUET, ROW_GROUP_SIZE {VERTEX_CHUNK_SIZE})"
+        ))
+        .map_err(|e| RdfError::VertexDedupFailed {
+            type_dir: type_dir.to_string(),
+            reason: e.to_string(),
+        })?;
+        Ok(())
+    }
+
+    fn produce_edges(
+        &self,
+        temps: &mut TempGuard,
+        staging: &Path,
+        src_vertex: &Path,
+        tgt_vertex: &Path,
+        edge_dir: &str,
+    ) -> Result<EdgeOutput, FossilError> {
+        let stg = escape_sql_str(path_to_str(staging)?);
+        let src = escape_sql_str(path_to_str(src_vertex)?);
+        let tgt = escape_sql_str(path_to_str(tgt_vertex)?);
+
+        let map_edge_err = |e: duckdb::Error| RdfError::EdgeJoinFailed {
+            edge: edge_dir.to_string(),
+            reason: e.to_string(),
+        };
+
+        self.conn.execute_batch(&format!(
+            "CREATE OR REPLACE TEMP TABLE __edges AS
+                SELECT s._id AS source, t._id AS target
+                FROM read_parquet('{stg}') e
+                JOIN read_parquet('{src}') s ON e.src_iri = s.subject
+                JOIN read_parquet('{tgt}') t ON e.tgt_iri = t.subject"
+        ))
+        .map_err(&map_edge_err)?;
+
+        let csr = temps.track(local_temp("csr", edge_dir));
+        let csc = temps.track(local_temp("csc", edge_dir));
+
+        for (path, order) in [(&csr, "source, target"), (&csc, "target, source")] {
+            self.conn.execute_batch(&format!(
+                "COPY (SELECT source, target FROM __edges ORDER BY {order})
+                 TO '{}' (FORMAT PARQUET, ROW_GROUP_SIZE {VERTEX_CHUNK_SIZE})",
+                escape_sql_str(path_to_str(path)?)
+            ))
+            .map_err(&map_edge_err)?;
+        }
+
+        let count: u64 = self.conn
+            .query_row("SELECT count(*) FROM __edges", [], |row| row.get(0))
+            .map_err(map_edge_err)?;
+
+        self.conn.execute_batch("DROP TABLE IF EXISTS __edges")
+            .map_err(RdfError::from)?;
+
+        Ok(EdgeOutput {
+            csr,
+            csc,
+            csr_rel: format!("edge/{edge_dir}/by_source.parquet"),
+            csc_rel: format!("edge/{edge_dir}/by_target.parquet"),
+            count,
+        })
+    }
+}
+
+// ── YAML metadata (serde_yml) ──────────────────────────────────────────
+
+#[derive(Serialize)]
+struct GraphYaml {
+    name: String,
+    prefix: String,
+    vertices: Vec<String>,
+    edges: Vec<String>,
+    version: String,
+}
+
+#[derive(Serialize)]
+struct PropertyYaml {
+    name: String,
+    data_type: String,
+    is_primary: bool,
+}
+
+#[derive(Serialize)]
+struct PropertyGroupYaml {
+    file_type: String,
+    properties: Vec<PropertyYaml>,
+}
+
+#[derive(Serialize)]
+struct VertexYaml {
+    r#type: String,
+    chunk_size: usize,
+    prefix: String,
+    property_groups: Vec<PropertyGroupYaml>,
+    version: String,
+}
+
+#[derive(Serialize)]
+struct AdjListYaml {
+    ordered: bool,
+    aligned_by: String,
+    file_type: String,
+}
+
+#[derive(Serialize)]
+struct EdgeYaml {
+    src_type: String,
+    edge_type: String,
+    dst_type: String,
+    chunk_size: usize,
+    src_chunk_size: usize,
+    dst_chunk_size: usize,
+    directed: bool,
+    prefix: String,
+    adj_lists: Vec<AdjListYaml>,
+    version: String,
+}
+
+fn write_yaml<T: Serialize>(path: &str, value: &T) -> Result<(), FossilError> {
+    let yaml = serde_yml::to_string(value)
+        .map_err(|e| RdfError::Write(e.to_string()))?;
+    std::fs::write(path, yaml)
+        .map_err(|e| RdfError::Write(e.to_string()))?;
+    Ok(())
+}
 
 fn write_yaml_metadata(
     store: &GraphStore,
@@ -536,36 +656,64 @@ fn write_yaml_metadata(
         .map(|e| format!("{}_{}_{}.edge.yml", e.source_type, e.name, e.target_type))
         .collect();
 
-    std::fs::write(
+    write_yaml(
         store.root.join("graph.yml").to_str(),
-        format!(
-            "name: dataset\nprefix: ./\nvertices:\n{}\nedges:\n{}\nversion: gar/v1\n",
-            vertex_ymls.iter().map(|v| format!("  - {v}")).collect::<Vec<_>>().join("\n"),
-            edge_ymls.iter().map(|e| format!("  - {e}")).collect::<Vec<_>>().join("\n"),
-        ),
-    ).map_err(|e| RdfError::Write(e.to_string()))?;
+        &GraphYaml {
+            name: "dataset".into(),
+            prefix: "./".into(),
+            vertices: vertex_ymls,
+            edges: edge_ymls,
+            version: "gar/v1".into(),
+        },
+    )?;
 
     for t in types {
-        let props: Vec<String> = t.columns.iter().map(|c| {
-            format!("      - name: {}\n        data_type: {}\n        is_primary: false", c.name, c.datatype)
-        }).collect();
-        std::fs::write(
+        let mut properties = vec![PropertyYaml {
+            name: "subject".into(),
+            data_type: "string".into(),
+            is_primary: true,
+        }];
+        properties.extend(t.columns.iter().map(|c| PropertyYaml {
+            name: c.name.clone(),
+            data_type: c.datatype.clone(),
+            is_primary: false,
+        }));
+
+        write_yaml(
             store.root.join(&format!("{}.vertex.yml", t.name)).to_str(),
-            format!(
-                "type: {}\nchunk_size: {VERTEX_CHUNK_SIZE}\nprefix: vertex/{}/\nproperty_groups:\n  - file_type: parquet\n    properties:\n      - name: subject\n        data_type: string\n        is_primary: true\n{}\nversion: gar/v1\n",
-                t.name, t.name, props.join("\n")
-            ),
-        ).map_err(|e| RdfError::Write(e.to_string()))?;
+            &VertexYaml {
+                r#type: t.name.clone(),
+                chunk_size: VERTEX_CHUNK_SIZE,
+                prefix: format!("vertex/{}/", t.name),
+                property_groups: vec![PropertyGroupYaml {
+                    file_type: "parquet".into(),
+                    properties,
+                }],
+                version: "gar/v1".into(),
+            },
+        )?;
     }
 
     for e in edges {
-        std::fs::write(
+        let prefix = format!("edge/{}_{}_{}/" , e.source_type, e.name, e.target_type);
+        write_yaml(
             store.root.join(&format!("{}_{}_{}.edge.yml", e.source_type, e.name, e.target_type)).to_str(),
-            format!(
-                "src_type: {src}\nedge_type: {edge}\ndst_type: {dst}\nchunk_size: 4194304\nsrc_chunk_size: {VERTEX_CHUNK_SIZE}\ndst_chunk_size: {VERTEX_CHUNK_SIZE}\ndirected: true\nprefix: edge/{src}_{edge}_{dst}/\nadj_lists:\n  - ordered: true\n    aligned_by: src\n    file_type: parquet\n  - ordered: true\n    aligned_by: dst\n    file_type: parquet\nversion: gar/v1\n",
-                src = e.source_type, edge = e.name, dst = e.target_type,
-            ),
-        ).map_err(|e2| RdfError::Write(e2.to_string()))?;
+            &EdgeYaml {
+                src_type: e.source_type.clone(),
+                edge_type: e.name.clone(),
+                dst_type: e.target_type.clone(),
+                chunk_size: 4_194_304,
+                src_chunk_size: VERTEX_CHUNK_SIZE,
+                dst_chunk_size: VERTEX_CHUNK_SIZE,
+                directed: true,
+                prefix,
+                adj_lists: vec![
+                    AdjListYaml { ordered: true, aligned_by: "src".into(), file_type: "parquet".into() },
+                    AdjListYaml { ordered: true, aligned_by: "dst".into(), file_type: "parquet".into() },
+                ],
+                version: "gar/v1".into(),
+            },
+        )?;
     }
 
     Ok(())

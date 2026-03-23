@@ -110,36 +110,6 @@ impl Environment {
     }
 }
 
-/// Estimate optimal batch size based on schema.
-///
-/// Targets approximately 100MB per batch for balanced memory/performance.
-pub fn estimate_batch_size(schema: &Schema) -> usize {
-    let row_bytes: usize = schema
-        .iter()
-        .map(|(_, dtype)| estimate_dtype_size(dtype))
-        .sum();
-
-    const TARGET_BYTES: usize = 100 * 1024 * 1024;
-    (TARGET_BYTES / row_bytes.max(1)).clamp(10_000, 500_000)
-}
-
-fn estimate_dtype_size(dtype: &DataType) -> usize {
-    match dtype {
-        DataType::Boolean => 1,
-        DataType::Int8 | DataType::UInt8 => 1,
-        DataType::Int16 | DataType::UInt16 => 2,
-        DataType::Int32 | DataType::UInt32 | DataType::Float32 => 4,
-        DataType::Int64 | DataType::UInt64 | DataType::Float64 => 8,
-        DataType::Date => 4,
-        DataType::Datetime(_, _) | DataType::Duration(_) | DataType::Time => 8,
-        DataType::String => 64,
-        DataType::Binary => 128,
-        DataType::List(inner) => 8 + estimate_dtype_size(inner) * 10,
-        DataType::Struct(fields) => fields.iter().map(|f| estimate_dtype_size(f.dtype())).sum(),
-        DataType::Null => 0,
-        _ => 32,
-    }
-}
 
 #[cfg(test)]
 mod tests {

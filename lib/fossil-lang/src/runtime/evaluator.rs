@@ -81,6 +81,7 @@ impl<'a> IrEvaluator<'a> {
     pub fn eval(&mut self, expr_id: ExprId) -> Result<Value, FossilError> {
         let expr_id = self.resolutions.expr_rewrites.get(&expr_id).copied().unwrap_or(expr_id);
         let expr = self.ir.exprs.get(expr_id);
+        let loc = expr.loc;
 
         match &expr.kind {
             ExprKind::Literal(literal) => {
@@ -97,7 +98,7 @@ impl<'a> IrEvaluator<'a> {
 
             ExprKind::Identifier(_) => {
                 let &def_id = self.resolutions.expr_defs.get(&expr_id)
-                    .ok_or_else(|| self.make_error("Unresolved identifier at runtime"))?;
+                    .ok_or_else(|| self.make_error("Unresolved identifier at runtime", loc))?;
 
                 let def = self.gcx.definitions.get(def_id);
 
@@ -111,12 +112,12 @@ impl<'a> IrEvaluator<'a> {
                     DefKind::Let => Err(self.make_error(format!(
                         "Variable '{}' not found in environment",
                         self.gcx.interner.resolve(def.name)
-                    ))),
+                    ), loc)),
                     DefKind::Type | DefKind::Mod | DefKind::Provider(_) => {
                         Err(self.make_error(format!(
                             "'{}' cannot be used as a value",
                             self.gcx.interner.resolve(def.name)
-                        )))
+                        ), loc))
                     }
                 }
             }
@@ -165,7 +166,7 @@ impl<'a> IrEvaluator<'a> {
 
             ExprKind::Ref { args, .. } => {
                 let type_def_id = self.resolutions.expr_defs.get(&expr_id).copied()
-                    .ok_or_else(|| self.make_error("Unresolved type in ref expression"))?;
+                    .ok_or_else(|| self.make_error("Unresolved type in ref expression", loc))?;
                 let arg_values: Vec<Value> = args
                     .iter()
                     .map(|&arg| self.eval(arg))
@@ -235,7 +236,8 @@ impl<'a> IrEvaluator<'a> {
             }
         }
 
-        let resolved_type_def_id = type_def_id.ok_or_else(|| self.make_error("Named record must resolve to a type definition"))?;
+        let loc = self.expr_loc(expr_id);
+        let resolved_type_def_id = type_def_id.ok_or_else(|| self.make_error("Named record must resolve to a type definition", loc))?;
 
         // Evaluate fields: each produces an Expr + optionally nested EmissionDefs
         let mut select_exprs: Vec<Expr> = Vec::with_capacity(fields.len());
@@ -285,7 +287,7 @@ impl<'a> IrEvaluator<'a> {
             }
         }
 
-        // Build ctor_exprs
+        // Build ctor_exprs: evaluate each ctor arg and alias with param name
         let ctor_exprs: Vec<Expr> = if !ctor_args.is_empty() {
             let info = self.type_index.get(resolved_type_def_id);
             let ctor_param_names = info.map(|i| &i.ctor_param_names[..]).unwrap_or(&[]);
@@ -298,10 +300,7 @@ impl<'a> IrEvaluator<'a> {
                         .get(i)
                         .map(|name| self.gcx.interner.resolve(*name).to_string())
                         .unwrap_or_else(|| format!("_ctor_{}", i));
-                    match value {
-                        Value::Expr(expr) => Ok(expr.alias(&*alias)),
-                        _ => Ok(lit(NULL).alias(&*alias)),
-                    }
+                    Ok(value_to_ctor_expr(&value, &alias))
                 })
                 .collect::<Result<Vec<_>, FossilError>>()?
         } else {
@@ -329,9 +328,10 @@ impl<'a> IrEvaluator<'a> {
         binding: Symbol,
         outputs: &[ExprId],
     ) -> Result<Value, FossilError> {
+        let source_loc = self.expr_loc(source);
         let source_val = self.eval(source)?;
         let frame = source_val.into_frame()
-            .ok_or_else(|| self.make_error("Projection source must be a Frame"))?;
+            .ok_or_else(|| self.make_error("Projection source must be a Frame", source_loc))?;
 
         self.env.bind(binding, Value::Frame(frame.clone()));
 
@@ -367,13 +367,15 @@ impl<'a> IrEvaluator<'a> {
         right_on: &[crate::context::Symbol],
         suffix: Option<crate::context::Symbol>,
     ) -> Result<Value, FossilError> {
+        let left_loc = self.expr_loc(left_id);
         let left_val = self.eval(left_id)?;
+        let right_loc = self.expr_loc(right_id);
         let right_val = self.eval(right_id)?;
 
         let left_frame = left_val.into_frame()
-            .ok_or_else(|| self.make_error("Join left side must be a Frame"))?;
+            .ok_or_else(|| self.make_error("Join left side must be a Frame", left_loc))?;
         let right_frame = right_val.into_frame()
-            .ok_or_else(|| self.make_error("Join right side must be a Frame"))?;
+            .ok_or_else(|| self.make_error("Join right side must be a Frame", right_loc))?;
 
         let suffix_str = suffix
             .map(|s| self.gcx.interner.resolve(s).to_string())
@@ -395,12 +397,12 @@ impl<'a> IrEvaluator<'a> {
         Ok(Value::Frame(joined))
     }
 
-    fn check_recursion_depth(&self) -> Result<(), FossilError> {
+    fn check_recursion_depth(&self, loc: Loc) -> Result<(), FossilError> {
         if self.call_stack.depth() >= MAX_CALL_DEPTH {
             Err(self.make_error(format!(
                 "Stack overflow: maximum recursion depth ({}) exceeded",
                 MAX_CALL_DEPTH
-            )))
+            ), loc))
         } else {
             Ok(())
         }
@@ -408,11 +410,12 @@ impl<'a> IrEvaluator<'a> {
 
     fn eval_application(
         &mut self,
-        _app_expr_id: ExprId,
+        app_expr_id: ExprId,
         callee: ExprId,
         args: &[Argument],
     ) -> Result<Value, FossilError> {
-        self.check_recursion_depth()?;
+        let app_loc = self.expr_loc(app_expr_id);
+        self.check_recursion_depth(app_loc)?;
 
         let callee_expr = self.ir.exprs.get(callee);
         let callee_loc = callee_expr.loc;
@@ -462,7 +465,7 @@ impl<'a> IrEvaluator<'a> {
                     self.make_error(format!(
                         "Record type '{}' not found",
                         self.gcx.interner.resolve(ctor_def.name)
-                    ))
+                    ), app_loc)
                 })?;
                 let field_names = &info.field_names;
                 let ctor_param_count = info.ctor_param_names.len();
@@ -483,7 +486,7 @@ impl<'a> IrEvaluator<'a> {
                         field_names.len(),
                         ctor_param_count,
                         arg_values.len()
-                    )));
+                    ), app_loc));
                 }
 
                 let select_exprs: Vec<Expr> = field_names
@@ -491,24 +494,18 @@ impl<'a> IrEvaluator<'a> {
                     .zip(arg_values.iter())
                     .map(|(field_name, value)| {
                         let name_str = self.gcx.interner.resolve(*field_name);
-                        match value {
-                            Value::Expr(expr) => expr.clone().alias(name_str),
-                            _ => lit(NULL).alias(name_str),
-                        }
+                        value_to_ctor_expr(value, name_str)
                     })
                     .collect();
 
-                // Build ctor_exprs from the ctor_param_names
+                // Build ctor_exprs: map param names to their field values
                 let ctor_exprs: Vec<Expr> = if !ctor_param_names.is_empty() {
                     ctor_param_names
                         .iter()
                         .filter_map(|param_name| {
                             let idx = field_names.iter().position(|f| f == param_name)?;
                             let alias = self.gcx.interner.resolve(*param_name).to_string();
-                            match &arg_values[idx] {
-                                Value::Expr(expr) => Some(expr.clone().alias(&*alias)),
-                                _ => Some(lit(NULL).alias(&*alias)),
-                            }
+                            Some(value_to_ctor_expr(&arg_values[idx], &alias))
                         })
                         .collect()
                 } else {
@@ -525,35 +522,47 @@ impl<'a> IrEvaluator<'a> {
                 }))
             }
 
-            _ => Err(self.make_error("Attempt to call non-function value")),
+            _ => Err(self.make_error("Attempt to call non-function value", app_loc)),
         }
     }
 
     fn eval_field_access(&mut self, expr: ExprId, field: Symbol) -> Result<Value, FossilError> {
+        let access_loc = self.expr_loc(expr);
         let value = self.eval(expr)?;
         let field_name = self.gcx.interner.resolve(field);
 
         let mut frame = match value {
             Value::Frame(f) => f,
             Value::Emission(e) => e.frame,
-            _ => return Err(self.make_error("Field access on non-record value")),
+            _ => return Err(self.make_error("Field access on non-record value", access_loc)),
         };
 
         let schema = frame.collect_schema()
-            .map_err(|e| self.make_error(format!("Failed to collect schema: {}", e)))?;
+            .map_err(|e| self.make_error(format!("Failed to collect schema: {}", e), access_loc))?;
         if !schema.contains(field_name) {
             return Err(self.make_error(format!(
                 "Field '{}' not found in schema. Available: {:?}",
                 field_name,
                 schema.iter_names().collect::<Vec<_>>()
-            )));
+            ), access_loc));
         }
 
         Ok(Value::Expr(col(field_name)))
     }
 
-    fn make_error(&self, msg: impl Into<String>) -> FossilError {
-        FossilError::evaluation(msg.into(), Loc::generated())
+    fn expr_loc(&self, expr_id: ExprId) -> Loc {
+        self.ir.exprs.get(expr_id).loc
+    }
+
+    fn make_error(&self, msg: impl Into<String>, loc: Loc) -> FossilError {
+        FossilError::evaluation(msg.into(), loc)
+    }
+}
+
+fn value_to_ctor_expr(value: &Value, alias: &str) -> Expr {
+    match value {
+        Value::Expr(expr) => expr.clone().alias(alias),
+        _ => lit(NULL).alias(alias),
     }
 }
 

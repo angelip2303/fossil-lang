@@ -34,6 +34,12 @@ pub enum RdfError {
     #[error("Failed to write RDF: {0}")]
     Write(String),
 
+    #[error("vertex dedup failed for type '{type_dir}': {reason}")]
+    VertexDedupFailed { type_dir: String, reason: String },
+
+    #[error("edge join failed for '{edge}': {reason}")]
+    EdgeJoinFailed { edge: String, reason: String },
+
     #[error("duckdb: {0}")]
     DuckDb(String),
 }
