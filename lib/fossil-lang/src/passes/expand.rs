@@ -357,6 +357,7 @@ impl ProviderExpander {
             kind: ExprKind::Application {
                 callee: callee_expr,
                 args: vec![],
+                type_args: vec![],
             },
         });
 

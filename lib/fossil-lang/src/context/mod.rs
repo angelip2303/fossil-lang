@@ -328,7 +328,7 @@ mod tests {
             Polytype::mono(ty)
         }
 
-        fn call(&self, _args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, FossilError> {
+        fn call(&self, _args: Vec<Value>, _type_args: &[DefId], _ctx: &RuntimeContext) -> Result<Value, FossilError> {
             Ok(Value::Unit)
         }
     }

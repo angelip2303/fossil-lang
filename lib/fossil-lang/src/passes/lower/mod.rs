@@ -328,14 +328,31 @@ impl Lowering {
                 ir_expr_id
             }
 
-            ast::ExprKind::Application { callee, args } => {
+            ast::ExprKind::Application { callee, args, type_args } => {
                 let ir_callee = self.fold_expr(callee, errors);
                 let ir_args = self.fold_args(&args, errors);
+                // Resolve type arguments from AST TypeIds to DefIds
+                let resolved_type_args: Vec<crate::context::DefId> = type_args
+                    .iter()
+                    .filter_map(|ast_type_id| {
+                        let ast_type = self.ast.types.get(*ast_type_id);
+                        if let crate::ast::TypeKind::Named(path) = &ast_type.kind {
+                            self.resolve_type_path(path, ast_type.loc, errors)
+                        } else {
+                            errors.push(FossilError::data_error(
+                                "type argument must be a named type",
+                                ast_type.loc,
+                            ));
+                            None
+                        }
+                    })
+                    .collect();
                 self.ir.exprs.alloc(Expr {
                     loc,
                     kind: ExprKind::Application {
                         callee: ir_callee,
                         args: ir_args,
+                        type_args: resolved_type_args,
                     },
                 })
             }
@@ -743,7 +760,7 @@ mod tests {
         let (ir, _, _) = parse_and_lower("let f = 1\nlet x = 42\nlet r = x |> f(1)");
         let val_expr = get_let_value_expr(&ir, 2);
         match &val_expr.kind {
-            ExprKind::Application { callee, args } => {
+            ExprKind::Application { callee, args, .. } => {
                 let callee_expr = ir.exprs.get(*callee);
                 assert!(
                     matches!(&callee_expr.kind, ExprKind::Identifier(Path::Simple(_))),
@@ -761,7 +778,7 @@ mod tests {
         let (ir, _, _) = parse_and_lower("let f = 1\nlet x = 42\nlet y = x |> f");
         let val_expr = get_let_value_expr(&ir, 2);
         match &val_expr.kind {
-            ExprKind::Application { callee, args } => {
+            ExprKind::Application { callee, args, .. } => {
                 let callee_expr = ir.exprs.get(*callee);
                 assert!(
                     matches!(&callee_expr.kind, ExprKind::Identifier(Path::Simple(_))),
@@ -779,7 +796,7 @@ mod tests {
         let (ir, _, _) = parse_and_lower("let f = 1\nlet g = 1\nlet x = 42\nlet y = x |> f |> g");
         let val_expr = get_let_value_expr(&ir, 3);
         match &val_expr.kind {
-            ExprKind::Application { callee, args } => {
+            ExprKind::Application { callee, args, .. } => {
                 let callee_expr = ir.exprs.get(*callee);
                 assert!(
                     matches!(&callee_expr.kind, ExprKind::Identifier(Path::Simple(_))),
@@ -791,6 +808,7 @@ mod tests {
                     ExprKind::Application {
                         callee: inner_callee,
                         args: inner_args,
+                        ..
                     } => {
                         let inner_callee_expr = ir.exprs.get(*inner_callee);
                         assert!(

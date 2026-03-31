@@ -6,6 +6,7 @@ use crate::common::PrimitiveType;
 use crate::context::{DefId, DefKind, Definitions, Interner, Symbol, TypeMetadata};
 use crate::traits::provider::{ModuleSpec, ProviderInfo, TypeProviderImpl};
 use crate::traits::resolver::{DefaultPathResolver, PathResolver};
+use crate::traits::services::ExternalServices;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltInFieldType {
@@ -44,6 +45,9 @@ pub struct GlobalContext {
 
     // -- I/O configuration --
     pub path_resolver: Arc<dyn PathResolver>,
+
+    // -- External services (LLM, etc.) --
+    pub external_services: Option<Arc<dyn ExternalServices>>,
 }
 
 impl GlobalContext {
@@ -111,6 +115,7 @@ impl Default for GlobalContext {
             registered_types: HashMap::new(),
             module_generators: Vec::new(),
             path_resolver: Arc::new(DefaultPathResolver),
+            external_services: None,
         }
     }
 }

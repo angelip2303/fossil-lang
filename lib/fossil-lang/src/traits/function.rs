@@ -60,7 +60,7 @@ pub trait FunctionImpl: Send + Sync {
         gcx: &GlobalContext,
     ) -> Polytype;
 
-    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError>;
+    fn call(&self, args: Vec<Value>, type_args: &[DefId], ctx: &RuntimeContext) -> Result<Value, FossilError>;
 
     /// Effects declared by this function. Default: none.
     fn effects(&self) -> &[FunctionEffect] {

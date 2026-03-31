@@ -129,7 +129,7 @@ impl<'a> IrEvaluator<'a> {
                 ..
             } => self.eval_named_record(expr_id, ctor_args, spread.as_ref().copied(), fields),
 
-            ExprKind::Application { callee, args } => self.eval_application(expr_id, *callee, args),
+            ExprKind::Application { callee, args, type_args } => self.eval_application(expr_id, *callee, args, type_args),
 
             ExprKind::Projection {
                 source,
@@ -413,6 +413,7 @@ impl<'a> IrEvaluator<'a> {
         app_expr_id: ExprId,
         callee: ExprId,
         args: &[Argument],
+        type_args: &[crate::context::DefId],
     ) -> Result<Value, FossilError> {
         let app_loc = self.expr_loc(app_expr_id);
         self.check_recursion_depth(app_loc)?;
@@ -450,7 +451,7 @@ impl<'a> IrEvaluator<'a> {
                     }
                 }
 
-                let result = func.call(arg_values, &ctx);
+                let result = func.call(arg_values, type_args, &ctx);
 
                 self.call_stack.pop();
 

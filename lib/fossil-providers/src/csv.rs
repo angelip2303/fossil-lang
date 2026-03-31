@@ -1,4 +1,5 @@
 use fossil_lang::ast::Loc;
+use fossil_lang::context::DefId;
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
@@ -160,7 +161,7 @@ impl FunctionImpl for CsvLoadFunction {
         Polytype::mono(ir.fn_type(vec![], result_ty))
     }
 
-    fn call(&self, _args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
+    fn call(&self, _args: Vec<Value>, _type_args: &[DefId], ctx: &RuntimeContext) -> Result<Value, FossilError> {
         let resolved = ctx.gcx.path_resolver.resolve(&self.raw_path)
             .map_err(|e| FossilError::data_error(e, self.loc))?;
 

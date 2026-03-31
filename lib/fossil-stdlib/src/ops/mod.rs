@@ -106,7 +106,7 @@ impl FunctionImpl for TransformFunction {
         Polytype::poly(vec![t_var], ir.fn_type(vec![t_ty], t_ty))
     }
 
-    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
+    fn call(&self, args: Vec<Value>, _type_args: &[DefId], ctx: &RuntimeContext) -> Result<Value, FossilError> {
         let frame = take_frame(args, self.label)?;
         let field_ops = extract_ops(ctx, self.type_name, self.namespace, self.parse);
 

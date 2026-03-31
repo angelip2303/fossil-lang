@@ -238,7 +238,7 @@ enum PipeRhs {
 enum PathSuffix {
     Provider(Vec<ProviderArgument>),
     CtorRecord(Vec<Argument>, Option<ExprId>, Vec<(Symbol, ExprId)>),
-    Application(Vec<Argument>),
+    Application(Vec<Argument>, Vec<TypeId>),
     Record(Option<ExprId>, Vec<(Symbol, ExprId)>),
 }
 
@@ -341,15 +341,28 @@ where
             )
             .delimited_by(just(Token::LBrace), just(Token::RBrace));
 
-        let paren_suffix = argument.clone()
+        // Type arguments: <Type1, Type2, ...>
+        let type_args = parse_type(ctx)
             .separated_by(just(Token::Comma))
-            .allow_trailing()
+            .at_least(1)
             .collect::<Vec<_>>()
-            .delimited_by(just(Token::LParen), just(Token::RParen))
+            .delimited_by(just(Token::LAngle), just(Token::RAngle));
+
+        let paren_suffix = type_args.or_not()
+            .then(
+                argument.clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::LParen), just(Token::RParen))
+            )
             .then(record_body.clone().or_not())
-            .map(|(args, body)| match body {
-                Some((spread, fields)) => PathSuffix::CtorRecord(args, spread, fields),
-                None => PathSuffix::Application(args),
+            .map(|((ta, args), body)| {
+                let type_args = ta.unwrap_or_default();
+                match body {
+                    Some((spread, fields)) => PathSuffix::CtorRecord(args, spread, fields),
+                    None => PathSuffix::Application(args, type_args),
+                }
             });
 
         let brace_suffix = record_body
@@ -375,10 +388,10 @@ where
                             full_loc,
                         )
                     }
-                    Some(PathSuffix::Application(args)) => {
+                    Some(PathSuffix::Application(args, type_args)) => {
                         let callee_loc = ctx.to_loc(path_span);
                         let callee = ctx.alloc_expr(ExprKind::Identifier(path), callee_loc);
-                        ctx.alloc_expr(ExprKind::Application { callee, args }, full_loc)
+                        ctx.alloc_expr(ExprKind::Application { callee, args, type_args }, full_loc)
                     }
                     Some(PathSuffix::Record(spread, fields)) => {
                         ctx.alloc_expr(
@@ -534,12 +547,12 @@ fn build_pipe_chain(ctx: &AstCtx, source: ExprId, stages: &[(ChainOp, PipeRhs)])
                 // Desugar pipe to Application directly:
                 // x |> f(a)  →  f(x, a)
                 // x |> f     →  f(x)
-                let (callee, mut args) = {
+                let (callee, mut args, type_args) = {
                     let ast = ctx.ast.borrow();
                     let rhs_expr = ast.exprs.get(*rhs);
                     match &rhs_expr.kind {
-                        ExprKind::Application { callee, args } => (*callee, args.clone()),
-                        _ => (*rhs, vec![]),
+                        ExprKind::Application { callee, args, type_args } => (*callee, args.clone(), type_args.clone()),
+                        _ => (*rhs, vec![], vec![]),
                     }
                 };
                 args.insert(0, Argument::Positional(current));
@@ -547,7 +560,7 @@ fn build_pipe_chain(ctx: &AstCtx, source: ExprId, stages: &[(ChainOp, PipeRhs)])
                     let ast = ctx.ast.borrow();
                     ast.exprs.get(current).loc.merge(ast.exprs.get(*rhs).loc)
                 };
-                current = ctx.alloc_expr(ExprKind::Application { callee, args }, loc);
+                current = ctx.alloc_expr(ExprKind::Application { callee, args, type_args }, loc);
                 i += 1;
             }
             (ChainOp::Pipe, PipeRhs::Projection(param, output)) => {

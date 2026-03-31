@@ -7,6 +7,7 @@ members = [
     "lib/fossil-stdlib",
     "lib/fossil-lsp",
     "lib/fossil-rdf",
+    "lib/fossil-doc",
 ]
 resolver = "2"
 
@@ -25,7 +26,7 @@ rust-version = "1.90.0"
 
 [workspace.dependencies]
 # external dependencies
-polars = {version = "0.52.0", features = ["lazy", "timezones", "new_streaming", "parquet", "concat_str", "strings", "csv", "cloud", "aws", "azure", "gcp"]}
+polars = {version = "0.52.0", features = ["lazy", "timezones", "new_streaming", "parquet", "concat_str", "strings", "csv", "cloud", "aws", "azure", "gcp", "round_series"]}
 thiserror = "2.0.18"
 
 # internal dependencies
@@ -35,6 +36,7 @@ fossil-providers = { path = "./lib/fossil-providers" }
 fossil-stdlib = { path = "./lib/fossil-stdlib" }
 fossil-lsp = { path = "./lib/fossil-lsp" }
 fossil-rdf = { path = "./lib/fossil-rdf" }
+fossil-doc = { path = "./lib/fossil-doc" }
 
 [profile.release]
 lto = true

@@ -183,7 +183,7 @@ impl FunctionImpl for RdfMaterializeFunction {
         &[FunctionEffect::Sink]
     }
 
-    fn call(&self, args: Vec<Value>, ctx: &RuntimeContext) -> Result<Value, FossilError> {
+    fn call(&self, args: Vec<Value>, _type_args: &[DefId], ctx: &RuntimeContext) -> Result<Value, FossilError> {
         let mut args_iter = args.into_iter();
 
         let input_value = args_iter.next().ok_or(RdfError::SerializeMissingArgs)?;

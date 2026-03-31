@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use calamine::{open_workbook_auto, Data, Reader};
 use fossil_lang::ast::Loc;
+use fossil_lang::context::DefId;
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
 use fossil_lang::passes::GlobalContext;
@@ -291,7 +292,7 @@ impl FunctionImpl for ExcelLoadFunction {
         Polytype::mono(ir.fn_type(vec![], result_ty))
     }
 
-    fn call(&self, _args: Vec<Value>, _ctx: &RuntimeContext) -> Result<Value, FossilError> {
+    fn call(&self, _args: Vec<Value>, _type_args: &[DefId], _ctx: &RuntimeContext) -> Result<Value, FossilError> {
         let loc = fossil_lang::ast::Loc::generated();
         let frame = self.source.scan()
             .map_err(|e| FossilError::data_error(e.to_string(), loc))?;

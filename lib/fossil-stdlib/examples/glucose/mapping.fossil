@@ -1,8 +1,7 @@
-  let glucose_data = csv!("glucose_readings.csv")
+let glucose_data = csv!("@anon/glucose_readings.csv")
 
-  # ── Tipo con limpieza + anonimización ──
 
-  type GlucoseReading(patient_id, name, age, glucose_mg_dl, diagnosis, hospital, date) do
+type GlucoseReading do
     #[clean(trim)]
     #[anon(hash)]
     patient_id: string,
@@ -30,19 +29,17 @@
     #[clean(trim)]
     #[anon(generalize, truncate = "month")]
     date: string,
-  end
+end
 
-  # ── Pipeline: clean → anonymize ──
 
-  let anonymized = glucose_data
-    |> GlucoseReading.clean()
-    |> GlucoseReading.anonymize()
+let anonymized = glucose_data
+|> GlucoseReading.clean()
+|> GlucoseReading.anonymize()
 
-  # ── Mapeo a RDF (FHIR) y materialización ──
 
-  #[rdf(subject = "http://example.org/observation/{id}")]
-  #[rdf(type = "http://hl7.org/fhir/Observation")]
-  type Observation(id: string) do
+#[rdf(subject = "http://example.org/observation/{id}")]
+#[rdf(type = "http://hl7.org/fhir/Observation")]
+type Observation(id: string) do
     #[rdf(uri = "http://hl7.org/fhir/subject")]
     subject: Patient,
     #[rdf(uri = "http://hl7.org/fhir/valueQuantity")]
@@ -53,30 +50,31 @@
     date: string,
     #[rdf(uri = "http://hl7.org/fhir/performer")]
     performer: string?,
-  end
+end
 
-  #[rdf(subject = "http://example.org/patient/{id}")]
-  #[rdf(type = "http://hl7.org/fhir/Patient")]
-  type Patient(id: string) do
+#[rdf(subject = "http://example.org/patient/{id}")]
+#[rdf(type = "http://hl7.org/fhir/Patient")]
+type Patient(id: string) do
     #[rdf(uri = "http://www.w3.org/2000/01/rdf-schema#label")]
     label: string,
     #[rdf(uri = "http://hl7.org/fhir/age")]
     age: int,
     #[rdf(uri = "http://hl7.org/fhir/condition")]
     condition: string?,
-  end
+end
 
-  anonymized
-  |> each row -> Observation(row.patient_id) {
+
+anonymized
+|> each row -> Observation(row.patient_id) {
     subject = ref Patient(row.patient_id),
     value = row.glucose_mg_dl,
     code = "glucose",
     date = row.date,
     performer = row.hospital
-  }
-  +> each row -> Patient(row.patient_id) {
+}
++> each row -> Patient(row.patient_id) {
     label = row.name,
     age = row.age,
     condition = row.diagnosis
-  }
-  |> Rdf.materialize("glucose-observations")
+}
+|> Rdf.materialize("@anon/glucose-observations")

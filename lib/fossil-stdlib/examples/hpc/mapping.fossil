@@ -1,0 +1,107 @@
+let machine_data = csv!("exec_and_queue_time_by_machine.csv")
+
+
+type MachineAgg do
+    extract_time: string,
+    app_name: string,
+    total_exec_millis: int,
+    avg_exec_millis: float,
+    max_exec_millis: int,
+    min_exec_millis: int,
+    stddev_exec_millis: float,
+    total_queue_millis: int,
+    avg_queue_millis: float,
+    max_queue_millis: int,
+    min_queue_millis: int,
+    stddev_queue_millis: float,
+    exec_host: string,
+    resource_class: string,
+    task_count: int,
+end
+
+
+#[rdf(subject = "http://example.org/hpc-analytics/data/application/{app_name}")]
+#[rdf(type = "http://example.org/hpc-analytics#Application")]
+type Application(app_name: string) do
+    #[rdf(uri = "http://www.w3.org/2000/01/rdf-schema#label")]
+    label: string,
+end
+
+#[rdf(subject = "http://example.org/hpc-analytics/data/host/{exec_host}")]
+#[rdf(type = "http://example.org/hpc-analytics#ExecutionHost")]
+type ExecutionHost(exec_host: string) do
+    #[rdf(uri = "http://www.w3.org/2000/01/rdf-schema#label")]
+    label: string,
+end
+
+#[rdf(subject = "http://example.org/hpc-analytics/data/resource-class/{resource_class}")]
+#[rdf(type = "http://example.org/hpc-analytics#ResourceClass")]
+type ResourceClass(resource_class: string) do
+    #[rdf(uri = "http://www.w3.org/2000/01/rdf-schema#label")]
+    label: string,
+end
+
+#[rdf(subject = "http://example.org/hpc-analytics/data/aggregate/machine/{extract_time}-{app_name}-{exec_host}-{resource_class}")]
+#[rdf(type = "http://example.org/hpc-analytics#MachineQueueExecutionAggregate")]
+type MachineAggregate(extract_time: string, app_name: string, exec_host: string, resource_class: string) do
+    #[rdf(uri = "http://example.org/hpc-analytics#forApplication")]
+    for_application: Application,
+    #[rdf(uri = "http://example.org/hpc-analytics#onExecutionHost")]
+    on_execution_host: ExecutionHost,
+    #[rdf(uri = "http://example.org/hpc-analytics#inResourceClass")]
+    in_resource_class: ResourceClass,
+    #[rdf(uri = "http://example.org/hpc-analytics#extractedAt")]
+    extracted_at: string,
+    #[rdf(uri = "http://example.org/hpc-analytics#totalExecMillis")]
+    total_exec_millis: int,
+    #[rdf(uri = "http://example.org/hpc-analytics#avgExecMillis")]
+    avg_exec_millis: float,
+    #[rdf(uri = "http://example.org/hpc-analytics#maxExecMillis")]
+    max_exec_millis: int,
+    #[rdf(uri = "http://example.org/hpc-analytics#minExecMillis")]
+    min_exec_millis: int,
+    #[rdf(uri = "http://example.org/hpc-analytics#stddevExecMillis")]
+    stddev_exec_millis: float,
+    #[rdf(uri = "http://example.org/hpc-analytics#totalQueueMillis")]
+    total_queue_millis: int,
+    #[rdf(uri = "http://example.org/hpc-analytics#avgQueueMillis")]
+    avg_queue_millis: float,
+    #[rdf(uri = "http://example.org/hpc-analytics#maxQueueMillis")]
+    max_queue_millis: int,
+    #[rdf(uri = "http://example.org/hpc-analytics#minQueueMillis")]
+    min_queue_millis: int,
+    #[rdf(uri = "http://example.org/hpc-analytics#stddevQueueMillis")]
+    stddev_queue_millis: float,
+    #[rdf(uri = "http://example.org/hpc-analytics#taskCount")]
+    task_count: int,
+end
+
+
+machine_data
+|> each row -> MachineAggregate(row.extract_time, row.app_name, row.exec_host, row.resource_class) {
+    for_application = ref Application(row.app_name),
+    on_execution_host = ref ExecutionHost(row.exec_host),
+    in_resource_class = ref ResourceClass(row.resource_class),
+    extracted_at = row.extract_time,
+    total_exec_millis = row.total_exec_millis,
+    avg_exec_millis = row.avg_exec_millis,
+    max_exec_millis = row.max_exec_millis,
+    min_exec_millis = row.min_exec_millis,
+    stddev_exec_millis = row.stddev_exec_millis,
+    total_queue_millis = row.total_queue_millis,
+    avg_queue_millis = row.avg_queue_millis,
+    max_queue_millis = row.max_queue_millis,
+    min_queue_millis = row.min_queue_millis,
+    stddev_queue_millis = row.stddev_queue_millis,
+    task_count = row.task_count
+}
++> each row -> Application(row.app_name) {
+    label = row.app_name
+}
++> each row -> ExecutionHost(row.exec_host) {
+    label = row.exec_host
+}
++> each row -> ResourceClass(row.resource_class) {
+    label = row.resource_class
+}
+|> Rdf.materialize("hpc-aggregate-graph")

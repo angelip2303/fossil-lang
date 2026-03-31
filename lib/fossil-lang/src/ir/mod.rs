@@ -132,6 +132,8 @@ pub enum ExprKind {
     Application {
         callee: ExprId,
         args: Vec<Argument>,
+        /// Resolved type arguments for generic calls: `f<Type1, Type2>(args)`
+        type_args: Vec<crate::context::DefId>,
     },
     Projection {
         source: ExprId,

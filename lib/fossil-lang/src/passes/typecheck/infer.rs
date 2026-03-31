@@ -175,7 +175,7 @@ impl TypeChecker {
                 Ok((subst, merged_ty))
             }
 
-            ExprKind::Application { callee, args } => {
+            ExprKind::Application { callee, args, .. } => {
                 let saved_local_subst = std::mem::take(&mut self.local_subst);
 
                 let (mut subst, callee_ty) = self.infer(*callee)?;

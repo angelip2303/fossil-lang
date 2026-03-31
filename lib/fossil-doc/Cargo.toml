@@ -1,0 +1,24 @@
+[package]
+name = "fossil-doc"
+version.workspace = true
+description.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# external dependencies
+polars.workspace = true
+pdfium-render = "0.8"
+docx-rs = "0.4"
+uuid = { version = "1", features = ["v4"] }
+
+# internal dependencies
+fossil-lang.workspace = true
+fossil-providers.workspace = true
