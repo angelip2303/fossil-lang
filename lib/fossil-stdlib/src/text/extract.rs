@@ -83,8 +83,9 @@ impl FunctionImpl for TextExtractFunction {
         // Stage 1: Build JSON schema from type args
         let schema = build_extraction_schema(type_args, ctx.gcx);
 
-        // Stage 2: Materialize text from frame and chunk
+        // Stage 2: Materialize only text column and chunk
         let df = input_frame
+            .select([col("text")])
             .collect()
             .map_err(|e| FossilError::evaluation(e.to_string(), loc))?;
 
@@ -95,17 +96,17 @@ impl FunctionImpl for TextExtractFunction {
             .str()
             .map_err(|_| FossilError::evaluation("'text' column must be string type", loc))?
             .into_iter()
-            .filter_map(|opt| opt)
+            .flatten()
             .collect::<Vec<_>>()
             .join("\n\n");
 
         let chunks = chunk_text(&full_text, MAX_CHUNK_CHARS, CHUNK_OVERLAP);
 
-        // Stage 3: Extract entities from each chunk
-        let mut all_entities: Vec<serde_json::Value> = Vec::new();
-        for chunk in &chunks {
+        // Stage 3: Extract entities from each chunk, tracking source chunk index
+        let mut chunk_entities: Vec<(usize, Vec<serde_json::Value>)> = Vec::new();
+        for (i, chunk) in chunks.iter().enumerate() {
             match services.extract(chunk, &schema) {
-                Ok(entities) => all_entities.extend(entities),
+                Ok(entities) => chunk_entities.push((i, entities)),
                 Err(e) => {
                     return Err(FossilError::evaluation(
                         format!("LLM extraction failed: {e}"),
@@ -115,18 +116,17 @@ impl FunctionImpl for TextExtractFunction {
             }
         }
 
-        // Stage 4: Grounding — validate each entity against source text
+        // Stage 4: Grounding — validate each entity against its source chunk
         let mut grounded_entities: Vec<serde_json::Value> = Vec::new();
-        for entity in &all_entities {
-            let claim = format_claim(entity);
-            // Find the chunk this entity was extracted from (use first chunk for simplicity)
-            let source = chunks.first().map(|s| s.as_str()).unwrap_or(&full_text);
-            match services.ground(source, &claim) {
-                Ok(true) => grounded_entities.push(entity.clone()),
-                Ok(false) => {} // Discard ungrounded entities
-                Err(_) => {
-                    // On grounding failure, keep the entity (fail-open for robustness)
-                    grounded_entities.push(entity.clone());
+        // Batch all claims per chunk to reduce LLM calls
+        for (chunk_idx, entities) in &chunk_entities {
+            let source = &chunks[*chunk_idx];
+            for entity in entities {
+                let claim = format_claim(entity);
+                match services.ground(source, &claim) {
+                    Ok(true) => grounded_entities.push(entity.clone()),
+                    Ok(false) => {} // Discard ungrounded entities
+                    Err(_) => grounded_entities.push(entity.clone()), // fail-open
                 }
             }
         }
@@ -188,6 +188,7 @@ fn primitive_to_json_type(prim: PrimitiveType) -> &'static str {
 }
 
 /// Chunk text into windows of max_chars with overlap.
+/// Uses char boundaries to avoid panics on multi-byte UTF-8.
 fn chunk_text(text: &str, max_chars: usize, overlap: usize) -> Vec<String> {
     if text.len() <= max_chars {
         return vec![text.to_string()];
@@ -196,14 +197,26 @@ fn chunk_text(text: &str, max_chars: usize, overlap: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut start = 0;
     while start < text.len() {
-        let end = (start + max_chars).min(text.len());
+        let end = snap_to_char_boundary(text, (start + max_chars).min(text.len()));
         chunks.push(text[start..end].to_string());
         if end >= text.len() {
             break;
         }
-        start = end.saturating_sub(overlap);
+        start = snap_to_char_boundary(text, end.saturating_sub(overlap));
     }
     chunks
+}
+
+/// Round a byte index down to a valid UTF-8 char boundary.
+fn snap_to_char_boundary(text: &str, idx: usize) -> usize {
+    if idx >= text.len() {
+        return text.len();
+    }
+    let mut i = idx;
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 /// Format an entity as a natural language claim for grounding.
