@@ -203,6 +203,20 @@ impl TypeProviderImpl for ExcelProvider {
         }
     }
 
+    fn infer_schema(
+        &self,
+        path: polars::prelude::PlPath,
+        _cloud_opts: Option<polars::prelude::cloud::CloudOptions>,
+    ) -> Result<Schema, String> {
+        let local = match path.as_ref() {
+            PlPathRef::Local(p) => p.to_path_buf(),
+            _ => return Err("Excel provider only supports local files".into()),
+        };
+        ExcelSource::new(local, None, true)
+            .infer_schema()
+            .map_err(|e| e.to_string())
+    }
+
     fn param_info(&self) -> Vec<ProviderParamInfo> {
         vec![
             ProviderParamInfo {

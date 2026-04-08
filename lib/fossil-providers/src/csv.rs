@@ -67,6 +67,16 @@ impl TypeProviderImpl for CsvProvider {
         ProviderInfo { extensions: vec!["csv"], kind: ProviderKind::Both }
     }
 
+    fn infer_schema(
+        &self,
+        path: PlPath,
+        cloud_opts: Option<CloudOptions>,
+    ) -> Result<Schema, String> {
+        CsvSource::new(path, CsvOptions::default(), cloud_opts)
+            .infer_schema()
+            .map_err(|e| e.to_string())
+    }
+
     fn param_info(&self) -> Vec<ProviderParamInfo> {
         vec![
             ProviderParamInfo {

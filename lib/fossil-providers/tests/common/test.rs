@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use fossil_lang::compiler::{Compiler, CompilerInput};
 use fossil_lang::passes::GlobalContext;
-use fossil_lang::runtime::executor::{DataManifest, IrExecutor, OutputKind};
+use fossil_lang::runtime::executor::IrExecutor;
+use fossil_rdf::DataManifest;
 use polars::prelude::*;
 
 use crate::TestSuiteError;
@@ -26,21 +27,24 @@ fn test(test_case: &str) -> Result<bool, TestSuiteError> {
     let result = compiler.compile(CompilerInput::File(mapping))?;
     let exec_result = IrExecutor::execute(result.program)?;
 
-    // Find the RdfParquet output and its manifest
-    let manifest = exec_result
-        .outputs
-        .iter()
-        .find(|o| o.kind == OutputKind::RdfParquet)
-        .and_then(|o| o.manifest.as_ref());
-
+    // Find the rdf-parquet output and read its manifest from disk
     let base_path = exec_result
         .outputs
         .iter()
-        .find(|o| o.kind == OutputKind::RdfParquet)
+        .find(|o| o.kind == fossil_rdf::OUTPUT_KIND)
         .map(|o| o.path.as_str())
         .unwrap_or("");
 
-    let actual = match manifest {
+    let manifest = if !base_path.is_empty() {
+        let manifest_path = format!("{base_path}/_manifest.json");
+        std::fs::read_to_string(&manifest_path)
+            .ok()
+            .and_then(|json| serde_json::from_str::<DataManifest>(&json).ok())
+    } else {
+        None
+    };
+
+    let actual = match manifest.as_ref() {
         Some(m) => reconstruct_triples(base_path, m),
         None => Ok(HashSet::new()),
     };

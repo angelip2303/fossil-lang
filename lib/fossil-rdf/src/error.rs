@@ -1,22 +1,31 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum RdfGraphError {
-    #[error("Dataset not found: {0}")]
-    NotFound(String),
+pub enum RdfError {
+    #[error("Rdf.materialize requires (emission, path) arguments")]
+    MissingArguments,
 
-    #[error("Missing index: {0}")]
-    MissingIndex(String),
+    #[error("path argument must be a string literal")]
+    InvalidPath,
 
-    #[error("Polars error: {0}")]
-    Polars(#[from] polars::prelude::PolarsError),
+    #[error("first argument must be an Emission with type specs")]
+    ExpectedEmission,
 
-    #[error("Unsupported SPARQL feature: {0}")]
-    UnsupportedSparql(String),
+    #[error("failed to write RDF: {0}")]
+    Write(String),
 
-    #[error("SPARQL parse error: {0}")]
-    SparqlParse(String),
+    #[error("vertex dedup failed for type '{type_dir}': {reason}")]
+    VertexDedupFailed { type_dir: String, reason: String },
 
-    #[error("{0}")]
-    Other(String),
+    #[error("edge join failed for '{edge}': {reason}")]
+    EdgeJoinFailed { edge: String, reason: String },
+
+    #[error("duckdb: {0}")]
+    DuckDb(String),
+}
+
+impl From<duckdb::Error> for RdfError {
+    fn from(e: duckdb::Error) -> Self {
+        RdfError::DuckDb(e.to_string())
+    }
 }

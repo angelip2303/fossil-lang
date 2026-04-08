@@ -1,8 +1,5 @@
-pub mod metadata;
-pub mod parquet_writer;
-
-// Re-export generic materializer types for external callers (e.g. keasy catalog).
-pub use parquet_writer::{EdgeSpec, VertexSpec, materialize_frames};
+pub mod attrs;
+pub mod template;
 
 use std::collections::HashMap;
 
@@ -11,156 +8,19 @@ use fossil_lang::context::{DefId, Symbol};
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeIndex, TypeKind as IrTypeKind, TypeVar};
 use fossil_lang::passes::GlobalContext;
-use fossil_lang::runtime::executor::OutputKind;
 use fossil_lang::runtime::value::{Emission, Value};
 use fossil_lang::traits::function::{FunctionEffect, FunctionImpl, RuntimeContext};
 
-use crate::string::template::parse_template;
-use metadata::{RdfFieldAttrs, RdfTypeAttrs, field_primitive_type};
+use fossil_rdf::dest::GraphDest;
+use fossil_rdf::error::RdfError;
+use fossil_rdf::mapping::{EdgeMapping, VertexMapping};
+
+use attrs::{RdfFieldAttrs, RdfTypeAttrs, field_primitive_type};
+use template::parse_template;
 
 use polars::prelude::*;
-use thiserror::Error;
 
-/// RDF-specific errors
-#[derive(Debug, Error)]
-pub enum RdfError {
-    #[error("Rdf function requires input and path")]
-    SerializeMissingArgs,
-    #[error("Rdf function path must be a string literal")]
-    SerializeInvalidFilename,
-    #[error("Rdf function expects an Emission")]
-    SerializeInvalidInput,
-
-    #[error("Failed to write RDF: {0}")]
-    Write(String),
-
-    #[error("vertex dedup failed for type '{type_dir}': {reason}")]
-    VertexDedupFailed { type_dir: String, reason: String },
-
-    #[error("edge join failed for '{edge}': {reason}")]
-    EdgeJoinFailed { edge: String, reason: String },
-
-    #[error("duckdb: {0}")]
-    DuckDb(String),
-}
-
-impl From<duckdb::Error> for RdfError {
-    fn from(e: duckdb::Error) -> Self {
-        RdfError::DuckDb(e.to_string())
-    }
-}
-
-impl From<RdfError> for FossilError {
-    fn from(err: RdfError) -> Self {
-        FossilError::evaluation(err.to_string(), fossil_lang::ast::Loc::generated())
-    }
-}
-
-/// A reference (edge) from this type to another type.
-pub struct RefEdge {
-    /// Predicate URI (e.g. "http://schema.org/knows").
-    pub predicate_uri: String,
-    /// Short label for the edge (local name of predicate IRI).
-    pub label: String,
-    /// Target type directory name (e.g. "person").
-    pub target_type_dir: String,
-    /// The Polars expression that produces the ref value (target IRI).
-    pub expr: Expr,
-}
-
-/// Output configuration for a single vertex type.
-pub struct OutputConfig {
-    /// Polars selection expressions producing `_subject` and scalar property columns (no refs).
-    pub selection: Vec<Expr>,
-    /// The expression that produces the subject IRI (for edge generation).
-    pub subject_expr: Expr,
-    /// Short label → full predicate IRI for scalar columns.
-    pub label_to_iri: HashMap<String, String>,
-    /// Reference edges from this type to other types.
-    pub ref_edges: Vec<RefEdge>,
-    /// Directory name for this type (e.g., `"wall"`).
-    pub type_dir: String,
-    /// Full RDF type IRI (e.g., `"http://example.com/bim#Wall"`).
-    pub type_iri: String,
-}
-
-/// Build a blank node expression: `_:{TypeName}_{arg0}_{arg1}_...`
-fn build_bnode_expr(def_id: DefId, args: &[Expr], gcx: &GlobalContext) -> Expr {
-    let type_name = gcx.interner.resolve(gcx.definitions.get(def_id).name);
-    let mut parts = vec![lit(format!("_:{type_name}"))];
-    parts.extend(args.iter().map(|a| a.clone().cast(DataType::String)));
-    concat_str(parts, "_", true)
-}
-
-/// Resolve a subject identity expression for a type.
-///
-/// With `#[rdf(subject = "...")]`: template expansion using param names.
-/// Without: blank node `_:{TypeName}_{arg0}_{arg1}_...`
-fn resolve_identity_expr(
-    def_id: DefId,
-    args: &[Expr],
-    gcx: &GlobalContext,
-    type_index: &TypeIndex,
-) -> Expr {
-    let template = RdfTypeAttrs::from_def_id(def_id, gcx).and_then(|a| a.subject);
-
-    match template {
-        Some(template) => {
-            let param_names = type_index
-                .get(def_id)
-                .map(|info| &info.ctor_param_names[..])
-                .unwrap_or(&[]);
-            let parts = parse_template(&template, param_names, args, &gcx.interner);
-            concat_str(parts, "", true)
-        }
-        None if args.len() == 1 => {
-            // Single ctor arg without template: use the value directly as subject
-            args[0].clone().cast(DataType::String)
-        }
-        None => build_bnode_expr(def_id, args, gcx),
-    }
-}
-
-/// Build the subject expression for a type's constructor args.
-/// Returns `None` when there are no ctor args.
-fn build_subject_expr(
-    def_id: DefId,
-    ctor_args: &[Expr],
-    gcx: &GlobalContext,
-    type_index: &TypeIndex,
-) -> Option<Expr> {
-    if ctor_args.is_empty() {
-        return None;
-    }
-    Some(resolve_identity_expr(def_id, ctor_args, gcx, type_index))
-}
-
-/// Check if a field's type is a reference to another record type.
-/// Returns the DefId of the referenced type if so.
-fn field_ref_type(
-    def_id: DefId,
-    field: Symbol,
-    ir: &Ir,
-    type_index: &TypeIndex,
-) -> Option<DefId> {
-    let info = type_index.get(def_id)?;
-    let IrTypeKind::Record(fields) = &ir.types.get(info.ty).kind else {
-        return None;
-    };
-    let field_ty = ir.types.get(fields.lookup(field)?);
-    match &field_ty.kind {
-        IrTypeKind::Named(ref_id) => Some(*ref_id),
-        IrTypeKind::Optional(inner) => match &ir.types.get(*inner).kind {
-            IrTypeKind::Named(ref_id) => Some(*ref_id),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Parquet materialization (HDT-style indices)
-// ---------------------------------------------------------------------------
+// ── RdfMaterializeFunction ──────────────────────────────────────────────
 
 pub struct RdfMaterializeFunction;
 
@@ -186,24 +46,105 @@ impl FunctionImpl for RdfMaterializeFunction {
     fn call(&self, args: Vec<Value>, _type_args: &[DefId], ctx: &RuntimeContext) -> Result<Value, FossilError> {
         let mut args_iter = args.into_iter();
 
-        let input_value = args_iter.next().ok_or(RdfError::SerializeMissingArgs)?;
+        let input_value = args_iter.next()
+            .ok_or_else(|| rdf_err(RdfError::MissingArguments))?;
 
         let base_path = args_iter
             .next()
             .and_then(|v| v.as_literal_string())
-            .ok_or(RdfError::SerializeInvalidFilename)?;
+            .ok_or_else(|| rdf_err(RdfError::InvalidPath))?;
 
         match input_value {
             Value::Emission(emission) if !emission.specs.is_empty() => {
-                let configs = build_output_configs(&emission, ctx);
+                let mappings = build_mappings(&emission, ctx);
                 let resolved = ctx.gcx.path_resolver.resolve(&base_path)
                     .map_err(|e| FossilError::evaluation(e, fossil_lang::ast::Loc::generated()))?;
-                let manifest = parquet_writer::materialize(&emission.frame, &configs, &resolved)?;
-                ctx.register_output(OutputKind::RdfParquet, resolved.to_str().to_string(), Some(manifest));
+                let dest = to_graph_dest(&resolved);
+                fossil_rdf::materialize(&emission.frame, &mappings, &dest)
+                    .map_err(rdf_err)?;
+                ctx.register_output(fossil_rdf::OUTPUT_KIND, resolved.to_str().to_string());
                 Ok(Value::Unit)
             }
-            _ => Err(RdfError::SerializeInvalidInput.into()),
+            _ => Err(rdf_err(RdfError::ExpectedEmission)),
         }
+    }
+}
+
+/// Convert a fossil-lang ResolvedPath to a fossil-rdf GraphDest.
+fn to_graph_dest(resolved: &fossil_lang::traits::resolver::ResolvedPath) -> GraphDest {
+    match resolved.cloud_options() {
+        Some(opts) => GraphDest::cloud(resolved.to_str(), opts.clone()),
+        None => GraphDest::local(resolved.to_str()),
+    }
+}
+
+// ── Mapping builders ────────────────────────────────────────────────────
+
+/// Build a blank node expression: `_:{TypeName}_{arg0}_{arg1}_...`
+fn build_bnode_expr(def_id: DefId, args: &[Expr], gcx: &GlobalContext) -> Expr {
+    let type_name = gcx.interner.resolve(gcx.definitions.get(def_id).name);
+    let mut parts = vec![lit(format!("_:{type_name}"))];
+    parts.extend(args.iter().map(|a| a.clone().cast(DataType::String)));
+    concat_str(parts, "_", true)
+}
+
+/// Resolve a subject identity expression for a type.
+fn resolve_identity_expr(
+    def_id: DefId,
+    args: &[Expr],
+    gcx: &GlobalContext,
+    type_index: &TypeIndex,
+) -> Expr {
+    let template = RdfTypeAttrs::from_def_id(def_id, gcx).and_then(|a| a.subject);
+
+    match template {
+        Some(template) => {
+            let param_names = type_index
+                .get(def_id)
+                .map(|info| &info.ctor_param_names[..])
+                .unwrap_or(&[]);
+            let parts = parse_template(&template, param_names, args, &gcx.interner);
+            concat_str(parts, "", true)
+        }
+        None if args.len() == 1 => {
+            args[0].clone().cast(DataType::String)
+        }
+        None => build_bnode_expr(def_id, args, gcx),
+    }
+}
+
+/// Build the subject expression for a type's constructor args.
+fn build_subject_expr(
+    def_id: DefId,
+    ctor_args: &[Expr],
+    gcx: &GlobalContext,
+    type_index: &TypeIndex,
+) -> Option<Expr> {
+    if ctor_args.is_empty() {
+        return None;
+    }
+    Some(resolve_identity_expr(def_id, ctor_args, gcx, type_index))
+}
+
+/// Check if a field's type is a reference to another record type.
+fn field_ref_type(
+    def_id: DefId,
+    field: Symbol,
+    ir: &Ir,
+    type_index: &TypeIndex,
+) -> Option<DefId> {
+    let info = type_index.get(def_id)?;
+    let IrTypeKind::Record(fields) = &ir.types.get(info.ty).kind else {
+        return None;
+    };
+    let field_ty = ir.types.get(fields.lookup(field)?);
+    match &field_ty.kind {
+        IrTypeKind::Named(ref_id) => Some(*ref_id),
+        IrTypeKind::Optional(inner) => match &ir.types.get(*inner).kind {
+            IrTypeKind::Named(ref_id) => Some(*ref_id),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -216,8 +157,8 @@ fn short_label(uri: &str) -> String {
         .to_string()
 }
 
-/// Build output configs from an Emission's specs.
-fn build_output_configs(emission: &Emission, ctx: &RuntimeContext) -> Vec<OutputConfig> {
+/// Build VertexMappings from an Emission's specs.
+fn build_mappings(emission: &Emission, ctx: &RuntimeContext) -> Vec<VertexMapping> {
     let interner = ctx.gcx.interner.clone();
 
     emission.specs
@@ -225,10 +166,8 @@ fn build_output_configs(emission: &Emission, ctx: &RuntimeContext) -> Vec<Output
         .map(|spec| {
             let def_id = spec.type_def_id;
 
-            // Type-level attrs
             let type_attrs = RdfTypeAttrs::from_def_id(def_id, ctx.gcx);
 
-            // Field-level: field_sym → predicate URI
             let mut field_uris: HashMap<Symbol, String> = HashMap::new();
             if let Some(tm) = ctx.gcx.type_metadata.get(&def_id) {
                 for (&field_sym, field_meta) in &tm.field_metadata {
@@ -239,9 +178,8 @@ fn build_output_configs(emission: &Emission, ctx: &RuntimeContext) -> Vec<Output
                 }
             }
 
-            // Build selection (scalar only) + ref edges (separate)
             let mut selection: Vec<Expr> = Vec::new();
-            let mut ref_edges: Vec<RefEdge> = Vec::new();
+            let mut edges: Vec<EdgeMapping> = Vec::new();
             let mut label_to_iri: HashMap<String, String> = HashMap::new();
 
             let subject_expr = build_subject_expr(def_id, &spec.ctor_args, ctx.gcx, ctx.type_index)
@@ -253,7 +191,6 @@ fn build_output_configs(emission: &Emission, ctx: &RuntimeContext) -> Vec<Output
                     && let Some(field_sym) = interner.lookup(field_name)
                     && let Some(uri) = field_uris.get(&field_sym)
                 {
-                    // Reference field → goes to ref_edges, NOT selection
                     if let Some(ref_def_id) =
                         field_ref_type(def_id, field_sym, ctx.ir, ctx.type_index)
                     {
@@ -266,7 +203,7 @@ fn build_output_configs(emission: &Emission, ctx: &RuntimeContext) -> Vec<Output
                         let ref_type_name = interner.resolve(
                             ctx.gcx.definitions.get(ref_def_id).name,
                         );
-                        ref_edges.push(RefEdge {
+                        edges.push(EdgeMapping {
                             predicate_uri: uri.clone(),
                             label: short_label(uri),
                             target_type_dir: ref_type_name.to_lowercase(),
@@ -274,7 +211,6 @@ fn build_output_configs(emission: &Emission, ctx: &RuntimeContext) -> Vec<Output
                         });
                         continue;
                     }
-                    // Scalar field → selection with short label alias
                     let label = short_label(uri);
                     label_to_iri.insert(label.clone(), uri.clone());
                     let prim = field_primitive_type(def_id, field_sym, ctx.gcx);
@@ -288,7 +224,6 @@ fn build_output_configs(emission: &Emission, ctx: &RuntimeContext) -> Vec<Output
                 }
             }
 
-            // Derive type directory and IRI
             let type_name = interner.resolve(ctx.gcx.definitions.get(def_id).name);
             let type_dir = type_name.to_lowercase();
             let type_iri = type_attrs
@@ -296,14 +231,18 @@ fn build_output_configs(emission: &Emission, ctx: &RuntimeContext) -> Vec<Output
                 .and_then(|a| a.rdf_type.clone())
                 .unwrap_or_else(|| type_name.to_string());
 
-            OutputConfig {
+            VertexMapping {
                 selection,
                 subject_expr,
                 label_to_iri,
-                ref_edges,
+                edges,
                 type_dir,
                 type_iri,
             }
         })
         .collect()
+}
+
+fn rdf_err(err: RdfError) -> FossilError {
+    FossilError::evaluation(err.to_string(), fossil_lang::ast::Loc::generated())
 }

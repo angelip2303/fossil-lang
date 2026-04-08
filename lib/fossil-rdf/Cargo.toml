@@ -1,15 +1,23 @@
 [package]
 name = "fossil-rdf"
 version.workspace = true
-description = "Client API for reading RDF Parquet datasets produced by Fossil"
+description = "GraphAr-compatible property graph materializer"
 edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
 polars.workspace = true
-spargebra = "0.4"
+duckdb = { version = "1.2", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yml = "0.0.12"
 thiserror = "2"
 
 [features]
 default = []
 cloud = ["polars/cloud"]
+utoipa = ["dep:utoipa"]
+
+[dependencies.utoipa]
+version = "5"
+optional = true

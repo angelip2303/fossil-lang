@@ -57,3 +57,6 @@ book
 *.owl.gz
 *.parquet
 *.yml
+
+# metadata
+_manifest.json

@@ -1,5 +1,3 @@
-pub mod template;
-
 use polars::prelude::*;
 use unicode_normalization::UnicodeNormalization;
 

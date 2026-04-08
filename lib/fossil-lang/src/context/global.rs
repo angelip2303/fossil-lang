@@ -88,6 +88,24 @@ impl GlobalContext {
             .collect()
     }
 
+    /// Find a registered provider by file extension.
+    pub fn provider_for_extension(&self, ext: &str) -> Option<&dyn TypeProviderImpl> {
+        self.definitions.iter().find_map(|def| match &def.kind {
+            DefKind::Provider(p) if p.info().extensions.contains(&ext) => Some(p.as_ref()),
+            _ => None,
+        })
+    }
+
+    /// Infer the schema of a file using the registered provider for its extension.
+    /// The `raw_path` should use `@connection/file.ext` format for path resolution.
+    pub fn infer_schema(&self, raw_path: &str) -> Result<polars::prelude::Schema, String> {
+        let ext = raw_path.rsplit('.').next().unwrap_or("");
+        let provider = self.provider_for_extension(ext)
+            .ok_or_else(|| format!("no provider for .{ext} files"))?;
+        let resolved = self.path_resolver.resolve(raw_path)?;
+        provider.infer_schema(resolved.pl_path().clone(), resolved.cloud_options().cloned())
+    }
+
     pub fn register_record_type_with_optionality(
         &mut self,
         name: &str,

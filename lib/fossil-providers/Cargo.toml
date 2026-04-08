@@ -23,5 +23,7 @@ fossil-lang.workspace = true
 [dev-dependencies]
 thiserror.workspace = true
 polars.workspace = true
+serde_json = "1"
 
 fossil-stdlib.workspace = true
+fossil-rdf.workspace = true

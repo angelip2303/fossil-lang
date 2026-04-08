@@ -3,13 +3,12 @@ pub mod rdf;
 pub mod string;
 pub mod text;
 
-pub use rdf::RdfMaterializeFunction;
-pub use text::TextExtractFunction;
-
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::traits::provider::{FunctionDef, ModuleSpec};
 
 use ops::make_module_generator;
+use rdf::RdfMaterializeFunction;
+use text::TextExtractFunction;
 
 pub fn init(gcx: &mut GlobalContext) {
     gcx.register_module("Rdf", ModuleSpec {

@@ -4,7 +4,7 @@ use crate::context::DefId;
 use crate::error::FossilError;
 use crate::ir::{Ir, Polytype, TypeIndex, TypeVar};
 use crate::passes::GlobalContext;
-use crate::runtime::executor::{OutputKind, OutputRecord};
+use crate::runtime::executor::OutputRecord;
 use crate::runtime::value::Value;
 
 pub struct RuntimeContext<'a> {
@@ -37,11 +37,11 @@ impl<'a> RuntimeContext<'a> {
     }
 
     /// Register an output produced during execution.
-    pub fn register_output(&self, kind: OutputKind, path: String, manifest: Option<crate::runtime::executor::DataManifest>) {
+    pub fn register_output(&self, kind: impl Into<String>, path: String) {
         self.outputs
             .lock()
             .expect("outputs lock poisoned")
-            .push(OutputRecord { kind, path, manifest });
+            .push(OutputRecord { kind: kind.into(), path });
     }
 }
 

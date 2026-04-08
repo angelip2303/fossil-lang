@@ -1,7 +1,13 @@
+pub mod dest;
 pub mod error;
-pub mod graph;
-pub mod meta;
+pub mod manifest;
+pub mod mapping;
+pub mod materializer;
+pub mod spec;
 
-pub use error::RdfGraphError;
-pub use graph::RdfGraph;
-pub use meta::{DatasetMeta, FieldStats, TypeMeta};
+pub use dest::GraphDest;
+pub use error::RdfError;
+pub use manifest::{ColumnStat, DataManifest, EdgeManifest, TypeManifest};
+pub use mapping::{EdgeMapping, VertexMapping};
+pub use materializer::{OUTPUT_KIND, materialize, materialize_frames};
+pub use spec::{EdgeSpec, VertexSpec};
