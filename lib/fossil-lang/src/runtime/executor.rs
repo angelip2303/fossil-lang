@@ -7,12 +7,17 @@ use crate::runtime::evaluator::IrEvaluator;
 use crate::runtime::value::{Environment, Value};
 
 /// Describes a single output produced during script execution.
+///
+/// `metadata` carries format-specific data (e.g. DataManifest for RDF outputs).
+/// Fossil-lang treats it as opaque JSON — producers and consumers agree on the shape.
 #[derive(Debug, Clone)]
 pub struct OutputRecord {
     /// Output format identifier (e.g. "rdf-parquet", "csv").
     pub kind: String,
     /// Path where the output was written.
     pub path: String,
+    /// Format-specific metadata (opaque to core).
+    pub metadata: serde_json::Value,
 }
 
 /// Result of executing a fossil script.

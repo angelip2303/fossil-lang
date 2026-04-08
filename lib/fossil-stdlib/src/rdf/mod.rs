@@ -60,9 +60,13 @@ impl FunctionImpl for RdfMaterializeFunction {
                 let resolved = ctx.gcx.path_resolver.resolve(&base_path)
                     .map_err(|e| FossilError::evaluation(e, fossil_lang::ast::Loc::generated()))?;
                 let dest = to_graph_dest(&resolved);
-                fossil_rdf::materialize(&emission.frame, &mappings, &dest)
+                let manifest = fossil_rdf::materialize(&emission.frame, &mappings, &dest)
                     .map_err(rdf_err)?;
-                ctx.register_output(fossil_rdf::OUTPUT_KIND, resolved.to_str().to_string());
+                ctx.register_output(
+                    fossil_rdf::OUTPUT_KIND,
+                    resolved.to_str().to_string(),
+                    serde_json::to_value(&manifest).unwrap_or_default(),
+                );
                 Ok(Value::Unit)
             }
             _ => Err(rdf_err(RdfError::ExpectedEmission)),

@@ -37,11 +37,11 @@ impl<'a> RuntimeContext<'a> {
     }
 
     /// Register an output produced during execution.
-    pub fn register_output(&self, kind: impl Into<String>, path: String) {
+    pub fn register_output(&self, kind: impl Into<String>, path: String, metadata: serde_json::Value) {
         self.outputs
             .lock()
             .expect("outputs lock poisoned")
-            .push(OutputRecord { kind: kind.into(), path });
+            .push(OutputRecord { kind: kind.into(), path, metadata });
     }
 }
 
