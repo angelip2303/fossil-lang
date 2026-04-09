@@ -1,7 +1,6 @@
 pub mod ast;
 pub mod builtins;
 pub mod common;
-pub mod compiler;
 pub mod context;
 pub mod db;
 pub mod error;
