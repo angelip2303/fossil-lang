@@ -1,69 +1,29 @@
 use std::collections::HashMap;
 
-/// A resolved path ready for I/O: physical URL + cloud credentials.
+/// A resolved path ready for I/O: URL + cloud credentials.
 #[derive(Clone)]
 pub struct ResolvedPath {
     url: String,
-    #[cfg(feature = "polars")]
-    path: polars::prelude::PlPath,
-    #[cfg(feature = "polars")]
-    cloud_options: Option<polars::prelude::cloud::CloudOptions>,
     cloud_config: HashMap<String, String>,
 }
 
 impl ResolvedPath {
-    #[cfg(feature = "polars")]
-    pub fn new(url: &str, cloud_options: Option<polars::prelude::cloud::CloudOptions>) -> Self {
-        Self {
-            url: url.to_string(),
-            path: polars::prelude::PlPath::from_str(url),
-            cloud_options,
-            cloud_config: HashMap::new(),
-        }
-    }
-
-    #[cfg(not(feature = "polars"))]
     pub fn new(url: &str, _cloud_options: Option<()>) -> Self {
-        Self {
-            url: url.to_string(),
-            cloud_config: HashMap::new(),
-        }
+        Self { url: url.to_string(), cloud_config: HashMap::new() }
     }
 
-    #[cfg(feature = "polars")]
-    pub fn with_config(
-        url: &str,
-        cloud_options: Option<polars::prelude::cloud::CloudOptions>,
-        cloud_config: HashMap<String, String>,
-    ) -> Self {
-        Self {
-            url: url.to_string(),
-            path: polars::prelude::PlPath::from_str(url),
-            cloud_options,
-            cloud_config,
-        }
+    pub fn with_config(url: &str, cloud_config: HashMap<String, String>) -> Self {
+        Self { url: url.to_string(), cloud_config }
     }
 
     pub fn join(&self, rel: &str) -> Self {
-        let new_url = format!("{}/{}", self.url.trim_end_matches('/'), rel);
         Self {
-            url: new_url.clone(),
-            #[cfg(feature = "polars")]
-            path: polars::prelude::PlPath::from_str(&new_url),
-            #[cfg(feature = "polars")]
-            cloud_options: self.cloud_options.clone(),
+            url: format!("{}/{}", self.url.trim_end_matches('/'), rel),
             cloud_config: self.cloud_config.clone(),
         }
     }
 
-    #[cfg(feature = "polars")]
-    pub fn pl_path(&self) -> &polars::prelude::PlPath { &self.path }
-
-    #[cfg(feature = "polars")]
-    pub fn cloud_options(&self) -> Option<&polars::prelude::cloud::CloudOptions> { self.cloud_options.as_ref() }
-
     pub fn cloud_config(&self) -> &HashMap<String, String> { &self.cloud_config }
-
     pub fn to_str(&self) -> &str { &self.url }
 }
 
