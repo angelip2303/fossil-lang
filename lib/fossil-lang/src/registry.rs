@@ -131,29 +131,6 @@ impl AttributeOp {
     }
 }
 
-// ── Handler traits (for host executor) ───────────────────────────────
-
-/// Database connection abstraction for the host executor.
-/// Generic: Executor<C: SqlEngine> uses static dispatch.
-pub trait SqlEngine: Send + Sync {
-    type Error: std::fmt::Display;
-    fn execute_batch(&self, sql: &str) -> Result<(), Self::Error>;
-    fn query_rows(&self, sql: &str) -> Result<Vec<Vec<String>>, Self::Error>;
-    fn insert_batch(&self, table: &str, columns: &[&str], rows: &[Vec<String>]) -> Result<(), Self::Error>;
-}
-
-/// Handler that loads external data into the SQL engine.
-pub trait SourceHandler<C: SqlEngine>: Send + Sync {
-    fn name(&self) -> &str;
-    fn load(&self, conn: &C, def: &crate::plan::SourceDef) -> Result<(), String>;
-}
-
-/// Handler that writes query results to external formats.
-pub trait OutputHandler<C: SqlEngine>: Send + Sync {
-    fn name(&self) -> &str;
-    fn write(&self, conn: &C, def: &crate::plan::OutputDef) -> Result<crate::plan::OutputResult, String>;
-}
-
 // ── Registry (builder pattern) ───────────────────────────────────────
 
 /// Compile-time registry of all available functions and attributes.

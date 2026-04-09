@@ -4,7 +4,6 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::common::Path;
-use crate::traits::provider::TypeProviderImpl;
 
 pub mod global;
 pub mod metadata;
@@ -148,7 +147,6 @@ pub enum DefKind {
     Type,
     Func(Arc<dyn std::any::Any + Send + Sync>),
     RecordConstructor,
-    Provider(Arc<dyn TypeProviderImpl>),
 }
 
 impl Def {

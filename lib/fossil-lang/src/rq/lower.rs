@@ -390,8 +390,8 @@ impl<'a> RqLowering<'a> {
                         return self.lower_registry_function(func_def, args);
                     }
 
-                    // Try provider lookup (legacy: csv!, excel!)
-                    if matches!(def.kind, DefKind::Provider(_)) {
+                    // Try provider lookup via Registry (csv!, excel!)
+                    if self.registry.find_source(&func_name).is_some() {
                         return self.lower_provider_call(&func_name, args);
                     }
 

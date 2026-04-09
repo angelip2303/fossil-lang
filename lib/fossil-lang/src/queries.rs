@@ -1,14 +1,15 @@
-//! Top-level compilation queries.
+//! Compilation queries — 8 Salsa tracked functions.
 //!
-//! 2 Salsa tracked functions + 4 public functions.
-//! Tracked: plan (keasy execution), schema_needs (cloud pre-resolve).
-//! Public: parse, lower, infer, rq — called directly by LSP/DCAT.
+//! Each pass is a tracked query that reads from other queries (not GlobalContext).
+//! Pattern: rust-analyzer's query architecture.
 //!
-//! The intermediate types (ParsedProgram, IrProgram) contain Arc<dyn PathResolver>
-//! which can't implement Salsa's Update trait. Once GlobalContext is decomposed
-//! into Salsa primitives (Phase 2), all queries become tracked.
-//!
-//! Reference: rust-analyzer query architecture, Salsa Calc tutorial.
+//! Dependency graph:
+//!   SourceFile → parse → def_map
+//!                    ├──→ source_schemas
+//!                    └──→ type_meta
+//!   def_map + source_schemas + parse → lower
+//!   lower + def_map + source_schemas + type_meta → infer
+//!   infer → rq → plan
 
 use std::sync::OnceLock;
 
@@ -18,14 +19,14 @@ use crate::context::extract_type_metadata;
 use crate::db::{Db, Diagnostic, Severity, SourceFile};
 use crate::passes::parse::Parser;
 use crate::passes::typecheck::TypeChecker;
-use crate::passes::{GlobalContext, IrProgram, ParsedProgram};
+use crate::passes::{GlobalContext, IrProgram, LowerResult, ParsedProgram};
 use crate::plan::FossilPlan;
 use crate::registry::{OpImpl, Registry};
 use crate::rq::emit_sql::rq_to_sql;
 use crate::rq::lower::RqLowering;
 use crate::rq::RelationalQuery;
 
-// ── Static registry (computed once) ─────────────────────────────────
+// ── Static registry ─────────────────────────────────────────────────
 
 pub fn registry() -> &'static Registry {
     static REG: OnceLock<Registry> = OnceLock::new();
@@ -36,7 +37,7 @@ pub fn registry() -> &'static Registry {
     })
 }
 
-// ── Schema needs (Salsa tracked, cloud batch) ───────────────────────
+// ── schema_needs (pre-compilation, cloud batch) ─────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaRequest {
@@ -45,41 +46,17 @@ pub struct SchemaRequest {
 }
 
 /// Discover source schemas needed before compilation (pure, no I/O).
-/// Host calls this first, resolves all schemas in parallel, then calls plan().
+/// Host resolves all in parallel, then calls plan().
 #[salsa::tracked]
 pub fn schema_needs(db: &dyn Db, file: SourceFile) -> Vec<SchemaRequest> {
     let p = parse(db, file);
-    find_provider_calls(&p)
+    find_provider_calls_from_ast(&p.ast, &p.gcx.interner)
 }
 
-// ── Plan (Salsa tracked, keasy execution) ───────────────────────────
+// ── parse ───────────────────────────────────────────────────────────
 
-/// Compile source to FossilPlan. The entry point for job execution.
-#[salsa::tracked]
-pub fn plan(db: &dyn Db, file: SourceFile) -> FossilPlan {
-    use salsa::Accumulator;
-    let rq = match rq(db, file) {
-        Ok(rq) => rq,
-        Err(errors) => {
-            for msg in &errors {
-                Diagnostic {
-                    message: msg.clone(),
-                    offset: 0,
-                    len: 0,
-                    severity: Severity::Error,
-                }
-                .accumulate(db);
-            }
-            return FossilPlan::empty();
-        }
-    };
-    let sql = rq_to_sql(&rq);
-    FossilPlan::from_rq(rq, sql)
-}
-
-// ── Public functions (LSP, DCAT, debugging) ─────────────────────────
-
-/// Parse source text into an AST.
+/// Parse source text into AST.
+#[salsa::tracked(no_eq)]
 pub fn parse(db: &dyn Db, file: SourceFile) -> ParsedProgram {
     use salsa::Accumulator;
     match Parser::parse(file.text(db), 0) {
@@ -102,36 +79,82 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> ParsedProgram {
     }
 }
 
+// ── lower ───────────────────────────────────────────────────────────
+
 /// Lower AST to IR. Registers builtins and resolves provider schemas.
-pub fn lower(
-    db: &dyn Db,
-    file: SourceFile,
-) -> Result<(crate::ir::Ir, GlobalContext, crate::ir::Resolutions), Vec<String>> {
-    let p = parse(db, file);
-    let mut gcx = p.gcx;
+#[salsa::tracked(no_eq)]
+pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
+    use salsa::Accumulator;
+    let ParsedProgram { ast, gcx } = parse(db, file);
+    let mut gcx = gcx;
     let reg = registry();
 
     register_builtins(&mut gcx, reg);
-    register_provider_schemas(db, &p.ast, &mut gcx, reg);
+    // Clone interner for provider call scanning (avoids borrow conflict with gcx mutation)
+    let interner_snapshot = gcx.interner.clone();
+    register_provider_schemas_from_ast(db, &ast, &interner_snapshot, &mut gcx, reg);
 
-    let metadata = extract_type_metadata(&p.ast);
-    crate::passes::lower::lower_with_metadata(p.ast, gcx, metadata)
-        .map_err(|errors| errors.0.into_iter().map(|e| e.to_string()).collect())
+    let metadata = extract_type_metadata(&ast);
+    match crate::passes::lower::lower_with_metadata(ast, gcx, metadata) {
+        Ok((ir, gcx, resolutions)) => LowerResult { ir, gcx, resolutions },
+        Err(errors) => {
+            for e in errors.0 {
+                Diagnostic {
+                    message: e.to_string(),
+                    offset: 0,
+                    len: 0,
+                    severity: Severity::Error,
+                }
+                .accumulate(db);
+            }
+            LowerResult {
+                ir: Default::default(),
+                gcx: Default::default(),
+                resolutions: Default::default(),
+            }
+        }
+    }
 }
+
+// ── infer ───────────────────────────────────────────────────────────
 
 /// Type-check the IR. Returns IrProgram with per-expression types.
-pub fn infer(db: &dyn Db, file: SourceFile) -> Result<IrProgram, Vec<String>> {
-    let (ir, gcx, resolutions) = lower(db, file)?;
-    TypeChecker::new(ir, gcx, resolutions)
-        .check()
-        .map_err(|errors| errors.0.into_iter().map(|e| e.to_string()).collect())
+#[salsa::tracked(no_eq)]
+pub fn infer(db: &dyn Db, file: SourceFile) -> IrProgram {
+    use salsa::Accumulator;
+    let lowered = lower(db, file);
+    match TypeChecker::new(lowered.ir, lowered.gcx, lowered.resolutions).check() {
+        Ok(program) => program,
+        Err(errors) => {
+            for e in errors.0 {
+                Diagnostic {
+                    message: e.to_string(),
+                    offset: 0,
+                    len: 0,
+                    severity: Severity::Error,
+                }
+                .accumulate(db);
+            }
+            IrProgram {
+                ir: Default::default(),
+                gcx: Default::default(),
+                type_index: Default::default(),
+                resolutions: Default::default(),
+                typeck_results: Default::default(),
+            }
+        }
+    }
 }
 
+// ── rq ──────────────────────────────────────────────────────────────
+
 /// Lower typed IR to RelationalQuery.
-pub fn rq(db: &dyn Db, file: SourceFile) -> Result<RelationalQuery, Vec<String>> {
-    let program = infer(db, file)?;
+#[salsa::tracked(no_eq)]
+pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
+    use salsa::Accumulator;
+    let program = infer(db, file);
     let reg = registry();
-    RqLowering::new(
+    match RqLowering::new(
         &program.ir,
         &program.gcx,
         &program.type_index,
@@ -140,7 +163,29 @@ pub fn rq(db: &dyn Db, file: SourceFile) -> Result<RelationalQuery, Vec<String>>
         reg,
     )
     .lower()
-    .map_err(|e| vec![e.to_string()])
+    {
+        Ok(rq) => rq,
+        Err(e) => {
+            Diagnostic {
+                message: e.to_string(),
+                offset: 0,
+                len: 0,
+                severity: Severity::Error,
+            }
+            .accumulate(db);
+            RelationalQuery::new()
+        }
+    }
+}
+
+// ── plan ────────────────────────────────────────────────────────────
+
+/// Compile source to FossilPlan.
+#[salsa::tracked]
+pub fn plan(db: &dyn Db, file: SourceFile) -> FossilPlan {
+    let rq = rq(db, file);
+    let sql = rq_to_sql(&rq);
+    FossilPlan::from_rq(rq, sql)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -164,13 +209,13 @@ fn register_builtins(gcx: &mut GlobalContext, reg: &Registry) {
     }
 }
 
-fn register_provider_schemas(
+fn register_provider_schemas_from_ast(
     db: &dyn Db,
     ast: &crate::ast::Ast,
+    interner: &crate::context::Interner,
     gcx: &mut GlobalContext,
     reg: &Registry,
 ) {
-    let interner = &gcx.interner.clone();
     for call in find_provider_calls_from_ast(ast, interner) {
         let func = match reg.find_source(&call.provider) {
             Some(f) => f,
@@ -203,10 +248,6 @@ fn register_provider_schemas(
     }
 }
 
-fn find_provider_calls(parsed: &ParsedProgram) -> Vec<SchemaRequest> {
-    find_provider_calls_from_ast(&parsed.ast, &parsed.gcx.interner)
-}
-
 fn find_provider_calls_from_ast(
     ast: &crate::ast::Ast,
     interner: &crate::context::Interner,
@@ -217,12 +258,8 @@ fn find_provider_calls_from_ast(
 
     for &stmt_id in &ast.root {
         let stmt = ast.stmts.get(stmt_id);
-        let expr_id = match &stmt.kind {
-            StmtKind::Let { value, .. } => Some(*value),
-            _ => None,
-        };
-        if let Some(eid) = expr_id {
-            let expr = ast.exprs.get(eid);
+        if let StmtKind::Let { value, .. } = &stmt.kind {
+            let expr = ast.exprs.get(*value);
             if let ExprKind::ProviderInvocation { provider, args } = &expr.kind {
                 let provider_name = provider.display(interner);
                 let path = args.iter().find_map(|arg| match arg {
@@ -240,7 +277,6 @@ fn find_provider_calls_from_ast(
             }
         }
     }
-
     calls
 }
 
@@ -260,8 +296,6 @@ fn map_sql_type(sql_type: &str) -> PrimitiveType {
         PrimitiveType::String
     }
 }
-
-// ── FossilPlan::empty ───────────────────────────────────────────────
 
 impl FossilPlan {
     pub fn empty() -> Self {
@@ -293,16 +327,24 @@ mod tests {
     fn lower_literal() {
         let db = FossilDb::default();
         let file = SourceFile::new(&db, "let x = 42".into(), "test".into());
-        let (ir, _gcx, _res) = lower(&db, file).expect("lower failed");
-        assert!(!ir.root.is_empty());
+        let result = lower(&db, file);
+        assert!(!result.ir.root.is_empty());
     }
 
     #[test]
     fn infer_literal() {
         let db = FossilDb::default();
         let file = SourceFile::new(&db, "let x = 42".into(), "test".into());
-        let program = infer(&db, file).expect("infer failed");
+        let program = infer(&db, file);
         assert!(!program.ir.root.is_empty());
+    }
+
+    #[test]
+    fn rq_literal() {
+        let db = FossilDb::default();
+        let file = SourceFile::new(&db, "let x = 42".into(), "test".into());
+        let r = rq(&db, file);
+        assert!(r.transforms.is_empty());
     }
 
     #[test]
@@ -328,5 +370,15 @@ mod tests {
         assert_eq!(map_sql_type("DOUBLE"), PrimitiveType::Float);
         assert_eq!(map_sql_type("VARCHAR"), PrimitiveType::String);
         assert_eq!(map_sql_type("BOOLEAN"), PrimitiveType::Bool);
+    }
+
+    #[test]
+    fn salsa_memoization() {
+        let db = FossilDb::default();
+        let file = SourceFile::new(&db, "let x = 42".into(), "test".into());
+        // Call plan twice — second should use cached result
+        let p1 = plan(&db, file);
+        let p2 = plan(&db, file);
+        assert_eq!(p1.sql, p2.sql);
     }
 }

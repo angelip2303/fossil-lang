@@ -57,16 +57,6 @@ pub struct SourceFile {
     pub name: String,
 }
 
-/// Interned word — replaces the custom Interner + Symbol.
-///
-/// Same string → same WordId. Comparison is O(1).
-/// Used for identifiers, field names, type names, etc.
-#[salsa::interned(debug)]
-pub struct Word<'db> {
-    #[returns(ref)]
-    pub text: String,
-}
-
 /// Diagnostic accumulator — replaces manual FossilErrors collection.
 ///
 /// During any query, push diagnostics with `.accumulate(db)`.
