@@ -9,7 +9,6 @@ pub mod ir;
 pub mod parser;
 pub mod passes;
 pub mod plan;
-pub mod plugins;
 pub mod queries;
 pub mod registry;
 pub mod rq;
