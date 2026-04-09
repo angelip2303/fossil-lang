@@ -132,7 +132,7 @@ impl FossilPlan {
                             .map(|(name, col)| FieldMapping {
                                 field_name: name.clone(),
                                 sql_expr: rq.col_name(*col).to_string(),
-                                data_type: "string".into(), // TODO: propagate from type info
+                                data_type: "unknown".into(), // type not yet propagated
                             })
                             .collect(),
                         identity_columns: e
