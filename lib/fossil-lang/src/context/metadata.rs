@@ -19,7 +19,7 @@ use crate::ast::{Attribute, AttributeArg, Literal, StmtKind, TypeKind};
 use crate::context::{Interner, Symbol};
 
 /// Type metadata (type-level + field-level attributes) extracted from AST
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TypeMetadata {
     pub type_attributes: Vec<AttributeData>,
     pub field_metadata: HashMap<Symbol, FieldMetadata>,
@@ -46,7 +46,7 @@ impl TypeMetadata {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FieldMetadata {
     pub attributes: Vec<AttributeData>,
 }
@@ -69,7 +69,7 @@ impl Default for FieldMetadata {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AttributeData {
     pub name: Symbol,
     pub args: HashMap<Symbol, Literal>,

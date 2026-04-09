@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::ast::RecordField;
 use crate::common::PrimitiveType;
@@ -22,11 +21,11 @@ pub struct TypeInfo<'a> {
 ///
 /// NOTE: This is being decomposed into Salsa queries (DefMap, SchemaMap, etc.).
 /// For now, it remains as the container passed between passes.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct GlobalContext {
     pub interner: Interner,
     pub definitions: Definitions,
-    pub type_metadata: HashMap<DefId, Arc<TypeMetadata>>,
+    pub type_metadata: HashMap<DefId, TypeMetadata>,
     pub registered_types: HashMap<DefId, Vec<(Symbol, BuiltInFieldType)>>,
 }
 

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::context::{DefId, DefKind, Symbol};
 use crate::error::FossilError;
-use crate::ir::{ExprId, ExprKind, Ir, Resolutions, TypeIndex, TypeckResults};
+use crate::ir::{ExprId, ExprKind, Ir, Resolutions, TypeIndex};
 use crate::passes::GlobalContext;
 use crate::registry::Registry;
 use crate::rq::{
@@ -71,7 +71,6 @@ pub struct RqLowering<'a> {
     gcx: &'a GlobalContext,
     type_index: &'a TypeIndex,
     resolutions: &'a Resolutions,
-    _typeck: &'a TypeckResults,
     registry: &'a Registry,
     env: HashMap<Symbol, RqValue>,
     rq: RelationalQuery,
@@ -84,7 +83,6 @@ impl<'a> RqLowering<'a> {
         gcx: &'a GlobalContext,
         type_index: &'a TypeIndex,
         resolutions: &'a Resolutions,
-        typeck: &'a TypeckResults,
         registry: &'a Registry,
     ) -> Self {
         Self {
@@ -92,7 +90,6 @@ impl<'a> RqLowering<'a> {
             gcx,
             type_index,
             resolutions,
-            _typeck: typeck,
             registry,
             env: HashMap::new(),
             rq: RelationalQuery::new(),
@@ -400,12 +397,9 @@ impl<'a> RqLowering<'a> {
                         return self.lower_provider_call(&func_name, args);
                     }
 
-                    // Function call — evaluate args, try to apply
-                    if let DefKind::Func(_) = &def.kind {
-                        // For known output functions (Rdf.materialize), handle specially
-                        if namespace == "Rdf" && func_name == "materialize" {
-                            return self.lower_materialize(args);
-                        }
+                    // For known output functions (Rdf.materialize), handle specially
+                    if namespace == "Rdf" && func_name == "materialize" {
+                        return self.lower_materialize(args);
                     }
                 }
 

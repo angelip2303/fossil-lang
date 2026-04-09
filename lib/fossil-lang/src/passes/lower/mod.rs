@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::ast::{self, Loc};
 use crate::context::{DefId, DefKind, Symbol, TypeMetadata};
@@ -134,7 +133,7 @@ impl Lowering {
                 let def_id = self.gcx.definitions.insert(None, name, DefKind::Type);
                 self.scopes.current_mut().types.insert(name, def_id);
                 if let Some(metadata) = self.pending_metadata.remove(&name) {
-                    self.gcx.type_metadata.insert(def_id, Arc::new(metadata));
+                    self.gcx.type_metadata.insert(def_id, metadata);
                 }
             }
         }

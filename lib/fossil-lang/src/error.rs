@@ -436,55 +436,6 @@ impl IntoIterator for FossilErrors {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct FossilWarning {
-    pub message: String,
-    pub span: SourceSpan,
-}
-
-impl FossilWarning {
-    pub fn generic(message: impl Into<String>, loc: Loc) -> Self {
-        Self {
-            message: message.into(),
-            span: loc.into(),
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct FossilWarnings(pub Vec<FossilWarning>);
-
-impl FossilWarnings {
-    pub fn new() -> Self {
-        Self(Vec::new())
-    }
-
-    pub fn push(&mut self, warning: FossilWarning) {
-        self.0.push(warning);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn extend(&mut self, other: FossilWarnings) {
-        self.0.extend(other.0);
-    }
-}
-
-impl IntoIterator for FossilWarnings {
-    type Item = FossilWarning;
-    type IntoIter = std::vec::IntoIter<FossilWarning>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

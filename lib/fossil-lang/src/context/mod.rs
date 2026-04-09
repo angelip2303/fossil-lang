@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
-
 use crate::common::Path;
 
 pub mod global;
@@ -44,6 +42,7 @@ impl<T> Debug for NodeId<T> {
 pub struct Arena<T>(la_arena::Arena<T>);
 
 impl<T: Clone> Clone for Arena<T> { fn clone(&self) -> Self { Self(self.0.clone()) } }
+impl<T: PartialEq> PartialEq for Arena<T> { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
 impl<T> Default for Arena<T> { fn default() -> Self { Self(la_arena::Arena::new()) } }
 impl<T: Debug> Debug for Arena<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -88,7 +87,7 @@ impl Symbol {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Interner {
     map: HashMap<String, Symbol>,
     strings: Vec<String>,
@@ -132,7 +131,7 @@ impl DefId {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Def {
     id: DefId,
     parent: Option<DefId>,
@@ -140,12 +139,11 @@ pub struct Def {
     pub kind: DefKind,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum DefKind {
     Mod,
     Let,
     Type,
-    Func(Arc<dyn std::any::Any + Send + Sync>),
     RecordConstructor,
 }
 
@@ -168,7 +166,7 @@ impl Def {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq)]
 pub struct Definitions {
     items: Vec<Def>,
     by_symbol: HashMap<Symbol, Vec<DefId>>,

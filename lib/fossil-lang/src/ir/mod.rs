@@ -15,7 +15,7 @@ pub type StmtId = NodeId<Stmt>;
 pub type ExprId = NodeId<Expr>;
 pub type TypeId = NodeId<Type>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CommonTypes {
     pub int: TypeId,
     pub float: TypeId,
@@ -24,7 +24,7 @@ pub struct CommonTypes {
     pub unit: TypeId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Ir {
     pub stmts: Arena<Stmt>,
     pub exprs: Arena<Expr>,
@@ -79,7 +79,7 @@ impl Ir {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Stmt {
     pub loc: Loc,
     pub kind: StmtKind,
@@ -112,7 +112,7 @@ pub enum StmtKind {
     Expr(ExprId),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Expr {
     pub loc: Loc,
     pub kind: ExprKind,
@@ -182,7 +182,7 @@ impl Argument {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Type {
     pub loc: Loc,
     pub kind: TypeKind,
@@ -238,7 +238,7 @@ impl std::fmt::Display for TypeVar {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Polytype {
     pub forall: Vec<TypeVar>,
     pub ty: TypeId,

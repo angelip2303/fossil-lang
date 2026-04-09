@@ -56,7 +56,7 @@ pub fn schema_needs(db: &dyn Db, file: SourceFile) -> Vec<SchemaRequest> {
 // ── parse ───────────────────────────────────────────────────────────
 
 /// Parse source text into AST.
-#[salsa::tracked(no_eq)]
+#[salsa::tracked]
 pub fn parse(db: &dyn Db, file: SourceFile) -> ParsedProgram {
     use salsa::Accumulator;
     match Parser::parse(file.text(db), 0) {
@@ -82,7 +82,7 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> ParsedProgram {
 // ── lower ───────────────────────────────────────────────────────────
 
 /// Lower AST to IR. Registers builtins and resolves provider schemas.
-#[salsa::tracked(no_eq)]
+#[salsa::tracked]
 pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
     use salsa::Accumulator;
     let ParsedProgram { ast, gcx } = parse(db, file);
@@ -119,7 +119,7 @@ pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
 // ── infer ───────────────────────────────────────────────────────────
 
 /// Type-check the IR. Returns IrProgram with per-expression types.
-#[salsa::tracked(no_eq)]
+#[salsa::tracked]
 pub fn infer(db: &dyn Db, file: SourceFile) -> IrProgram {
     use salsa::Accumulator;
     let lowered = lower(db, file);
@@ -149,7 +149,7 @@ pub fn infer(db: &dyn Db, file: SourceFile) -> IrProgram {
 // ── rq ──────────────────────────────────────────────────────────────
 
 /// Lower typed IR to RelationalQuery.
-#[salsa::tracked(no_eq)]
+#[salsa::tracked]
 pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
     use salsa::Accumulator;
     let program = infer(db, file);
@@ -159,7 +159,6 @@ pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
         &program.gcx,
         &program.type_index,
         &program.resolutions,
-        &program.typeck_results,
         reg,
     )
     .lower()
@@ -294,17 +293,6 @@ fn map_sql_type(sql_type: &str) -> PrimitiveType {
         PrimitiveType::Bool
     } else {
         PrimitiveType::String
-    }
-}
-
-impl FossilPlan {
-    pub fn empty() -> Self {
-        Self {
-            sources: Vec::new(),
-            sql: String::new(),
-            outputs: Vec::new(),
-            rq: RelationalQuery::new(),
-        }
     }
 }
 
