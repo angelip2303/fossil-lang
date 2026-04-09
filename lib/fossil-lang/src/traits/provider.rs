@@ -1,12 +1,9 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::ast::Loc;
 use crate::ast::{Attribute, Literal, PrimitiveType, ProviderArgument};
 use crate::context::{Interner, Symbol};
 use crate::error::{FossilError, FossilWarnings};
-#[cfg(feature = "polars")]
-use crate::traits::function::FunctionImpl;
 use crate::traits::resolver::PathResolver;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -47,8 +44,6 @@ pub struct ProviderSchema {
 
 pub struct ProviderOutput {
     pub schema: ProviderSchema,
-    #[cfg(feature = "polars")]
-    pub module_spec: Option<ModuleSpec>,
     pub warnings: FossilWarnings,
     pub type_attributes: Vec<Attribute>,
 }
@@ -57,47 +52,8 @@ impl ProviderOutput {
     pub fn new(schema: ProviderSchema) -> Self {
         Self {
             schema,
-            #[cfg(feature = "polars")]
-            module_spec: None,
             warnings: FossilWarnings::new(),
             type_attributes: Vec::new(),
-        }
-    }
-
-    #[cfg(feature = "polars")]
-    pub fn with_module(mut self, module_spec: ModuleSpec) -> Self {
-        self.module_spec = Some(module_spec);
-        self
-    }
-
-    pub fn with_warnings(mut self, warnings: FossilWarnings) -> Self {
-        self.warnings = warnings;
-        self
-    }
-
-    pub fn with_type_attributes(mut self, attrs: Vec<Attribute>) -> Self {
-        self.type_attributes = attrs;
-        self
-    }
-}
-
-#[cfg(feature = "polars")]
-pub struct ModuleSpec {
-    pub functions: Vec<LegacyFunctionDef>,
-}
-
-#[cfg(feature = "polars")]
-pub struct LegacyFunctionDef {
-    pub name: String,
-    pub implementation: Arc<dyn FunctionImpl>,
-}
-
-#[cfg(feature = "polars")]
-impl LegacyFunctionDef {
-    pub fn new(name: impl Into<String>, implementation: impl FunctionImpl + 'static) -> Self {
-        Self {
-            name: name.into(),
-            implementation: Arc::new(implementation),
         }
     }
 }
