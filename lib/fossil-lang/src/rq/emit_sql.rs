@@ -7,7 +7,7 @@
 //! Reference: PRQL's rq_to_sql, Ibis's SQLGlot emission.
 
 use super::{
-    ColId, JoinKind, RelationalQuery, RqExpr, RqLiteral, ScanSource, TableId, Transform,
+    ColId, JoinKind, RelationalQuery, RqExpr, RqLiteral, ScanSource, Transform,
 };
 
 /// Convert a RelationalQuery to a SQL string with CTEs.

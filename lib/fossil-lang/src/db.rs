@@ -6,7 +6,6 @@
 //!
 //! Reference: Salsa Calc tutorial, rust-analyzer RootDatabase.
 
-use salsa::Database as Db;
 
 /// The Fossil compiler database.
 ///
