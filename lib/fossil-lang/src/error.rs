@@ -197,10 +197,6 @@ pub enum FossilError {
     #[diagnostic(code(fossil::io))]
     Io(#[from] std::io::Error),
 
-    #[cfg(feature = "polars")]
-    #[error("polars error: {0}")]
-    #[diagnostic(code(fossil::polars))]
-    Polars(#[from] polars::error::PolarsError),
 }
 
 impl FossilError {
@@ -391,12 +387,6 @@ impl AtLoc for std::io::Error {
     }
 }
 
-#[cfg(feature = "polars")]
-impl AtLoc for polars::error::PolarsError {
-    fn at(self, loc: Loc) -> FossilError {
-        FossilError::data_error(self.to_string(), loc)
-    }
-}
 
 #[derive(Debug, Default)]
 pub struct FossilErrors(pub Vec<FossilError>);

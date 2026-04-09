@@ -69,42 +69,6 @@ pub enum PrimitiveType {
     Bool,
 }
 
-#[cfg(feature = "polars")]
-impl PrimitiveType {
-    /// Convert to the canonical Polars DataType.
-    pub fn to_polars_dtype(self) -> polars::prelude::DataType {
-        use polars::prelude::DataType;
-        match self {
-            PrimitiveType::Int => DataType::Int64,
-            PrimitiveType::Float => DataType::Float64,
-            PrimitiveType::Bool => DataType::Boolean,
-            PrimitiveType::String => DataType::String,
-        }
-    }
-}
-
-#[cfg(feature = "polars")]
-impl From<polars::prelude::DataType> for PrimitiveType {
-    fn from(value: polars::prelude::DataType) -> Self {
-        use polars::prelude::DataType;
-        match value {
-            DataType::Boolean => PrimitiveType::Bool,
-            DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::Int128
-            | DataType::UInt8
-            | DataType::UInt16
-            | DataType::UInt32
-            | DataType::UInt64 => PrimitiveType::Int,
-            DataType::Float32 | DataType::Float64 => PrimitiveType::Float,
-            DataType::String => PrimitiveType::String,
-            _ => todo!("Unsupported data type: {:?}", value),
-        }
-    }
-}
-
 /// A provider argument (literal-based or positional)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProviderArgument {
