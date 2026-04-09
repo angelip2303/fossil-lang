@@ -219,12 +219,12 @@ impl TypeChecker {
             TypeKind::Unit => "()".to_string(),
             TypeKind::Named(def_id) => {
                 let def = self.gcx.definitions.get(*def_id);
-                let name = self.gcx.interner.resolve(def.name);
+                let name = def.name.as_str();
                 if let Some(parent_id) = def.parent() {
                     let parent = self.gcx.definitions.get(parent_id);
-                    format!("{}.{}", self.gcx.interner.resolve(parent.name), name)
+                    format!("{}.{}", parent.name.as_str(), name)
                 } else {
-                    name.to_string()
+                    name
                 }
             }
             TypeKind::Function(params, ret) => {
@@ -243,7 +243,7 @@ impl TypeChecker {
             .fields
             .iter()
             .map(|(name, ty)| {
-                let field_name = self.gcx.interner.resolve(*name);
+                let field_name = name.as_str();
                 let ty_str = self.format_type(*ty);
                 format!("{}: {}", field_name, ty_str)
             })

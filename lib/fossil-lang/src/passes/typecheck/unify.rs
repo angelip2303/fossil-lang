@@ -157,7 +157,7 @@ impl TypeChecker {
                 let s = self.unify(ty1_applied, ty2_applied, loc)?;
                 subst = subst.compose(&s, &mut self.ir);
             } else {
-                let field_str = self.gcx.interner.resolve(*name1).to_string();
+                let field_str = name1.as_str();
                 return Err(FossilError::field_not_found(field_str, loc));
             }
         }

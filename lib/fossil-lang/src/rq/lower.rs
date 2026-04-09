@@ -142,7 +142,7 @@ impl<'a> RqLowering<'a> {
                 Ok(RqValue::Expr(match lit {
                     Literal::Integer(i) => RqExpr::Lit(RqLiteral::Integer(*i)),
                     Literal::String(s) => {
-                        let text = self.gcx.interner.resolve(*s).to_string();
+                        let text = s.as_str();
                         RqExpr::Lit(RqLiteral::String(text))
                     }
                     Literal::Boolean(b) => RqExpr::Lit(RqLiteral::Boolean(*b)),
@@ -174,7 +174,7 @@ impl<'a> RqLowering<'a> {
             }
 
             ExprKind::FieldAccess { field, .. } => {
-                let field_name = self.gcx.interner.resolve(*field).to_string();
+                let field_name = field.as_str();
                 let col = self.rq.intern_col(&field_name);
                 Ok(RqValue::Expr(RqExpr::Col(col)))
             }
@@ -188,7 +188,7 @@ impl<'a> RqLowering<'a> {
             ExprKind::StringInterpolation { parts, exprs } => {
                 let mut concat_parts = Vec::new();
                 for (i, part) in parts.iter().enumerate() {
-                    let s = self.gcx.interner.resolve(*part).to_string();
+                    let s = part.as_str();
                     if !s.is_empty() {
                         concat_parts.push(RqExpr::Lit(RqLiteral::String(s)));
                     }
@@ -214,13 +214,13 @@ impl<'a> RqLowering<'a> {
                     .iter()
                     .zip(right_on.iter())
                     .map(|(l, r)| {
-                        let lname = self.gcx.interner.resolve(*l).to_string();
-                        let rname = self.gcx.interner.resolve(*r).to_string();
+                        let lname = l.as_str();
+                        let rname = r.as_str();
                         (self.rq.intern_col(&lname), self.rq.intern_col(&rname))
                     })
                     .collect();
 
-                let suffix_str = suffix.map(|s| self.gcx.interner.resolve(s).to_string());
+                let suffix_str = suffix.map(|s| s.as_str());
                 let output = self.next_table("joined");
                 self.rq.transforms.push(Transform::Join {
                     left: left_table,
@@ -320,7 +320,7 @@ impl<'a> RqLowering<'a> {
                 let type_name = type_def_id
                     .map(|id| {
                         let def = self.gcx.definitions.get(id);
-                        self.gcx.interner.resolve(def.name).to_string()
+                        def.name.as_str()
                     })
                     .unwrap_or_else(|| "Unknown".to_string());
 
@@ -335,7 +335,7 @@ impl<'a> RqLowering<'a> {
                             let name = info
                                 .ctor_param_names
                                 .get(i)
-                                .map(|n| self.gcx.interner.resolve(*n).to_string())
+                                .map(|n| n.as_str())
                                 .unwrap_or_else(|| format!("_ctor_{i}"));
                             identity_exprs.push((name, val));
                         }
@@ -344,7 +344,7 @@ impl<'a> RqLowering<'a> {
 
                 // Process fields
                 for (name_sym, expr_id) in fields {
-                    let name = self.gcx.interner.resolve(*name_sym).to_string();
+                    let name = name_sym.as_str();
                     let val = self.lower_expr(*expr_id)?;
                     let rq_expr = match val {
                         RqValue::Expr(e) => e,
@@ -380,10 +380,10 @@ impl<'a> RqLowering<'a> {
 
                 if let Some(def_id) = callee_def_id {
                     let def = self.gcx.definitions.get(def_id);
-                    let func_name = self.gcx.interner.resolve(def.name).to_string();
+                    let func_name = def.name.as_str();
                     let parent = def.parent().map(|p| {
                         let pdef = self.gcx.definitions.get(p);
-                        self.gcx.interner.resolve(pdef.name).to_string()
+                        pdef.name.as_str()
                     });
                     let namespace = parent.as_deref().unwrap_or("");
 

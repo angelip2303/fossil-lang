@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::context::Symbol;
 use crate::error::FossilError;
 use crate::ir::{
     ExprId, ExprKind, Literal, Polytype, PrimitiveType, RecordFields, Type, TypeId, TypeKind,
@@ -52,7 +53,7 @@ impl TypeChecker {
                     .lookup(*def_id)
                     .ok_or_else(|| {
                         let def = self.gcx.definitions.get(*def_id);
-                        let name_str = self.gcx.interner.resolve(def.name).to_string();
+                        let name_str = def.name.as_str();
                         FossilError::undefined_variable(name_str, loc)
                     })?
                     .clone();
@@ -95,7 +96,7 @@ impl TypeChecker {
                     let valid_fields = &info.field_names;
                     for (field_name, _) in fields {
                         if !valid_fields.contains(field_name) {
-                            let name = self.gcx.interner.resolve(*field_name).to_string();
+                            let name = field_name.as_str();
                             return Err(FossilError::field_not_found(name, loc));
                         }
                     }
@@ -138,7 +139,7 @@ impl TypeChecker {
                 // Validate that left_on fields exist in left record
                 for on_sym in left_on {
                     if left_fields.lookup(*on_sym).is_none() {
-                        let name = self.gcx.interner.resolve(*on_sym).to_string();
+                        let name = on_sym.as_str();
                         return Err(FossilError::field_not_found(name, loc));
                     }
                 }
@@ -146,14 +147,14 @@ impl TypeChecker {
                 // Validate that right_on fields exist in right record
                 for on_sym in right_on {
                     if right_fields.lookup(*on_sym).is_none() {
-                        let name = self.gcx.interner.resolve(*on_sym).to_string();
+                        let name = on_sym.as_str();
                         return Err(FossilError::field_not_found(name, loc));
                     }
                 }
 
                 // Build merged Record type: left fields + right fields (suffix on conflicts)
                 let suffix_str = suffix
-                    .map(|s| self.gcx.interner.resolve(s).to_string())
+                    .map(|s| s.as_str())
                     .unwrap_or_else(|| "_right".to_string());
 
                 let left_names: HashSet<_> =
@@ -162,9 +163,9 @@ impl TypeChecker {
                 let mut merged = left_fields.fields.clone();
                 for (name, ty) in &right_fields.fields {
                     if left_names.contains(name) {
-                        let name_str = self.gcx.interner.resolve(*name);
+                        let name_str = name.as_str();
                         let suffixed = format!("{}{}", name_str, suffix_str);
-                        let suffixed_sym = self.gcx.interner.intern(&suffixed);
+                        let suffixed_sym = Symbol::intern(&suffixed);
                         merged.push((suffixed_sym, *ty));
                     } else {
                         merged.push((*name, *ty));
@@ -215,7 +216,7 @@ impl TypeChecker {
                     {
                         return Ok((subst, field_ty));
                     }
-                    let field_str = self.gcx.interner.resolve(*field).to_string();
+                    let field_str = field.as_str();
                     return Err(FossilError::field_not_found(field_str, loc));
                 }
 
@@ -225,7 +226,7 @@ impl TypeChecker {
                         if let Some(field_ty) = fields.lookup(*field) {
                             Ok((subst, field_ty))
                         } else {
-                            let field_str = self.gcx.interner.resolve(*field).to_string();
+                            let field_str = field.as_str();
                             Err(FossilError::field_not_found(field_str, loc))
                         }
                     }
@@ -236,7 +237,7 @@ impl TypeChecker {
                     }
 
                     _ => {
-                        let field_str = self.gcx.interner.resolve(*field).to_string();
+                        let field_str = field.as_str();
                         Err(FossilError::field_not_found(field_str, loc))
                     }
                 }

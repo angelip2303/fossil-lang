@@ -31,6 +31,18 @@ impl Path {
                 .join("."),
         }
     }
+
+    /// Display using the global interner (no Interner parameter needed).
+    pub fn display_global(&self) -> String {
+        match self {
+            Path::Simple(sym) => sym.as_str(),
+            Path::Qualified(parts) => parts
+                .iter()
+                .map(|sym| sym.as_str())
+                .collect::<Vec<_>>()
+                .join("."),
+        }
+    }
 }
 
 impl From<Path> for Vec<Symbol> {

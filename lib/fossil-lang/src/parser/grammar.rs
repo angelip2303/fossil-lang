@@ -11,7 +11,7 @@ use crate::ast::{
 };
 use crate::ast::Loc;
 use crate::ast::SourceId;
-use crate::context::{Interner, Symbol};
+use crate::context::Symbol;
 use crate::parser::lexer::Token;
 
 type ParserError<'a> = extra::Err<Rich<'a, Token<'a>, SimpleSpan>>;
@@ -19,13 +19,12 @@ type ParserError<'a> = extra::Err<Rich<'a, Token<'a>, SimpleSpan>>;
 #[derive(Clone)]
 pub struct AstCtx {
     pub ast: Rc<RefCell<Ast>>,
-    pub interner: Rc<RefCell<Interner>>,
     pub source_id: SourceId,
 }
 
 impl AstCtx {
     pub fn intern(&self, ident: &str) -> Symbol {
-        self.interner.borrow_mut().intern(ident)
+        Symbol::intern(ident)
     }
 
     /// Convert a SimpleSpan to a Loc with this context's source_id

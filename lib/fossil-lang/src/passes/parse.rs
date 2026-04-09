@@ -13,20 +13,11 @@ use crate::parser::{
     grammar::{AstCtx, parse_stmt},
     lexer::Token,
 };
-use crate::passes::{GlobalContext, ParsedProgram};
 
 pub struct Parser;
 
 impl Parser {
-    pub fn parse(src: &str, source_id: usize) -> Result<ParsedProgram, FossilErrors> {
-        Self::parse_with_context(src, source_id, Default::default())
-    }
-
-    pub fn parse_with_context(
-        src: &str,
-        source_id: usize,
-        mut gcx: GlobalContext,
-    ) -> Result<ParsedProgram, FossilErrors> {
+    pub fn parse(src: &str, source_id: usize) -> Result<Ast, FossilErrors> {
         // Tokenize with Logos - collect tokens WITH their original byte spans
         // Lexer errors are converted to Token::Error and reported separately
         let lexer = Token::lexer(src);
@@ -57,13 +48,11 @@ impl Parser {
             return Err(compile_errors);
         }
 
-        // Create AST and interner in Rc for shared access during parsing
+        // Create AST in Rc for shared access during parsing
         let ast = Rc::new(RefCell::new(Ast::default()));
-        let interner = Rc::new(RefCell::new(std::mem::take(&mut gcx.interner)));
 
         let ctx = AstCtx {
             ast: ast.clone(),
-            interner: interner.clone(),
             source_id,
         };
 
@@ -79,9 +68,7 @@ impl Parser {
 
         match parser.parse(input).into_result() {
             Ok(root_stmts) => {
-                // Extract AST and interner from Rc<RefCell<>>
-                // We can't unwrap the Rc due to borrow checker limitations,
-                // so we take the value from the RefCell instead
+                // Extract AST from Rc<RefCell<>>
                 let mut final_ast = ast.borrow_mut();
 
                 // Store root statements
@@ -89,15 +76,7 @@ impl Parser {
 
                 let final_ast = std::mem::take(&mut *final_ast);
 
-                let mut final_interner = interner.borrow_mut();
-                let final_interner = std::mem::take(&mut *final_interner);
-
-                gcx.interner = final_interner;
-
-                Ok(ParsedProgram {
-                    ast: final_ast,
-                    gcx,
-                })
+                Ok(final_ast)
             }
             Err(chumsky_errors) => {
                 // Collect all parse errors

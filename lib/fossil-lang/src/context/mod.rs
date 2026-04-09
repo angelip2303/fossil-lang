@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
 use crate::common::Path;
 
 pub mod global;
@@ -76,6 +77,17 @@ impl<T> IntoIterator for Arena<T> {
     }
 }
 
+// ── Global interner (r-a pattern) ──────────────────────────────────
+//
+// Single process-wide Interner behind a Mutex.  Symbol::intern() and
+// Symbol::as_str() are free functions that go through this global,
+// eliminating the need to thread an `&mut Interner` everywhere.
+
+fn global_interner() -> &'static Mutex<Interner> {
+    static INTERNER: OnceLock<Mutex<Interner>> = OnceLock::new();
+    INTERNER.get_or_init(|| Mutex::new(Interner::default()))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Symbol(u32);
 
@@ -84,6 +96,21 @@ impl Symbol {
     /// This should only be used in error handling where we don't have access to an interner
     pub const fn synthetic() -> Self {
         Symbol(0)
+    }
+
+    /// Intern a string into the global interner, returning a stable Symbol.
+    pub fn intern(s: &str) -> Self {
+        global_interner().lock().unwrap().intern(s)
+    }
+
+    /// Resolve this symbol to its string representation (allocates).
+    pub fn as_str(self) -> String {
+        global_interner().lock().unwrap().resolve(self).to_string()
+    }
+
+    /// Lookup a string in the global interner without creating it.
+    pub fn lookup(s: &str) -> Option<Self> {
+        global_interner().lock().unwrap().lookup(s)
     }
 }
 
@@ -236,7 +263,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn interner_intern_and_resolve() {
+    fn global_interner_intern_and_resolve() {
+        let sym = Symbol::intern("hello_global");
+        assert_eq!(sym.as_str(), "hello_global");
+    }
+
+    #[test]
+    fn local_interner_intern_and_resolve() {
         let mut interner = Interner::default();
         let sym = interner.intern("hello");
         assert_eq!(interner.resolve(sym), "hello");
@@ -255,18 +288,16 @@ mod tests {
 
     #[test]
     fn definitions_insert_and_get() {
-        let mut interner = Interner::default();
+        let sym = Symbol::intern("foo_test");
         let mut defs = Definitions::default();
-        let sym = interner.intern("foo");
         let def_id = defs.insert(None, sym, DefKind::Let);
         assert_eq!(defs.get(def_id).name, sym);
     }
 
     #[test]
     fn definitions_resolve_path() {
-        let mut interner = Interner::default();
+        let sym = Symbol::intern("my_var_test");
         let mut defs = Definitions::default();
-        let sym = interner.intern("my_var");
         let def_id = defs.insert(None, sym, DefKind::Let);
         assert_eq!(defs.resolve(&Path::Simple(sym)), Some(def_id));
     }

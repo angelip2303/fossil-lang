@@ -127,7 +127,7 @@ impl Lowering {
         }).collect();
         for (loc, name) in type_decls {
             if self.scopes.current_mut().types.contains_key(&name) {
-                let name_str = self.gcx.interner.resolve(name).to_string();
+                let name_str = name.as_str().to_string();
                 errors.push(FossilError::already_defined(name_str, loc, loc));
             } else {
                 let def_id = self.gcx.definitions.insert(None, name, DefKind::Type);
@@ -291,7 +291,7 @@ impl Lowering {
                                 .expr_rewrites
                                 .insert(ir_expr_id, current);
                         } else {
-                            let path_str = ast_path.display(&self.gcx.interner);
+                            let path_str = ast_path.display_global();
                             errors.push(FossilError::undefined_path(path_str, loc));
                         }
                     }
@@ -580,14 +580,14 @@ impl Lowering {
                 if let Some(def_id) = self.gcx.definitions.resolve(&Path::Simple(*name)) {
                     return Some(def_id);
                 }
-                let name_str = self.gcx.interner.resolve(*name).to_string();
+                let name_str = name.as_str();
                 errors.push(make_error(name_str, loc));
                 None
             }
             Path::Qualified(parts) => {
                 let ast_path = Path::Qualified(parts.clone());
                 self.gcx.definitions.resolve(&ast_path).or_else(|| {
-                    let path_str = ast_path.display(&self.gcx.interner);
+                    let path_str = ast_path.display_global();
                     errors.push(make_error(path_str, loc));
                     None
                 })

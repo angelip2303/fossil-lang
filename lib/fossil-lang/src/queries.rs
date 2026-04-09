@@ -1,25 +1,24 @@
-//! Compilation queries — 8 Salsa tracked functions.
+//! Compilation queries — Salsa tracked functions.
 //!
-//! Each pass is a tracked query that reads from other queries (not GlobalContext).
+//! Each pass is a tracked query that reads from other queries.
 //! Pattern: rust-analyzer's query architecture.
 //!
 //! Dependency graph:
-//!   SourceFile → parse → def_map
-//!                    ├──→ source_schemas
-//!                    └──→ type_meta
-//!   def_map + source_schemas + parse → lower
-//!   lower + def_map + source_schemas + type_meta → infer
+//!   SourceFile → parse
+//!   parse → lower (registers builtins + provider schemas into GlobalContext)
+//!   lower → infer
 //!   infer → rq → plan
 
 use std::sync::OnceLock;
 
+use crate::ast::Ast;
 use crate::builtins;
 use crate::common::PrimitiveType;
-use crate::context::extract_type_metadata;
+use crate::context::{Symbol, extract_type_metadata};
 use crate::db::{Db, Diagnostic, Severity, SourceFile};
 use crate::passes::parse::Parser;
 use crate::passes::typecheck::TypeChecker;
-use crate::passes::{GlobalContext, IrProgram, LowerResult, ParsedProgram};
+use crate::passes::{GlobalContext, IrProgram, LowerResult};
 use crate::plan::FossilPlan;
 use crate::registry::{OpImpl, Registry};
 use crate::rq::emit_sql::rq_to_sql;
@@ -49,18 +48,18 @@ pub struct SchemaRequest {
 /// Host resolves all in parallel, then calls plan().
 #[salsa::tracked]
 pub fn schema_needs(db: &dyn Db, file: SourceFile) -> Vec<SchemaRequest> {
-    let p = parse(db, file);
-    find_provider_calls_from_ast(&p.ast, &p.gcx.interner)
+    let ast = parse(db, file);
+    find_provider_calls_from_ast(&ast)
 }
 
 // ── parse ───────────────────────────────────────────────────────────
 
 /// Parse source text into AST.
 #[salsa::tracked]
-pub fn parse(db: &dyn Db, file: SourceFile) -> ParsedProgram {
+pub fn parse(db: &dyn Db, file: SourceFile) -> Ast {
     use salsa::Accumulator;
     match Parser::parse(file.text(db), 0) {
-        Ok(p) => p,
+        Ok(ast) => ast,
         Err(errors) => {
             for e in &errors.0 {
                 Diagnostic {
@@ -71,10 +70,7 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> ParsedProgram {
                 }
                 .accumulate(db);
             }
-            ParsedProgram {
-                ast: Default::default(),
-                gcx: Default::default(),
-            }
+            Ast::default()
         }
     }
 }
@@ -85,14 +81,12 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> ParsedProgram {
 #[salsa::tracked]
 pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
     use salsa::Accumulator;
-    let ParsedProgram { ast, gcx } = parse(db, file);
-    let mut gcx = gcx;
+    let ast = parse(db, file);
+    let mut gcx = GlobalContext::default();
     let reg = registry();
 
     register_builtins(&mut gcx, reg);
-    // Clone interner for provider call scanning (avoids borrow conflict with gcx mutation)
-    let interner_snapshot = gcx.interner.clone();
-    register_provider_schemas_from_ast(db, &ast, &interner_snapshot, &mut gcx, reg);
+    register_provider_schemas_from_ast(db, &ast, &mut gcx, reg);
 
     let metadata = extract_type_metadata(&ast);
     match crate::passes::lower::lower_with_metadata(ast, gcx, metadata) {
@@ -193,16 +187,16 @@ fn register_builtins(gcx: &mut GlobalContext, reg: &Registry) {
     use crate::context::DefKind;
     for func in &reg.functions {
         if func.namespace.is_empty() {
-            let sym = gcx.interner.intern(func.name);
+            let sym = Symbol::intern(func.name);
             gcx.definitions.insert(None, sym, DefKind::Let);
         } else {
-            let ns_sym = gcx.interner.intern(func.namespace);
+            let ns_sym = Symbol::intern(func.namespace);
             let ns_def = gcx
                 .definitions
                 .get_by_symbol(ns_sym)
                 .map(|d| d.id())
                 .unwrap_or_else(|| gcx.definitions.insert(None, ns_sym, DefKind::Mod));
-            let name_sym = gcx.interner.intern(func.name);
+            let name_sym = Symbol::intern(func.name);
             gcx.definitions.insert(Some(ns_def), name_sym, DefKind::Let);
         }
     }
@@ -211,11 +205,10 @@ fn register_builtins(gcx: &mut GlobalContext, reg: &Registry) {
 fn register_provider_schemas_from_ast(
     db: &dyn Db,
     ast: &crate::ast::Ast,
-    interner: &crate::context::Interner,
     gcx: &mut GlobalContext,
     reg: &Registry,
 ) {
-    for call in find_provider_calls_from_ast(ast, interner) {
+    for call in find_provider_calls_from_ast(ast) {
         let func = match reg.find_source(&call.provider) {
             Some(f) => f,
             None => continue,
@@ -249,7 +242,6 @@ fn register_provider_schemas_from_ast(
 
 fn find_provider_calls_from_ast(
     ast: &crate::ast::Ast,
-    interner: &crate::context::Interner,
 ) -> Vec<SchemaRequest> {
     use crate::ast::{ExprKind, StmtKind};
     use crate::common::{Literal, ProviderArgument};
@@ -260,10 +252,10 @@ fn find_provider_calls_from_ast(
         if let StmtKind::Let { value, .. } = &stmt.kind {
             let expr = ast.exprs.get(*value);
             if let ExprKind::ProviderInvocation { provider, args } = &expr.kind {
-                let provider_name = provider.display(interner);
+                let provider_name = provider.display_global();
                 let path = args.iter().find_map(|arg| match arg {
                     ProviderArgument::Positional(Literal::String(s)) => {
-                        Some(interner.resolve(*s).to_string())
+                        Some(s.as_str())
                     }
                     _ => None,
                 });
@@ -307,8 +299,8 @@ mod tests {
     fn parse_literal() {
         let db = FossilDb::default();
         let file = SourceFile::new(&db, "let x = 42".into(), "test".into());
-        let p = parse(&db, file);
-        assert!(!p.ast.root.is_empty());
+        let ast = parse(&db, file);
+        assert!(!ast.root.is_empty());
     }
 
     #[test]
@@ -348,7 +340,7 @@ mod tests {
         let reg = registry();
         assert!(reg.find_source("csv").is_some());
         assert!(reg.find_source("parquet").is_some());
-        assert!(reg.find_function("Rdf", "materialize").is_some());
+        assert!(reg.find_source("excel").is_some());
     }
 
     #[test]
