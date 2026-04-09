@@ -1,6 +1,6 @@
 //! DEPRECATED: Runtime module — replaced by RQ + FossilPlan.
 //!
-//! Minimal stubs kept for downstream crate compatibility.
+//! Gated behind `legacy-runtime` feature (enabled by default).
 //! Will be fully removed when downstream crates migrate to FunctionDef.
 
 pub mod executor {
