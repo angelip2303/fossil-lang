@@ -6,14 +6,17 @@
 //! Eventually these will become Salsa tracked queries. For now they're
 //! plain functions that call through the existing pipeline.
 
+#[cfg(feature = "polars")]
 use crate::compiler::{CompilerInput, TolerantResult};
 use crate::error::FossilErrors;
+#[cfg(feature = "polars")]
 use crate::passes::GlobalContext;
 use crate::plan::FossilPlan;
 use crate::registry::Registry;
 use crate::rq::emit_sql::rq_to_sql;
 use crate::rq::lower::RqLowering;
 
+#[cfg(feature = "polars")]
 /// Compile a Fossil script to a FossilPlan (SQL + metadata).
 ///
 /// This is the main entry point for Fossil v2: source → plan.
@@ -50,6 +53,7 @@ pub fn compile_to_plan(
     Ok(FossilPlan::from_rq(rq, sql))
 }
 
+#[cfg(feature = "polars")]
 /// Compile tolerantly (for LSP) — returns partial results even on type errors.
 pub fn compile_tolerant_to_plan(
     source: &str,
@@ -90,9 +94,6 @@ pub fn compile_tolerant_to_plan(
 }
 
 /// Create the default Registry with all built-in functions and attributes.
-///
-/// This is the composition root for the compiler. In keasy, each crate
-/// calls register() to add its FunctionDefs and AttributeOps.
 pub fn default_registry() -> Registry {
     let mut r = Registry::new();
     crate::builtins::register(&mut r);
@@ -100,6 +101,7 @@ pub fn default_registry() -> Registry {
 }
 
 #[cfg(test)]
+#[cfg(feature = "polars")]
 mod tests {
     use super::*;
 

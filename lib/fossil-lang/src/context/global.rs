@@ -4,7 +4,9 @@ use std::sync::Arc;
 use crate::ast::RecordField;
 use crate::common::PrimitiveType;
 use crate::context::{DefId, DefKind, Definitions, Interner, Symbol, TypeMetadata};
-use crate::traits::provider::{ModuleSpec, ProviderInfo, TypeProviderImpl};
+#[cfg(feature = "polars")]
+use crate::traits::provider::ModuleSpec;
+use crate::traits::provider::{ProviderInfo, TypeProviderImpl};
 use crate::traits::resolver::{DefaultPathResolver, PathResolver};
 #[cfg(feature = "polars")]
 use crate::traits::services::ExternalServices;
@@ -22,32 +24,20 @@ pub struct TypeInfo<'a> {
     pub interner: &'a Interner,
 }
 
+#[cfg(feature = "polars")]
 pub type ModuleGeneratorFn = Arc<dyn Fn(&TypeInfo) -> Option<ModuleSpec> + Send + Sync>;
 
-/// Global compilation context shared across all compiler passes and runtime.
-///
-/// Fields are grouped into four concerns:
-/// - **Core identity**: `interner` and `definitions` — symbol table and definition registry
-/// - **Type metadata**: `type_metadata` and `registered_types` — type attributes and field type info
-/// - **Extension points**: `module_generators` — stdlib hooks
-/// - **I/O configuration**: `path_resolver` — path resolution
+/// Global compilation context.
 #[derive(Clone)]
 pub struct GlobalContext {
-    // -- Core identity --
     pub interner: Interner,
     pub definitions: Definitions,
-
-    // -- Type metadata --
     pub type_metadata: HashMap<DefId, Arc<TypeMetadata>>,
     pub registered_types: HashMap<DefId, Vec<(Symbol, BuiltInFieldType)>>,
-
-    // -- Extension points --
+    #[cfg(feature = "polars")]
     pub module_generators: Vec<ModuleGeneratorFn>,
-
-    // -- I/O configuration --
     pub path_resolver: Arc<dyn PathResolver>,
-
-    // -- External services (LLM, etc.) --
+    #[cfg(feature = "polars")]
     pub external_services: Option<Arc<dyn ExternalServices>>,
 }
 
@@ -59,11 +49,13 @@ impl GlobalContext {
         self.definitions.insert(None, symbol, def_kind);
     }
 
+    #[cfg(feature = "polars")]
     pub fn register_module(&mut self, name: &str, spec: ModuleSpec) {
         let sym = self.interner.intern(name);
         self.register_module_by_symbol(sym, spec);
     }
 
+    #[cfg(feature = "polars")]
     pub fn register_module_by_symbol(&mut self, name: Symbol, spec: ModuleSpec) {
         let module_id = self
             .definitions
@@ -132,8 +124,10 @@ impl Default for GlobalContext {
             definitions: Definitions::default(),
             type_metadata: HashMap::new(),
             registered_types: HashMap::new(),
+            #[cfg(feature = "polars")]
             module_generators: Vec::new(),
             path_resolver: Arc::new(DefaultPathResolver),
+            #[cfg(feature = "polars")]
             external_services: None,
         }
     }

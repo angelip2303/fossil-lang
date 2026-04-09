@@ -1,26 +1,34 @@
+#[cfg(feature = "polars")]
 use std::fs::read_to_string;
+#[cfg(feature = "polars")]
 use std::path::PathBuf;
 
+#[cfg(feature = "polars")]
 use crate::ast::Loc;
+#[cfg(feature = "polars")]
 use crate::context::extract_type_metadata;
+#[cfg(feature = "polars")]
 use crate::error::{FossilError, FossilErrors, FossilWarnings};
-use crate::passes::{
-    GlobalContext, IrProgram, expand::ProviderExpander, lower, parse::Parser,
-    typecheck::TypeChecker,
-};
+#[cfg(feature = "polars")]
+use crate::passes::{GlobalContext, IrProgram, lower, parse::Parser, typecheck::TypeChecker};
+#[cfg(feature = "polars")]
+use crate::passes::expand::ProviderExpander;
 
+#[cfg(feature = "polars")]
 #[derive(Debug, Clone)]
 pub enum CompilerInput {
     File(PathBuf),
     Source { name: String, content: String },
 }
 
+#[cfg(feature = "polars")]
 /// Result of strict compilation (no type errors).
 pub struct CompileResult {
     pub program: IrProgram,
     pub warnings: FossilWarnings,
 }
 
+#[cfg(feature = "polars")]
 /// Result of tolerant compilation — always includes the program (possibly partial).
 pub struct TolerantResult {
     pub program: IrProgram,
@@ -28,11 +36,13 @@ pub struct TolerantResult {
     pub warnings: FossilWarnings,
 }
 
+#[cfg(feature = "polars")]
 pub struct Compiler {
     source_id: usize,
     gcx: Option<GlobalContext>,
 }
 
+#[cfg(feature = "polars")]
 impl Default for Compiler {
     fn default() -> Self {
         Self {
@@ -42,6 +52,7 @@ impl Default for Compiler {
     }
 }
 
+#[cfg(feature = "polars")]
 impl Compiler {
     pub fn new() -> Self {
         Self::default()
@@ -55,6 +66,7 @@ impl Compiler {
     }
 
     /// Strict compilation — fails on any error (parse, lower, or type-check).
+    #[cfg(feature = "polars")]
     pub fn compile(&self, input: CompilerInput) -> Result<CompileResult, FossilErrors> {
         let result = self.compile_tolerant(input)?;
         if result.errors.is_empty() {
@@ -67,8 +79,8 @@ impl Compiler {
         }
     }
 
-    /// Tolerant compilation: parse/expand/lower errors are still fatal,
-    /// but type-check errors produce partial results (for LSP completions).
+    /// Tolerant compilation (requires polars feature for ProviderExpander).
+    #[cfg(feature = "polars")]
     pub fn compile_tolerant(&self, input: CompilerInput) -> Result<TolerantResult, FossilErrors> {
         let src = match input {
             CompilerInput::File(path) => {

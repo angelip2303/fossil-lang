@@ -5,6 +5,7 @@ use crate::ast::Loc;
 use crate::ast::{Attribute, Literal, PrimitiveType, ProviderArgument};
 use crate::context::{Interner, Symbol};
 use crate::error::{FossilError, FossilWarnings};
+#[cfg(feature = "polars")]
 use crate::traits::function::FunctionImpl;
 use crate::traits::resolver::PathResolver;
 
@@ -46,10 +47,9 @@ pub struct ProviderSchema {
 
 pub struct ProviderOutput {
     pub schema: ProviderSchema,
+    #[cfg(feature = "polars")]
     pub module_spec: Option<ModuleSpec>,
     pub warnings: FossilWarnings,
-    /// Provider-generated type-level attributes (e.g., base IRI from ShEx).
-    /// These are merged with user attributes during expansion; user attrs override.
     pub type_attributes: Vec<Attribute>,
 }
 
@@ -57,12 +57,14 @@ impl ProviderOutput {
     pub fn new(schema: ProviderSchema) -> Self {
         Self {
             schema,
+            #[cfg(feature = "polars")]
             module_spec: None,
             warnings: FossilWarnings::new(),
             type_attributes: Vec::new(),
         }
     }
 
+    #[cfg(feature = "polars")]
     pub fn with_module(mut self, module_spec: ModuleSpec) -> Self {
         self.module_spec = Some(module_spec);
         self
@@ -79,16 +81,19 @@ impl ProviderOutput {
     }
 }
 
+#[cfg(feature = "polars")]
 pub struct ModuleSpec {
-    pub functions: Vec<FunctionDef>,
+    pub functions: Vec<LegacyFunctionDef>,
 }
 
-pub struct FunctionDef {
+#[cfg(feature = "polars")]
+pub struct LegacyFunctionDef {
     pub name: String,
     pub implementation: Arc<dyn FunctionImpl>,
 }
 
-impl FunctionDef {
+#[cfg(feature = "polars")]
+impl LegacyFunctionDef {
     pub fn new(name: impl Into<String>, implementation: impl FunctionImpl + 'static) -> Self {
         Self {
             name: name.into(),
@@ -96,6 +101,10 @@ impl FunctionDef {
         }
     }
 }
+
+// Re-export under old name for backward compat
+#[cfg(feature = "polars")]
+pub type FunctionDef = LegacyFunctionDef;
 
 #[derive(Debug, Clone)]
 pub struct ProviderParamInfo {
