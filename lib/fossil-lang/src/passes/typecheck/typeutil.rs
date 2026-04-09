@@ -198,7 +198,7 @@ impl Subst {
     }
 }
 
-impl TypeChecker {
+impl TypeChecker<'_> {
     pub fn fresh_type_var(&mut self, loc: Loc) -> TypeId {
         let var = self.tvg.fresh();
         self.ir.types.alloc(Type {
@@ -218,11 +218,9 @@ impl TypeChecker {
             TypeKind::Var(v) => format!("'{}", v.0),
             TypeKind::Unit => "()".to_string(),
             TypeKind::Named(def_id) => {
-                let def = self.gcx.definitions.get(*def_id);
-                let name = def.name.as_str();
-                if let Some(parent_id) = def.parent() {
-                    let parent = self.gcx.definitions.get(parent_id);
-                    format!("{}.{}", parent.name.as_str(), name)
+                let name = def_id.name(self.db).as_str();
+                if let Some(ns) = def_id.namespace(self.db) {
+                    format!("{}.{}", ns.as_str(), name)
                 } else {
                     name
                 }
@@ -280,14 +278,20 @@ impl TypeChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::{DefId, Symbol};
+    use crate::context::{DefId, DefKindTag, Symbol};
+    use crate::db::FossilDb;
     use crate::ir::{Ir, Polytype, PrimitiveType, Type, TypeKind, TypeVar};
+
+    fn test_def_id(db: &FossilDb) -> DefId {
+        DefId::new(db, None, Symbol::intern("test"), DefKindTag::Let)
+    }
 
     #[test]
     fn env_insert_and_lookup() {
+        let db = FossilDb::default();
         let ir = Ir::default();
         let int_ty = ir.int_type();
-        let def_id = DefId::new(0);
+        let def_id = test_def_id(&db);
         let poly = Polytype::mono(int_ty);
 
         let mut env = TypeEnv::default();
@@ -326,10 +330,11 @@ mod tests {
 
     #[test]
     fn generalize_env_constrains() {
+        let db = FossilDb::default();
         let mut ir = Ir::default();
         let var0 = TypeVar(0);
         let var_ty = ir.var_type(var0);
-        let def_id = DefId::new(0);
+        let def_id = test_def_id(&db);
 
         let mut env = TypeEnv::default();
         env.insert(def_id, Polytype::mono(var_ty));
@@ -500,8 +505,9 @@ mod tests {
 
     #[test]
     fn apply_preserves_named() {
+        let db = FossilDb::default();
         let mut ir = Ir::default();
-        let named_ty = ir.named_type(DefId::new(0));
+        let named_ty = ir.named_type(test_def_id(&db));
 
         let var0 = TypeVar(0);
         let int_ty = ir.int_type();

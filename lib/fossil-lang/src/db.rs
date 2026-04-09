@@ -6,6 +6,7 @@
 //!
 //! Reference: Salsa Calc tutorial, rust-analyzer RootDatabase.
 
+use crate::context::Symbol;
 
 /// Host capability: resolve source schemas at compile time.
 ///
@@ -42,6 +43,81 @@ impl salsa::Database for FossilDb {}
 impl HasSchemaResolver for FossilDb {
     fn source_schema(&self, _provider: &str, _path: &str) -> Option<Vec<(String, String)>> {
         None
+    }
+}
+
+// ── DefId: Salsa-interned definition identifier ────────────────────
+//
+// Replaces the old sequential DefId(u32) from context/mod.rs.
+// Each definition (let, type, module, constructor) gets a globally unique
+// interned id. Two DefIds with the same (namespace, name, kind) are equal.
+//
+// Architecture: `InternedDef<'db>` is the Salsa interned type (carries 'db
+// lifetime). `DefId` is a lifetime-free wrapper around `salsa::Id` that can
+// be stored freely in IR data structures. Convert between them:
+//   - `DefId::from(interned_def)` — erase lifetime
+//   - `def_id.lookup(db)` — restore InternedDef<'db>
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DefKindTag {
+    Mod,
+    Let,
+    Type,
+    RecordConstructor,
+}
+
+#[salsa::interned]
+pub struct InternedDef<'db> {
+    pub namespace: Option<Symbol>,
+    pub name: Symbol,
+    pub kind: DefKindTag,
+}
+
+/// Lifetime-free definition identifier. Wraps a `salsa::Id` so it can be
+/// stored in IR arenas, HashMaps, etc. without propagating `'db`.
+///
+/// Create via `DefId::new(db, namespace, name, kind)`.
+/// Access fields via `def_id.name(db)`, `def_id.kind(db)`, etc.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DefId(salsa::Id);
+
+impl std::fmt::Debug for DefId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DefId({:?})", self.0)
+    }
+}
+
+impl DefId {
+    /// Create (or intern) a definition in the Salsa database.
+    pub fn new(db: &dyn Db, namespace: Option<Symbol>, name: Symbol, kind: DefKindTag) -> Self {
+        let interned = InternedDef::new(db, namespace, name, kind);
+        Self(salsa::plumbing::AsId::as_id(&interned))
+    }
+
+    /// Recover the Salsa interned value to access fields.
+    fn lookup<'db>(self, _db: &'db dyn Db) -> InternedDef<'db> {
+        // InternedDef is (Id, PhantomData) — FromId reconstructs it from the raw Id.
+        // The `_db` parameter enforces the caller has a valid database reference,
+        // ensuring the salsa::Id is valid for the 'db lifetime.
+        <InternedDef<'db> as salsa::plumbing::FromId>::from_id(self.0)
+    }
+
+    pub fn name(self, db: &dyn Db) -> Symbol {
+        self.lookup(db).name(db)
+    }
+
+    pub fn namespace(self, db: &dyn Db) -> Option<Symbol> {
+        self.lookup(db).namespace(db)
+    }
+
+    pub fn kind(self, db: &dyn Db) -> DefKindTag {
+        self.lookup(db).kind(db)
+    }
+}
+
+impl From<InternedDef<'_>> for DefId {
+    fn from(interned: InternedDef<'_>) -> Self {
+        Self(salsa::plumbing::AsId::as_id(&interned))
     }
 }
 

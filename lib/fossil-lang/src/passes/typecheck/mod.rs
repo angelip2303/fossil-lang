@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::context::DefId;
 use crate::context::global::BuiltInFieldType;
+use crate::db::Db;
 use crate::error::{FossilError, FossilErrors};
 use crate::ir::{ExprId, Ir, Polytype, PrimitiveType, RecordFields, Resolutions, StmtId, StmtKind, Type, TypeDeclInfo, TypeId, TypeIndex, TypeKind, TypeVar, TypeckResults};
 use crate::passes::{GlobalContext, IrProgram};
@@ -25,7 +26,8 @@ impl TypeVarGen {
     }
 }
 
-pub struct TypeChecker {
+pub struct TypeChecker<'a> {
+    pub(crate) db: &'a dyn Db,
     pub(crate) ir: Ir,
     pub(crate) gcx: GlobalContext,
     pub(crate) resolutions: Resolutions,
@@ -38,9 +40,10 @@ pub struct TypeChecker {
     local_subst: Subst,
 }
 
-impl TypeChecker {
-    pub fn new(ir: Ir, gcx: GlobalContext, resolutions: Resolutions) -> Self {
+impl<'a> TypeChecker<'a> {
+    pub fn new(db: &'a dyn Db, ir: Ir, gcx: GlobalContext, resolutions: Resolutions) -> Self {
         let mut checker = Self {
+            db,
             ir,
             gcx,
             resolutions,
@@ -115,7 +118,7 @@ impl TypeChecker {
     }
 
     fn init_record_constructors(&mut self) {
-        use crate::context::DefKind;
+        use crate::context::DefKindTag;
         use crate::ir::CtorParam;
 
         // Collect ctor_params from IR statements for types that have them
@@ -132,10 +135,9 @@ impl TypeChecker {
         }
 
         let pairs: Vec<_> = self.type_index.keys().filter_map(|&type_def_id| {
-            let type_def = self.gcx.definitions.get(type_def_id);
+            let type_name = type_def_id.name(self.db);
             let ctor_def_id = self.gcx.definitions
-                .find_by_symbol(type_def.name, |k| matches!(k, DefKind::RecordConstructor))
-                .map(|def| def.id())?;
+                .find_by_symbol(type_name, self.db, |k| matches!(k, DefKindTag::RecordConstructor))?;
             Some((type_def_id, ctor_def_id))
         }).collect();
 
@@ -222,10 +224,9 @@ impl TypeChecker {
 
         // Export binding types for LSP completions (Let bindings: projections, let statements).
         {
-            use crate::context::DefKind;
+            use crate::context::DefKindTag;
             for (&def_id, poly) in &self.env.bindings {
-                let def = self.gcx.definitions.get(def_id);
-                if matches!(def.kind, DefKind::Let) {
+                if matches!(def_id.kind(self.db), DefKindTag::Let) {
                     let resolved_ty = self.global_subst.apply(poly.ty, &mut self.ir);
                     self.typeck_results.binding_types.insert(def_id, resolved_ty);
                 }

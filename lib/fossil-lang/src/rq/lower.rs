@@ -8,7 +8,8 @@
 
 use std::collections::HashMap;
 
-use crate::context::{DefId, DefKind, Symbol};
+use crate::context::{DefId, DefKindTag, Symbol};
+use crate::db::Db;
 use crate::error::FossilError;
 use crate::ir::{ExprId, ExprKind, Ir, Resolutions, TypeIndex};
 use crate::passes::GlobalContext;
@@ -67,8 +68,8 @@ impl RqValue {
 
 /// RQ lowering context.
 pub struct RqLowering<'a> {
+    db: &'a dyn Db,
     ir: &'a Ir,
-    gcx: &'a GlobalContext,
     type_index: &'a TypeIndex,
     resolutions: &'a Resolutions,
     registry: &'a Registry,
@@ -79,15 +80,16 @@ pub struct RqLowering<'a> {
 
 impl<'a> RqLowering<'a> {
     pub fn new(
+        db: &'a dyn Db,
         ir: &'a Ir,
-        gcx: &'a GlobalContext,
+        _gcx: &'a GlobalContext,
         type_index: &'a TypeIndex,
         resolutions: &'a Resolutions,
         registry: &'a Registry,
     ) -> Self {
         Self {
+            db,
             ir,
-            gcx,
             type_index,
             resolutions,
             registry,
@@ -161,14 +163,14 @@ impl<'a> RqLowering<'a> {
                         )
                     })?;
 
-                let def = self.gcx.definitions.get(def_id);
+                let name = def_id.name(self.db);
 
-                if let Some(val) = self.env.get(&def.name) {
+                if let Some(val) = self.env.get(&name) {
                     return Ok(val.clone());
                 }
 
-                match &def.kind {
-                    DefKind::RecordConstructor => Ok(RqValue::Unit), // handled in RecordInstance
+                match def_id.kind(self.db) {
+                    DefKindTag::RecordConstructor => Ok(RqValue::Unit), // handled in RecordInstance
                     _ => Ok(RqValue::Unit),
                 }
             }
@@ -318,10 +320,7 @@ impl<'a> RqLowering<'a> {
             } => {
                 let type_def_id = self.resolutions.expr_defs.get(&expr_id).copied();
                 let type_name = type_def_id
-                    .map(|id| {
-                        let def = self.gcx.definitions.get(id);
-                        def.name.as_str()
-                    })
+                    .map(|id| id.name(self.db).as_str())
                     .unwrap_or_else(|| "Unknown".to_string());
 
                 let mut select_items = Vec::new();
@@ -362,7 +361,9 @@ impl<'a> RqLowering<'a> {
                 Ok(RqValue::Emission {
                     table: TableId(0), // placeholder, projection sets real table
                     specs: vec![EmissionSpec {
-                        type_def_id: type_def_id.unwrap_or(DefId::new(0)),
+                        type_def_id: type_def_id.unwrap_or_else(|| {
+                            DefId::new(self.db, None, Symbol::intern("_unknown"), DefKindTag::Type)
+                        }),
                         type_name,
                         select_items,
                         identity_exprs,
@@ -379,16 +380,13 @@ impl<'a> RqLowering<'a> {
                 let callee_def_id = self.resolutions.expr_defs.get(callee).copied();
 
                 if let Some(def_id) = callee_def_id {
-                    let def = self.gcx.definitions.get(def_id);
-                    let func_name = def.name.as_str();
-                    let parent = def.parent().map(|p| {
-                        let pdef = self.gcx.definitions.get(p);
-                        pdef.name.as_str()
-                    });
-                    let namespace = parent.as_deref().unwrap_or("");
+                    let func_name = def_id.name(self.db).as_str();
+                    let namespace = def_id.namespace(self.db)
+                        .map(|ns| ns.as_str())
+                        .unwrap_or_default();
 
                     // Try Registry lookup
-                    if let Some(func_def) = self.registry.find_function(namespace, &func_name) {
+                    if let Some(func_def) = self.registry.find_function(&namespace, &func_name) {
                         return self.lower_registry_function(func_def, args);
                     }
 
@@ -417,7 +415,9 @@ impl<'a> RqLowering<'a> {
                     .expr_defs
                     .get(&expr_id)
                     .copied()
-                    .unwrap_or(DefId::new(0));
+                    .unwrap_or_else(|| {
+                        DefId::new(self.db, None, Symbol::intern("_unknown"), DefKindTag::Type)
+                    });
                 let keys: Vec<RqExpr> = args
                     .iter()
                     .map(|&a| self.lower_expr(a).and_then(|v| v.into_expr()))

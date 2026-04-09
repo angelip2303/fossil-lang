@@ -2,13 +2,17 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
-use crate::common::Path;
 
 pub mod global;
 pub mod metadata;
 
 pub use self::global::*;
 pub use self::metadata::*;
+// Re-export DefId and DefKindTag from db.rs so `use crate::context::DefId` still works.
+// DefKindTag replaces the old DefKind enum (same variants).
+pub use crate::db::{DefId, DefKindTag, InternedDef};
+/// Compat alias: old code imports `DefKind`; new name is `DefKindTag`.
+pub type DefKind = DefKindTag;
 
 // ── Arena + NodeId: thin wrappers over la-arena ──────────────────────
 //
@@ -145,118 +149,9 @@ impl Interner {
 
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DefId(u32);
-
-impl DefId {
-    pub fn new(index: u32) -> Self {
-        Self(index)
-    }
-
-    pub fn index(self) -> u32 {
-        self.0
-    }
-}
-
-#[derive(Clone, PartialEq)]
-pub struct Def {
-    id: DefId,
-    parent: Option<DefId>,
-    pub name: Symbol,
-    pub kind: DefKind,
-}
-
-#[derive(Clone, PartialEq)]
-pub enum DefKind {
-    Mod,
-    Let,
-    Type,
-    RecordConstructor,
-}
-
-impl Def {
-    pub fn new(id: DefId, parent: Option<DefId>, name: Symbol, kind: DefKind) -> Self {
-        Self {
-            id,
-            parent,
-            name,
-            kind,
-        }
-    }
-
-    pub fn id(&self) -> DefId {
-        self.id
-    }
-
-    pub fn parent(&self) -> Option<DefId> {
-        self.parent
-    }
-}
-
-#[derive(Default, Clone, PartialEq)]
-pub struct Definitions {
-    items: Vec<Def>,
-    by_symbol: HashMap<Symbol, Vec<DefId>>,
-    children: HashMap<DefId, HashMap<Symbol, DefId>>,
-}
-
-impl Definitions {
-    pub fn get(&self, id: DefId) -> &Def {
-        &self.items[id.index() as usize]
-    }
-
-    pub fn get_by_symbol(&self, name: Symbol) -> Option<&Def> {
-        self.by_symbol
-            .get(&name)
-            .and_then(|ids| ids.first())
-            .map(|id| self.get(*id))
-    }
-
-    pub fn find_by_symbol(&self, name: Symbol, pred: impl Fn(&DefKind) -> bool) -> Option<&Def> {
-        self.by_symbol
-            .get(&name)?
-            .iter()
-            .map(|id| self.get(*id))
-            .find(|def| pred(&def.kind))
-    }
-
-    pub fn insert(&mut self, parent: Option<DefId>, name: Symbol, kind: DefKind) -> DefId {
-        let id = DefId::new(self.items.len() as u32);
-        self.items.push(Def::new(id, parent, name, kind));
-        self.by_symbol.entry(name).or_default().push(id);
-        if let Some(parent_id) = parent {
-            self.children.entry(parent_id).or_default().insert(name, id);
-        }
-        id
-    }
-
-    pub fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-
-    pub fn resolve(&self, path: &Path) -> Option<DefId> {
-        match path {
-            Path::Simple(sym) => self.get_by_symbol(*sym).map(|def| def.id()),
-            Path::Qualified(parts) if parts.is_empty() => None,
-            Path::Qualified(parts) => {
-                let mut current_id = self.get_by_symbol(parts[0]).map(|def| def.id())?;
-                for &part in &parts[1..] {
-                    current_id = *self.children.get(&current_id)?.get(&part)?;
-                }
-                Some(current_id)
-            }
-        }
-    }
-
-
-    pub fn iter(&self) -> impl Iterator<Item = &Def> {
-        self.items.iter()
-    }
-}
+// DefId, DefKindTag → moved to db.rs as #[salsa::interned]
+// Old DefId(u32), Def, DefKind, Definitions are removed.
+// Use db::DefId<'db> and db::DefKindTag instead.
 
 #[cfg(test)]
 mod tests {
@@ -284,21 +179,5 @@ mod tests {
         assert_eq!(*arena.get(id0), 10);
         assert_eq!(*arena.get(id1), 20);
         assert_eq!(*arena.get(id2), 30);
-    }
-
-    #[test]
-    fn definitions_insert_and_get() {
-        let sym = Symbol::intern("foo_test");
-        let mut defs = Definitions::default();
-        let def_id = defs.insert(None, sym, DefKind::Let);
-        assert_eq!(defs.get(def_id).name, sym);
-    }
-
-    #[test]
-    fn definitions_resolve_path() {
-        let sym = Symbol::intern("my_var_test");
-        let mut defs = Definitions::default();
-        let def_id = defs.insert(None, sym, DefKind::Let);
-        assert_eq!(defs.resolve(&Path::Simple(sym)), Some(def_id));
     }
 }

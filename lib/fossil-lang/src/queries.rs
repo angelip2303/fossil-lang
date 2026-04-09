@@ -85,11 +85,11 @@ pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
     let mut gcx = GlobalContext::default();
     let reg = registry();
 
-    register_builtins(&mut gcx, reg);
+    register_builtins(db, &mut gcx, reg);
     register_provider_schemas_from_ast(db, &ast, &mut gcx, reg);
 
     let metadata = extract_type_metadata(&ast);
-    match crate::passes::lower::lower_with_metadata(ast, gcx, metadata) {
+    match crate::passes::lower::lower_with_metadata(db, ast, gcx, metadata) {
         Ok((ir, gcx, resolutions)) => LowerResult { ir, gcx, resolutions },
         Err(errors) => {
             for e in errors.0 {
@@ -117,7 +117,7 @@ pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
 pub fn infer(db: &dyn Db, file: SourceFile) -> IrProgram {
     use salsa::Accumulator;
     let lowered = lower(db, file);
-    match TypeChecker::new(lowered.ir, lowered.gcx, lowered.resolutions).check() {
+    match TypeChecker::new(db, lowered.ir, lowered.gcx, lowered.resolutions).check() {
         Ok(program) => program,
         Err(errors) => {
             for e in errors.0 {
@@ -149,6 +149,7 @@ pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
     let program = infer(db, file);
     let reg = registry();
     match RqLowering::new(
+        db,
         &program.ir,
         &program.gcx,
         &program.type_index,
@@ -183,21 +184,20 @@ pub fn plan(db: &dyn Db, file: SourceFile) -> FossilPlan {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-fn register_builtins(gcx: &mut GlobalContext, reg: &Registry) {
+fn register_builtins(db: &dyn Db, gcx: &mut GlobalContext, reg: &Registry) {
     use crate::context::DefKind;
     for func in &reg.functions {
         if func.namespace.is_empty() {
             let sym = Symbol::intern(func.name);
-            gcx.definitions.insert(None, sym, DefKind::Let);
+            gcx.definitions.insert(db, None, sym, DefKind::Let);
         } else {
             let ns_sym = Symbol::intern(func.namespace);
             let ns_def = gcx
                 .definitions
                 .get_by_symbol(ns_sym)
-                .map(|d| d.id())
-                .unwrap_or_else(|| gcx.definitions.insert(None, ns_sym, DefKind::Mod));
+                .unwrap_or_else(|| gcx.definitions.insert(db, None, ns_sym, DefKind::Mod));
             let name_sym = Symbol::intern(func.name);
-            gcx.definitions.insert(Some(ns_def), name_sym, DefKind::Let);
+            gcx.definitions.insert(db, Some(ns_def), name_sym, DefKind::Let);
         }
     }
 }
@@ -236,7 +236,7 @@ fn register_provider_schemas_from_ast(
                 )
             })
             .collect();
-        gcx.register_record_type_with_optionality(&call.provider, fields);
+        gcx.register_record_type_with_optionality(db, &call.provider, fields);
     }
 }
 

@@ -8,7 +8,7 @@ use crate::ir::{
 
 use super::{TypeChecker, typeutil::Subst};
 
-impl TypeChecker {
+impl TypeChecker<'_> {
     pub fn infer(&mut self, expr_id: ExprId) -> Result<(Subst, TypeId), FossilError> {
         let expr_id = self.resolutions.expr_rewrites.get(&expr_id).copied().unwrap_or(expr_id);
 
@@ -52,8 +52,7 @@ impl TypeChecker {
                     .env
                     .lookup(*def_id)
                     .ok_or_else(|| {
-                        let def = self.gcx.definitions.get(*def_id);
-                        let name_str = def.name.as_str();
+                        let name_str = def_id.name(self.db).as_str();
                         FossilError::undefined_variable(name_str, loc)
                     })?
                     .clone();

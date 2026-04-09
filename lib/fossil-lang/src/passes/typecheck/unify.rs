@@ -5,7 +5,7 @@ use crate::ir::{RecordFields, TypeId, TypeKind, TypeVar};
 
 use super::{typeutil::Subst, TypeChecker};
 
-impl TypeChecker {
+impl TypeChecker<'_> {
     pub fn resolve_named_type(&self, def_id: DefId) -> Option<TypeId> {
         self.lookup_type_info(def_id).map(|info| info.ty)
     }
