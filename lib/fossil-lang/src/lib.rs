@@ -12,9 +12,4 @@ pub mod plan;
 pub mod queries;
 pub mod registry;
 pub mod rq;
-#[cfg(feature = "polars")]
-pub mod runtime;
 pub mod traits;
-
-#[cfg(feature = "polars")]
-pub use traits::function::FunctionEffect;

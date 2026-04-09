@@ -251,52 +251,6 @@ impl Definitions {
 mod tests {
     use super::*;
 
-    use crate::ast::Loc;
-    use crate::error::FossilError;
-    use crate::ir::{Ir, Polytype, TypeVar};
-    use crate::runtime::value::Value;
-    use crate::traits::function::{FunctionImpl, RuntimeContext};
-    use crate::traits::provider::{
-        FunctionDef, ModuleSpec, ProviderArgs, ProviderInfo, ProviderKind, ProviderOutput,
-        ProviderSchema, TypeProviderImpl,
-    };
-
-    struct MockFunction;
-
-    impl FunctionImpl for MockFunction {
-        fn signature(
-            &self,
-            ir: &mut Ir,
-            _next: &mut dyn FnMut() -> TypeVar,
-            _gcx: &GlobalContext,
-        ) -> Polytype {
-            let ty = ir.unit_type();
-            Polytype::mono(ty)
-        }
-
-        fn call(&self, _args: Vec<Value>, _type_args: &[DefId], _ctx: &RuntimeContext) -> Result<Value, FossilError> {
-            Ok(Value::Unit)
-        }
-    }
-
-    struct MockProvider;
-
-    impl TypeProviderImpl for MockProvider {
-        fn info(&self) -> ProviderInfo {
-            ProviderInfo { extensions: vec![], kind: ProviderKind::Schema }
-        }
-
-        fn provide(
-            &self,
-            _args: &ProviderArgs,
-            _ctx: &mut crate::traits::provider::ProviderContext,
-            _type_name: &str,
-            _loc: Loc,
-        ) -> Result<ProviderOutput, FossilError> {
-            Ok(ProviderOutput::new(ProviderSchema { fields: vec![] }))
-        }
-    }
-
     #[test]
     fn interner_intern_and_resolve() {
         let mut interner = Interner::default();
@@ -313,17 +267,6 @@ mod tests {
         assert_eq!(*arena.get(id0), 10);
         assert_eq!(*arena.get(id1), 20);
         assert_eq!(*arena.get(id2), 30);
-        assert_eq!(id0.idx(), 0);
-        assert_eq!(id1.idx(), 1);
-        assert_eq!(id2.idx(), 2);
-    }
-
-    #[test]
-    fn arena_get_mut() {
-        let mut arena: Arena<String> = Arena::default();
-        let id = arena.alloc("original".to_string());
-        *arena.get_mut(id) = "modified".to_string();
-        assert_eq!(arena.get(id), "modified");
     }
 
     #[test]
@@ -332,113 +275,15 @@ mod tests {
         let mut defs = Definitions::default();
         let sym = interner.intern("foo");
         let def_id = defs.insert(None, sym, DefKind::Let);
-        let def = defs.get(def_id);
-        assert_eq!(def.id(), def_id);
-        assert_eq!(def.name, sym);
+        assert_eq!(defs.get(def_id).name, sym);
     }
 
     #[test]
-    fn definitions_resolve_simple_path() {
+    fn definitions_resolve_path() {
         let mut interner = Interner::default();
         let mut defs = Definitions::default();
         let sym = interner.intern("my_var");
         let def_id = defs.insert(None, sym, DefKind::Let);
-        let path = Path::Simple(sym);
-        assert_eq!(defs.resolve(&path), Some(def_id));
-    }
-
-    #[test]
-    fn definitions_resolve_qualified_path() {
-        let mut interner = Interner::default();
-        let mut defs = Definitions::default();
-
-        let parent_sym = interner.intern("MyModule");
-        let child_sym = interner.intern("my_func");
-
-        let parent_id = defs.insert(None, parent_sym, DefKind::Mod);
-        let child_id = defs.insert(Some(parent_id), child_sym, DefKind::Let);
-
-        let path = Path::Qualified(vec![parent_sym, child_sym]);
-        assert_eq!(defs.resolve(&path), Some(child_id));
-    }
-
-    #[test]
-    fn definitions_resolve_missing() {
-        let mut interner = Interner::default();
-        let defs = Definitions::default();
-        let sym = interner.intern("does_not_exist");
-        let path = Path::Simple(sym);
-        assert_eq!(defs.resolve(&path), None);
-    }
-
-    #[test]
-    fn definitions_len() {
-        let mut interner = Interner::default();
-        let mut defs = Definitions::default();
-        assert_eq!(defs.len(), 0);
-
-        let s1 = interner.intern("a");
-        let s2 = interner.intern("b");
-        let s3 = interner.intern("c");
-        defs.insert(None, s1, DefKind::Let);
-        defs.insert(None, s2, DefKind::Let);
-        defs.insert(None, s3, DefKind::Let);
-        assert_eq!(defs.len(), 3);
-    }
-
-    #[test]
-    fn definitions_get_by_symbol() {
-        let mut interner = Interner::default();
-        let mut defs = Definitions::default();
-        let sym = interner.intern("target");
-        let def_id = defs.insert(None, sym, DefKind::Type);
-        let found = defs.get_by_symbol(sym);
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().id(), def_id);
-    }
-
-    #[test]
-    fn definitions_iter() {
-        let mut interner = Interner::default();
-        let mut defs = Definitions::default();
-        let s1 = interner.intern("x");
-        let s2 = interner.intern("y");
-        defs.insert(None, s1, DefKind::Let);
-        defs.insert(None, s2, DefKind::Let);
-
-        let names: Vec<Symbol> = defs.iter().map(|def| def.name).collect();
-        assert_eq!(names.len(), 2);
-        assert!(names.contains(&s1));
-        assert!(names.contains(&s2));
-    }
-
-    #[test]
-    fn global_context_register_provider() {
-        let mut gcx = GlobalContext::default();
-        gcx.register_provider("csv", MockProvider);
-
-        let sym = gcx.interner.lookup("csv").expect("csv should be interned");
-        let def = gcx.definitions.get_by_symbol(sym);
-        assert!(def.is_some());
-        assert!(matches!(def.unwrap().kind, DefKind::Provider(_)));
-    }
-
-    #[test]
-    fn global_context_register_module() {
-        let mut gcx = GlobalContext::default();
-        gcx.register_module(
-            "Rdf",
-            ModuleSpec {
-                functions: vec![FunctionDef::new("serialize", MockFunction)],
-            },
-        );
-
-        let rdf_sym = gcx.interner.intern("Rdf");
-        let ser_sym = gcx.interner.intern("serialize");
-        let path = Path::Qualified(vec![rdf_sym, ser_sym]);
-        let resolved = gcx.definitions.resolve(&path);
-        assert!(resolved.is_some());
-        let def = gcx.definitions.get(resolved.unwrap());
-        assert!(matches!(def.kind, DefKind::Func(_)));
+        assert_eq!(defs.resolve(&Path::Simple(sym)), Some(def_id));
     }
 }

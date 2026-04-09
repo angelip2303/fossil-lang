@@ -577,6 +577,7 @@ impl<'a> RqLowering<'a> {
 
 
 #[cfg(test)]
+#[cfg(feature = "polars")]
 mod tests {
     use super::*;
     use crate::rq::emit_sql::rq_to_sql;

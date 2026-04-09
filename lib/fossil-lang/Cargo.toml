@@ -13,7 +13,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["polars"]
+default = []
 utoipa = ["dep:utoipa"]
 polars = ["dep:polars"]
 

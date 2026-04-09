@@ -1,8 +1,6 @@
 use crate::ast::Ast;
 use crate::ir;
 
-#[cfg(feature = "polars")]
-pub mod expand;
 pub mod lower;
 pub mod parse;
 pub mod typecheck;

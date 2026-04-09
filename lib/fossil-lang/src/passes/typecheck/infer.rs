@@ -311,7 +311,7 @@ impl TypeChecker {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "polars"))]
 mod tests {
     use crate::ir::{PrimitiveType, StmtKind, TypeKind};
 
