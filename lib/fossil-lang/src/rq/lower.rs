@@ -319,7 +319,7 @@ impl<'a> RqLowering<'a> {
                 let type_def_id = self.resolutions.expr_defs.get(&expr_id).copied();
                 let type_name = type_def_id
                     .map(|id| id.name(self.db).as_str())
-                    .unwrap_or_else(|| "Unknown".to_string());
+                    .unwrap_or_else(|| "_unresolved".to_string());
 
                 let mut select_items = Vec::new();
                 let mut identity_exprs = Vec::new();
@@ -482,11 +482,13 @@ impl<'a> RqLowering<'a> {
                     })
                     .unwrap_or_default();
 
-                let sql = template.replace("{path}", &path);
-                // Fill in optional params with defaults
-                let sql = sql.replace("{delimiter}", ",");
-                let sql = sql.replace("{header}", "true");
-                let sql = sql.replace("{sheet}", "Sheet1");
+                let mut sql = template.replace("{path}", &path);
+                // Fill in optional params with defaults from FunctionDef
+                for param in func_def.params {
+                    if !param.default.is_empty() {
+                        sql = sql.replace(&format!("{{{}}}", param.name), param.default);
+                    }
+                }
 
                 let table = self.next_table(&format!("src_{}", func_def.name));
                 self.rq.transforms.push(Transform::Scan {

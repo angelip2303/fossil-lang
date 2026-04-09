@@ -46,6 +46,7 @@ pub struct AttributeOp {
 pub struct ParamDef {
     pub name: &'static str,
     pub required: bool,
+    pub default: &'static str,
 }
 
 /// What a function returns.
@@ -110,6 +111,7 @@ impl ParamDef {
         Self {
             name,
             required: true,
+            default: "",
         }
     }
 
@@ -117,6 +119,15 @@ impl ParamDef {
         Self {
             name,
             required: false,
+            default: "",
+        }
+    }
+
+    pub const fn with_default(name: &'static str, default: &'static str) -> Self {
+        Self {
+            name,
+            required: false,
+            default,
         }
     }
 }

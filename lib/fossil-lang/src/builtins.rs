@@ -12,8 +12,8 @@ pub const CSV: FunctionDef = FunctionDef::source(
     "SELECT * FROM read_csv('{path}', delim='{delimiter}', header={header})",
     &[
         ParamDef::required("path"),
-        ParamDef::optional("delimiter"),
-        ParamDef::optional("header"),
+        ParamDef::with_default("delimiter", ","),
+        ParamDef::with_default("header", "true"),
     ],
 );
 
@@ -22,7 +22,7 @@ pub const EXCEL: FunctionDef = FunctionDef::source(
     "SELECT * FROM st_read('{path}', layer='{sheet}')",
     &[
         ParamDef::required("path"),
-        ParamDef::optional("sheet"),
+        ParamDef::with_default("sheet", "Sheet1"),
     ],
 );
 
