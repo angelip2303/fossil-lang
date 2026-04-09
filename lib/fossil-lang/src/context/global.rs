@@ -4,12 +4,8 @@ use std::sync::Arc;
 use crate::ast::RecordField;
 use crate::common::PrimitiveType;
 use crate::context::{DefId, DefKind, Definitions, Interner, Symbol, TypeMetadata};
-#[cfg(feature = "polars")]
-use crate::traits::provider::ModuleSpec;
 use crate::traits::provider::{ProviderInfo, TypeProviderImpl};
 use crate::traits::resolver::{DefaultPathResolver, PathResolver};
-#[cfg(feature = "polars")]
-use crate::traits::services::ExternalServices;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltInFieldType {
@@ -24,9 +20,6 @@ pub struct TypeInfo<'a> {
     pub interner: &'a Interner,
 }
 
-#[cfg(feature = "polars")]
-pub type ModuleGeneratorFn = Arc<dyn Fn(&TypeInfo) -> Option<ModuleSpec> + Send + Sync>;
-
 /// Global compilation context.
 #[derive(Clone)]
 pub struct GlobalContext {
@@ -34,11 +27,7 @@ pub struct GlobalContext {
     pub definitions: Definitions,
     pub type_metadata: HashMap<DefId, Arc<TypeMetadata>>,
     pub registered_types: HashMap<DefId, Vec<(Symbol, BuiltInFieldType)>>,
-    #[cfg(feature = "polars")]
-    pub module_generators: Vec<ModuleGeneratorFn>,
     pub path_resolver: Arc<dyn PathResolver>,
-    #[cfg(feature = "polars")]
-    pub external_services: Option<Arc<dyn ExternalServices>>,
 }
 
 impl GlobalContext {
@@ -47,29 +36,6 @@ impl GlobalContext {
         let provider = Arc::new(provider);
         let def_kind = DefKind::Provider(provider);
         self.definitions.insert(None, symbol, def_kind);
-    }
-
-    #[cfg(feature = "polars")]
-    pub fn register_module(&mut self, name: &str, spec: ModuleSpec) {
-        let sym = self.interner.intern(name);
-        self.register_module_by_symbol(sym, spec);
-    }
-
-    #[cfg(feature = "polars")]
-    pub fn register_module_by_symbol(&mut self, name: Symbol, spec: ModuleSpec) {
-        let module_id = self
-            .definitions
-            .get_by_symbol(name)
-            .map(|d| d.id())
-            .unwrap_or_else(|| self.definitions.insert(None, name, DefKind::Mod));
-        for func_def in spec.functions {
-            let func_sym = self.interner.intern(&func_def.name);
-            self.definitions.insert(
-                Some(module_id),
-                func_sym,
-                DefKind::Func(func_def.implementation),
-            );
-        }
     }
 
     pub fn list_providers(&self) -> Vec<(String, ProviderInfo)> {
@@ -81,22 +47,11 @@ impl GlobalContext {
             .collect()
     }
 
-    /// Find a registered provider by file extension.
     pub fn provider_for_extension(&self, ext: &str) -> Option<&dyn TypeProviderImpl> {
         self.definitions.iter().find_map(|def| match &def.kind {
             DefKind::Provider(p) if p.info().extensions.contains(&ext) => Some(p.as_ref()),
             _ => None,
         })
-    }
-
-    /// Infer the schema of a file (legacy Polars-based).
-    #[cfg(feature = "polars")]
-    pub fn infer_schema(&self, raw_path: &str) -> Result<polars::prelude::Schema, String> {
-        let ext = raw_path.rsplit('.').next().unwrap_or("");
-        let provider = self.provider_for_extension(ext)
-            .ok_or_else(|| format!("no provider for .{ext} files"))?;
-        let resolved = self.path_resolver.resolve(raw_path)?;
-        provider.infer_schema(resolved.pl_path().clone(), resolved.cloud_options().cloned())
     }
 
     pub fn register_record_type_with_optionality(
@@ -106,12 +61,10 @@ impl GlobalContext {
     ) -> DefId {
         let symbol = self.interner.intern(name);
         let def_id = self.definitions.insert(None, symbol, DefKind::Type);
-
         let interned_fields: Vec<_> = fields
             .into_iter()
             .map(|(fname, ftype)| (self.interner.intern(fname), ftype))
             .collect();
-
         self.registered_types.insert(def_id, interned_fields);
         def_id
     }
@@ -124,11 +77,7 @@ impl Default for GlobalContext {
             definitions: Definitions::default(),
             type_metadata: HashMap::new(),
             registered_types: HashMap::new(),
-            #[cfg(feature = "polars")]
-            module_generators: Vec::new(),
             path_resolver: Arc::new(DefaultPathResolver),
-            #[cfg(feature = "polars")]
-            external_services: None,
         }
     }
 }
