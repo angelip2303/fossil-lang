@@ -1,10 +1,11 @@
-//! Source trait for data providers
+//! Source trait for data providers (legacy, Polars-based).
 //!
-//! This trait abstracts the data source, allowing external providers
-//! (CSV, JSON, etc.) to plug into the core without coupling.
+//! Gated behind the `polars` feature. New code should use FunctionDef + OpImpl.
 
+#[cfg(feature = "polars")]
 use std::fmt::Debug;
 
+#[cfg(feature = "polars")]
 use polars::prelude::{LazyFrame, PolarsResult, Schema};
 
 /// A data source that can produce a LazyFrame for lazy/streaming execution.
@@ -26,6 +27,7 @@ use polars::prelude::{LazyFrame, PolarsResult, Schema};
 ///     }
 /// }
 /// ```
+#[cfg(feature = "polars")]
 pub trait Source: Send + Sync + Debug {
     /// Produce a LazyFrame representing this data source.
     fn scan(&self) -> PolarsResult<LazyFrame>;

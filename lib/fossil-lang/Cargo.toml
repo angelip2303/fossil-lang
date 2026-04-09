@@ -13,12 +13,14 @@ edition.workspace = true
 rust-version.workspace = true
 
 [features]
+default = ["polars"]
 utoipa = ["dep:utoipa"]
+polars = ["dep:polars"]
 
 [dependencies]
 # external dependencies
 thiserror.workspace = true
-polars.workspace = true
+polars = { workspace = true, optional = true }
 salsa = "0.26"
 la-arena = "0.3"
 serde = { version = "1", features = ["derive"] }

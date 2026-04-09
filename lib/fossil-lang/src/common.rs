@@ -69,6 +69,7 @@ pub enum PrimitiveType {
     Bool,
 }
 
+#[cfg(feature = "polars")]
 impl PrimitiveType {
     /// Convert to the canonical Polars DataType.
     pub fn to_polars_dtype(self) -> polars::prelude::DataType {
@@ -82,6 +83,7 @@ impl PrimitiveType {
     }
 }
 
+#[cfg(feature = "polars")]
 impl From<polars::prelude::DataType> for PrimitiveType {
     fn from(value: polars::prelude::DataType) -> Self {
         use polars::prelude::DataType;
