@@ -220,6 +220,7 @@ impl RqExpr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rq::{TableId, ColId};
 
     fn test_rq_parts() -> (RelationalQuery, TableId, ColId, ColId, ColId) {
         let mut rq = RelationalQuery::new();

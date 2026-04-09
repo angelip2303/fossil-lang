@@ -89,16 +89,19 @@ pub fn compile_tolerant_to_plan(
     Ok((plan, result))
 }
 
+/// Create the default Registry with all built-in functions and attributes.
+///
+/// This is the composition root for the compiler. In keasy, each crate
+/// calls register() to add its FunctionDefs and AttributeOps.
+pub fn default_registry() -> Registry {
+    let mut r = Registry::new();
+    crate::builtins::register(&mut r);
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtins;
-
-    fn default_registry() -> Registry {
-        let mut r = Registry::new();
-        builtins::register(&mut r);
-        r
-    }
 
     #[test]
     fn compile_literal_to_plan() {
