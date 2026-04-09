@@ -61,3 +61,4 @@ pub enum Severity {
     Error,
     Warning,
 }
+
