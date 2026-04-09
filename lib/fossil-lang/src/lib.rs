@@ -1,11 +1,17 @@
 pub mod ast;
+pub mod builtins;
 pub mod common;
 pub mod compiler;
 pub mod context;
+pub mod db;
 pub mod error;
 pub mod ir;
 pub mod parser;
 pub mod passes;
+pub mod plan;
+pub mod plugins;
+pub mod registry;
+pub mod rq;
 pub mod runtime;
 pub mod traits;
 
