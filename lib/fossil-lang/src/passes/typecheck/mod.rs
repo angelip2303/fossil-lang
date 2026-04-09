@@ -111,20 +111,6 @@ impl TypeChecker {
     }
 
     fn init_builtin_functions(&mut self) {
-        use crate::context::DefKind;
-
-        for def_id in 0..self.gcx.definitions.len() {
-            let def_id = DefId::new(def_id as u32);
-            let def = self.gcx.definitions.get(def_id);
-
-            #[cfg(feature = "polars")]
-            if let DefKind::Func(func_impl) = &def.kind {
-                let mut next_var = || self.tvg.fresh();
-                let polytype = func_impl.signature(&mut self.ir, &mut next_var, &self.gcx);
-                self.env.insert(def_id, polytype);
-            }
-        }
-
         self.init_record_constructors();
     }
 

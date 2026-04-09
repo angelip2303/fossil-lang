@@ -213,14 +213,4 @@ pub trait TypeProviderImpl: Send + Sync {
         type_name: &str,
         loc: Loc,
     ) -> Result<ProviderOutput, FossilError>;
-
-    /// Infer schema for a file (legacy Polars-based).
-    #[cfg(feature = "polars")]
-    fn infer_schema(
-        &self,
-        _path: polars::prelude::PlPath,
-        _cloud_opts: Option<polars::prelude::cloud::CloudOptions>,
-    ) -> Result<polars::prelude::Schema, String> {
-        Err("schema inference not supported by this provider".into())
-    }
 }
