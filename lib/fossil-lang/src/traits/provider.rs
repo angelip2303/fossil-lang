@@ -253,8 +253,8 @@ pub trait TypeProviderImpl: Send + Sync {
         loc: Loc,
     ) -> Result<ProviderOutput, FossilError>;
 
-    /// Infer schema for a file without going through the compiler pipeline.
-    /// Returns a Polars Schema with column names and types.
+    /// Infer schema for a file (legacy Polars-based).
+    #[cfg(feature = "polars")]
     fn infer_schema(
         &self,
         _path: polars::prelude::PlPath,

@@ -1,96 +1,91 @@
 use std::collections::HashMap;
 
-use polars::prelude::PlPath;
-use polars::prelude::cloud::CloudOptions;
-
-/// A resolved path ready for I/O: physical URL + opaque cloud credentials.
-/// This is the transversal type that ensures credentials always travel with
-/// the path. Fields are private — use methods to interact.
-///
-/// Carries both Polars `CloudOptions` (for sink/scan) and raw config pairs
-/// (for DuckDB and other engines that need explicit credential configuration).
+/// A resolved path ready for I/O: physical URL + cloud credentials.
 #[derive(Clone)]
 pub struct ResolvedPath {
-    path: PlPath,
-    cloud_options: Option<CloudOptions>,
+    url: String,
+    #[cfg(feature = "polars")]
+    path: polars::prelude::PlPath,
+    #[cfg(feature = "polars")]
+    cloud_options: Option<polars::prelude::cloud::CloudOptions>,
     cloud_config: HashMap<String, String>,
 }
 
 impl ResolvedPath {
-    pub fn new(url: &str, cloud_options: Option<CloudOptions>) -> Self {
+    #[cfg(feature = "polars")]
+    pub fn new(url: &str, cloud_options: Option<polars::prelude::cloud::CloudOptions>) -> Self {
         Self {
-            path: PlPath::from_str(url),
+            url: url.to_string(),
+            path: polars::prelude::PlPath::from_str(url),
             cloud_options,
             cloud_config: HashMap::new(),
         }
     }
 
+    #[cfg(not(feature = "polars"))]
+    pub fn new(url: &str, _cloud_options: Option<()>) -> Self {
+        Self {
+            url: url.to_string(),
+            cloud_config: HashMap::new(),
+        }
+    }
+
+    #[cfg(feature = "polars")]
     pub fn with_config(
         url: &str,
-        cloud_options: Option<CloudOptions>,
+        cloud_options: Option<polars::prelude::cloud::CloudOptions>,
         cloud_config: HashMap<String, String>,
     ) -> Self {
         Self {
-            path: PlPath::from_str(url),
+            url: url.to_string(),
+            path: polars::prelude::PlPath::from_str(url),
             cloud_options,
             cloud_config,
         }
     }
 
-    /// Derive a sub-path that inherits cloud credentials.
     pub fn join(&self, rel: &str) -> Self {
+        let new_url = format!("{}/{}", self.url.trim_end_matches('/'), rel);
         Self {
-            path: self.path.as_ref().join(rel),
+            url: new_url.clone(),
+            #[cfg(feature = "polars")]
+            path: polars::prelude::PlPath::from_str(&new_url),
+            #[cfg(feature = "polars")]
             cloud_options: self.cloud_options.clone(),
             cloud_config: self.cloud_config.clone(),
         }
     }
 
-    pub fn pl_path(&self) -> &PlPath {
-        &self.path
-    }
+    #[cfg(feature = "polars")]
+    pub fn pl_path(&self) -> &polars::prelude::PlPath { &self.path }
 
-    pub fn cloud_options(&self) -> Option<&CloudOptions> {
-        self.cloud_options.as_ref()
-    }
+    #[cfg(feature = "polars")]
+    pub fn cloud_options(&self) -> Option<&polars::prelude::cloud::CloudOptions> { self.cloud_options.as_ref() }
 
-    /// Raw cloud credential key-value pairs for engines that need explicit
-    /// configuration (e.g. DuckDB). Keys are provider-specific
-    /// (e.g. `azure_storage_account_name`, `azure_storage_account_key`).
-    pub fn cloud_config(&self) -> &HashMap<String, String> {
-        &self.cloud_config
-    }
+    pub fn cloud_config(&self) -> &HashMap<String, String> { &self.cloud_config }
 
-    pub fn to_str(&self) -> &str {
-        self.path.to_str()
-    }
+    pub fn to_str(&self) -> &str { &self.url }
 }
 
 impl std::fmt::Debug for ResolvedPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ResolvedPath")
-            .field("path", &self.to_str())
-            .field("cloud_options", &self.cloud_options.as_ref().map(|_| "***"))
-            .finish()
+        f.debug_struct("ResolvedPath").field("url", &self.url).finish()
     }
 }
 
-/// Host-provided path resolution. Fossil passes raw path strings, host returns URL + cloud options.
+/// Host-provided path resolution.
 pub trait PathResolver: Send + Sync + std::fmt::Debug {
     fn resolve(&self, raw_path: &str) -> Result<ResolvedPath, String>;
 }
 
-/// Default resolver for standalone Fossil: local/cloud pass through, @ rejected.
-/// Cloud credentials come from env vars (Polars default behavior).
+/// Default resolver: local/cloud pass through, @ rejected.
 #[derive(Debug)]
 pub struct DefaultPathResolver;
 
 impl PathResolver for DefaultPathResolver {
     fn resolve(&self, raw_path: &str) -> Result<ResolvedPath, String> {
         if raw_path.starts_with('@') {
-            return Err(format!(
-                "Host references ({raw_path}) not available in standalone mode"
-            ));
+            return Err(format!("Host references ({raw_path}) not available in standalone mode"));
         }
         Ok(ResolvedPath::new(raw_path, None))
     }

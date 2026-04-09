@@ -6,6 +6,7 @@ use crate::common::PrimitiveType;
 use crate::context::{DefId, DefKind, Definitions, Interner, Symbol, TypeMetadata};
 use crate::traits::provider::{ModuleSpec, ProviderInfo, TypeProviderImpl};
 use crate::traits::resolver::{DefaultPathResolver, PathResolver};
+#[cfg(feature = "polars")]
 use crate::traits::services::ExternalServices;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,8 +97,8 @@ impl GlobalContext {
         })
     }
 
-    /// Infer the schema of a file using the registered provider for its extension.
-    /// The `raw_path` should use `@connection/file.ext` format for path resolution.
+    /// Infer the schema of a file (legacy Polars-based).
+    #[cfg(feature = "polars")]
     pub fn infer_schema(&self, raw_path: &str) -> Result<polars::prelude::Schema, String> {
         let ext = raw_path.rsplit('.').next().unwrap_or("");
         let provider = self.provider_for_extension(ext)
