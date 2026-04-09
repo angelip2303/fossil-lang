@@ -4,8 +4,6 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::common::Path;
-#[cfg(feature = "polars")]
-use crate::traits::function::{FunctionEffect, FunctionImpl};
 use crate::traits::provider::TypeProviderImpl;
 
 pub mod global;
@@ -148,9 +146,6 @@ pub enum DefKind {
     Mod,
     Let,
     Type,
-    #[cfg(feature = "polars")]
-    Func(Arc<dyn FunctionImpl>),
-    #[cfg(not(feature = "polars"))]
     Func(Arc<dyn std::any::Any + Send + Sync>),
     RecordConstructor,
     Provider(Arc<dyn TypeProviderImpl>),
@@ -234,13 +229,6 @@ impl Definitions {
         }
     }
 
-    #[cfg(feature = "polars")]
-    pub fn function_effects(&self, id: DefId) -> &[FunctionEffect] {
-        match &self.get(id).kind {
-            DefKind::Func(f) => f.effects(),
-            _ => &[],
-        }
-    }
 
     pub fn iter(&self) -> impl Iterator<Item = &Def> {
         self.items.iter()
