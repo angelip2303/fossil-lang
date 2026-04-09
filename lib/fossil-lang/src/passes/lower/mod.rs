@@ -2,29 +2,22 @@ use std::collections::HashMap;
 
 use crate::ast::{self, Loc};
 use crate::context::{DefId, DefKind, Symbol, TypeMetadata};
+use crate::context::global::{DefMap, RegisteredTypes, TypeMetadataMap};
 use crate::db::Db;
 use crate::error::{FossilError, FossilErrors};
 use crate::ir::{
     Argument, Expr, ExprId, ExprKind, Ir, Path, RecordFields, Resolutions, Stmt, StmtId, StmtKind,
     Type, TypeId, TypeKind,
 };
-use crate::passes::GlobalContext;
-
-pub fn lower(
-    db: &dyn Db,
-    ast: ast::Ast,
-    gcx: GlobalContext,
-) -> Result<(Ir, GlobalContext, Resolutions), FossilErrors> {
-    lower_with_metadata(db, ast, gcx, HashMap::new())
-}
 
 pub fn lower_with_metadata(
     db: &dyn Db,
     ast: ast::Ast,
-    gcx: GlobalContext,
+    def_map: DefMap,
+    registered_types: RegisteredTypes,
     metadata: HashMap<Symbol, TypeMetadata>,
-) -> Result<(Ir, GlobalContext, Resolutions), FossilErrors> {
-    Lowering::new(db, ast, gcx, metadata).run()
+) -> Result<(Ir, DefMap, TypeMetadataMap, RegisteredTypes, Resolutions), FossilErrors> {
+    Lowering::new(db, ast, def_map, registered_types, metadata).run()
 }
 
 // ── Scope stack ────────────────────────────────────────────────
@@ -89,7 +82,9 @@ enum StmtSnapshot {
 struct Lowering<'a> {
     db: &'a dyn Db,
     ast: ast::Ast,
-    gcx: GlobalContext,
+    def_map: DefMap,
+    registered_types: RegisteredTypes,
+    type_metadata: TypeMetadataMap,
     ir: Ir,
     scopes: ScopeStack,
     resolutions: Resolutions,
@@ -100,13 +95,16 @@ impl<'a> Lowering<'a> {
     fn new(
         db: &'a dyn Db,
         ast: ast::Ast,
-        gcx: GlobalContext,
+        def_map: DefMap,
+        registered_types: RegisteredTypes,
         metadata: HashMap<Symbol, TypeMetadata>,
     ) -> Self {
         Self {
             db,
             ast,
-            gcx,
+            def_map,
+            registered_types,
+            type_metadata: TypeMetadataMap::new(),
             ir: Ir::default(),
             scopes: ScopeStack::new(),
             resolutions: Resolutions::default(),
@@ -114,7 +112,7 @@ impl<'a> Lowering<'a> {
         }
     }
 
-    fn run(mut self) -> Result<(Ir, GlobalContext, Resolutions), FossilErrors> {
+    fn run(mut self) -> Result<(Ir, DefMap, TypeMetadataMap, RegisteredTypes, Resolutions), FossilErrors> {
         let mut errors = FossilErrors::new();
 
         // Pre-scan: collect type declarations (types can be referenced before their
@@ -136,10 +134,10 @@ impl<'a> Lowering<'a> {
                 let name_str = name.as_str().to_string();
                 errors.push(FossilError::already_defined(name_str, loc, loc));
             } else {
-                let def_id = self.gcx.definitions.insert(self.db, None, name, DefKind::Type);
+                let def_id = self.def_map.insert(self.db, None, name, DefKind::Type);
                 self.scopes.current_mut().types.insert(name, def_id);
                 if let Some(metadata) = self.pending_metadata.remove(&name) {
-                    self.gcx.type_metadata.insert(def_id, metadata);
+                    self.type_metadata.insert(def_id, metadata);
                 }
             }
         }
@@ -158,7 +156,7 @@ impl<'a> Lowering<'a> {
             return Err(errors);
         }
 
-        Ok((self.ir, self.gcx, self.resolutions))
+        Ok((self.ir, self.def_map, self.type_metadata, self.registered_types, self.resolutions))
     }
 
     // ── Statements ─────────────────────────────────────────────
@@ -193,7 +191,7 @@ impl<'a> Lowering<'a> {
 
                 // Register let binding
                 let def_id = self.scopes.lookup_value(name).unwrap_or_else(|| {
-                    let def_id = self.gcx.definitions.insert(self.db, None, name, DefKind::Let);
+                    let def_id = self.def_map.insert(self.db, None, name, DefKind::Let);
                     self.scopes.current_mut().values.insert(name, def_id);
                     def_id
                 });
@@ -272,7 +270,7 @@ impl<'a> Lowering<'a> {
                     }
                     Path::Qualified(parts) => {
                         let ast_path = Path::Qualified(parts.clone());
-                        if let Some(def_id) = self.gcx.definitions.resolve(self.db,&ast_path) {
+                        if let Some(def_id) = self.def_map.resolve(self.db,&ast_path) {
                             self.resolutions.expr_defs.insert(ir_expr_id, def_id);
                         } else if parts.len() >= 2
                             && self.scopes.lookup_value(parts[0]).is_some()
@@ -386,7 +384,7 @@ impl<'a> Lowering<'a> {
 
                 // Push scope for the binding
                 self.scopes.push();
-                let def_id = self.gcx.definitions.insert(self.db, None, param, DefKind::Let);
+                let def_id = self.def_map.insert(self.db, None, param, DefKind::Let);
                 self.scopes.current_mut().values.insert(param, def_id);
 
                 let ir_outputs: Vec<_> = outputs
@@ -583,7 +581,7 @@ impl<'a> Lowering<'a> {
                 if let Some(def_id) = scope_lookup(&self.scopes, *name) {
                     return Some(def_id);
                 }
-                if let Some(def_id) = self.gcx.definitions.resolve(self.db,&Path::Simple(*name)) {
+                if let Some(def_id) = self.def_map.resolve(self.db,&Path::Simple(*name)) {
                     return Some(def_id);
                 }
                 let name_str = name.as_str();
@@ -592,7 +590,7 @@ impl<'a> Lowering<'a> {
             }
             Path::Qualified(parts) => {
                 let ast_path = Path::Qualified(parts.clone());
-                self.gcx.definitions.resolve(self.db,&ast_path).or_else(|| {
+                self.def_map.resolve(self.db,&ast_path).or_else(|| {
                     let path_str = ast_path.display_global();
                     errors.push(make_error(path_str, loc));
                     None
@@ -642,7 +640,7 @@ impl<'a> Lowering<'a> {
             if self.scopes.current_mut().values.contains_key(&type_name) {
                 return;
             }
-            let ctor_def_id = self.gcx.definitions.insert(
+            let ctor_def_id = self.def_map.insert(
                 self.db,
                 type_def_id,
                 type_name,

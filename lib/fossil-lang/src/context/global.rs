@@ -10,6 +10,12 @@ pub enum BuiltInFieldType {
     Optional(PrimitiveType),
 }
 
+/// Map of DefId → field types for provider/user-defined record types.
+pub type RegisteredTypes = HashMap<DefId, Vec<(Symbol, BuiltInFieldType)>>;
+
+/// Map of DefId → type metadata (attributes extracted from AST).
+pub type TypeMetadataMap = HashMap<DefId, TypeMetadata>;
+
 /// Auxiliary index: tracks DefIds by symbol and parent→child relationships.
 ///
 /// DefId creation goes through `DefMap::insert(db, ...)` which calls
@@ -67,43 +73,22 @@ impl DefMap {
             }
         }
     }
-}
 
-/// Global compilation context.
-///
-/// NOTE: This is being decomposed into Salsa queries (DefMap, SchemaMap, etc.).
-/// The interner has been moved to a global static (Symbol::intern / Symbol::as_str).
-#[derive(Clone, PartialEq)]
-pub struct GlobalContext {
-    pub definitions: DefMap,
-    pub type_metadata: HashMap<DefId, TypeMetadata>,
-    pub registered_types: HashMap<DefId, Vec<(Symbol, BuiltInFieldType)>>,
-}
-
-impl GlobalContext {
-    pub fn register_record_type_with_optionality(
+    /// Register a record type with field types, returning its DefId.
+    pub fn register_record_type(
         &mut self,
         db: &dyn Db,
+        registered_types: &mut RegisteredTypes,
         name: &str,
         fields: Vec<(&str, BuiltInFieldType)>,
     ) -> DefId {
         let symbol = Symbol::intern(name);
-        let def_id = self.definitions.insert(db, None, symbol, DefKindTag::Type);
+        let def_id = self.insert(db, None, symbol, DefKindTag::Type);
         let interned_fields: Vec<_> = fields
             .into_iter()
             .map(|(fname, ftype)| (Symbol::intern(fname), ftype))
             .collect();
-        self.registered_types.insert(def_id, interned_fields);
+        registered_types.insert(def_id, interned_fields);
         def_id
-    }
-}
-
-impl Default for GlobalContext {
-    fn default() -> Self {
-        Self {
-            definitions: DefMap::default(),
-            type_metadata: HashMap::new(),
-            registered_types: HashMap::new(),
-        }
     }
 }

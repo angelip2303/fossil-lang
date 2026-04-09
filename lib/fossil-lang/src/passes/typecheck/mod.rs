@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use crate::context::DefId;
-use crate::context::global::BuiltInFieldType;
+use crate::context::global::{BuiltInFieldType, DefMap, RegisteredTypes, TypeMetadataMap};
 use crate::db::Db;
 use crate::error::{FossilError, FossilErrors};
 use crate::ir::{ExprId, Ir, Polytype, PrimitiveType, RecordFields, Resolutions, StmtId, StmtKind, Type, TypeDeclInfo, TypeId, TypeIndex, TypeKind, TypeVar, TypeckResults};
-use crate::passes::{GlobalContext, IrProgram};
+use crate::passes::IrProgram;
 
 pub mod typeutil;
 pub mod infer;
@@ -29,7 +29,9 @@ impl TypeVarGen {
 pub struct TypeChecker<'a> {
     pub(crate) db: &'a dyn Db,
     pub(crate) ir: Ir,
-    pub(crate) gcx: GlobalContext,
+    pub(crate) def_map: DefMap,
+    pub(crate) registered_types: RegisteredTypes,
+    pub(crate) type_metadata: TypeMetadataMap,
     pub(crate) resolutions: Resolutions,
     pub(crate) tvg: TypeVarGen,
     pub(crate) env: TypeEnv,
@@ -41,11 +43,20 @@ pub struct TypeChecker<'a> {
 }
 
 impl<'a> TypeChecker<'a> {
-    pub fn new(db: &'a dyn Db, ir: Ir, gcx: GlobalContext, resolutions: Resolutions) -> Self {
+    pub fn new(
+        db: &'a dyn Db,
+        ir: Ir,
+        def_map: DefMap,
+        registered_types: RegisteredTypes,
+        type_metadata: TypeMetadataMap,
+        resolutions: Resolutions,
+    ) -> Self {
         let mut checker = Self {
             db,
             ir,
-            gcx,
+            def_map,
+            registered_types,
+            type_metadata,
             resolutions,
             tvg: TypeVarGen::default(),
             env: TypeEnv::default(),
@@ -79,7 +90,7 @@ impl<'a> TypeChecker<'a> {
 
                     // Populate registered_types for user-defined types (providers, etc.)
                     // This makes registered_types the universal source of field type info.
-                    if !self.gcx.registered_types.contains_key(&def_id) {
+                    if !self.registered_types.contains_key(&def_id) {
                         if let TypeKind::Record(fields) = &self.ir.types.get(*ty).kind {
                             let field_types: Vec<_> = fields.fields.iter()
                                 .filter_map(|(sym, ty_id)| {
@@ -87,7 +98,7 @@ impl<'a> TypeChecker<'a> {
                                 })
                                 .collect();
                             if !field_types.is_empty() {
-                                self.gcx.registered_types.insert(def_id, field_types);
+                                self.registered_types.insert(def_id, field_types);
                             }
                         }
                     }
@@ -95,7 +106,7 @@ impl<'a> TypeChecker<'a> {
             }
         }
 
-        let registered: Vec<_> = self.gcx.registered_types.iter()
+        let registered: Vec<_> = self.registered_types.iter()
             .map(|(def_id, fields)| (*def_id, fields.clone()))
             .collect();
 
@@ -136,7 +147,7 @@ impl<'a> TypeChecker<'a> {
 
         let pairs: Vec<_> = self.type_index.keys().filter_map(|&type_def_id| {
             let type_name = type_def_id.name(self.db);
-            let ctor_def_id = self.gcx.definitions
+            let ctor_def_id = self.def_map
                 .find_by_symbol(type_name, self.db, |k| matches!(k, DefKindTag::RecordConstructor))?;
             Some((type_def_id, ctor_def_id))
         }).collect();
@@ -235,7 +246,9 @@ impl<'a> TypeChecker<'a> {
 
         let program = IrProgram {
             ir: self.ir,
-            gcx: self.gcx,
+            def_map: self.def_map,
+            registered_types: self.registered_types,
+            type_metadata: self.type_metadata,
             type_index: self.type_index,
             resolutions: self.resolutions,
             typeck_results: self.typeck_results,

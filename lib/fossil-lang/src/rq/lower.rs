@@ -12,7 +12,6 @@ use crate::context::{DefId, DefKindTag, Symbol};
 use crate::db::Db;
 use crate::error::FossilError;
 use crate::ir::{ExprId, ExprKind, Ir, Resolutions, TypeIndex};
-use crate::passes::GlobalContext;
 use crate::registry::Registry;
 use crate::rq::{
     ColId, EmissionDecl, JoinKind, OutputDecl, RelationalQuery, RqExpr, RqLiteral, ScanSource,
@@ -82,7 +81,6 @@ impl<'a> RqLowering<'a> {
     pub fn new(
         db: &'a dyn Db,
         ir: &'a Ir,
-        _gcx: &'a GlobalContext,
         type_index: &'a TypeIndex,
         resolutions: &'a Resolutions,
         registry: &'a Registry,

@@ -9,7 +9,7 @@
 //! ```text
 //! AST (RecordField.attrs)
 //!   → Resolution (extract_type_metadata)
-//!   → GlobalContext.type_metadata
+//!   → TypeMetadataMap (built during lowering)
 //!   → Runtime (FunctionImpl accesses via RuntimeContext)
 //! ```
 
