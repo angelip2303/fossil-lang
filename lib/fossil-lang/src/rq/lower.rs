@@ -102,24 +102,28 @@ impl<'a> RqLowering<'a> {
 
     /// Lower the entire program to a RelationalQuery.
     pub fn lower(mut self) -> Result<RelationalQuery, FossilError> {
-        let root = self.ir.root.clone();
-        for &stmt_id in &root {
+        let root: Vec<_> = self.ir.root.iter().copied().collect();
+        for stmt_id in root {
             self.lower_stmt(stmt_id)?;
         }
         Ok(self.rq)
     }
 
     fn lower_stmt(&mut self, stmt_id: crate::ir::StmtId) -> Result<(), FossilError> {
-        let stmt = self.ir.stmts.get(stmt_id);
-        match &stmt.kind.clone() {
-            crate::ir::StmtKind::Let { name, value, .. } => {
-                let val = self.lower_expr(*value)?;
-                self.env.insert(*name, val);
+        // Extract small values from IR stmt, then drop borrow
+        let (name, value, is_expr) = {
+            let stmt = self.ir.stmts.get(stmt_id);
+            match &stmt.kind {
+                crate::ir::StmtKind::Let { name, value, .. } => (Some(*name), Some(*value), false),
+                crate::ir::StmtKind::Type { .. } => return Ok(()),
+                crate::ir::StmtKind::Expr(expr_id) => (None, Some(*expr_id), true),
             }
-            crate::ir::StmtKind::Type { .. } => {}
-            crate::ir::StmtKind::Expr(expr_id) => {
-                self.lower_expr(*expr_id)?;
-            }
+        };
+        if let (Some(name), Some(value)) = (name, value) {
+            let val = self.lower_expr(value)?;
+            self.env.insert(name, val);
+        } else if let (None, Some(expr_id)) = (name, value) {
+            self.lower_expr(expr_id)?;
         }
         Ok(())
     }
@@ -131,8 +135,9 @@ impl<'a> RqLowering<'a> {
             .get(&expr_id)
             .copied()
             .unwrap_or(expr_id);
-        let expr = self.ir.exprs.get(expr_id);
-        let kind = expr.kind.clone();
+        // Extract kind by cloning — ExprKind contains nested Vecs that are needed
+        // by value in the match arms. TODO: further optimize with snapshot extraction.
+        let kind = self.ir.exprs.get(expr_id).kind.clone();
 
         match &kind {
             ExprKind::Literal(lit) => {

@@ -75,6 +75,13 @@ impl ScopeStack {
     }
 }
 
+/// Snapshot of AST StmtKind (extracts small values, avoids cloning Vec<Attribute> etc.)
+enum StmtSnapshot {
+    Let { name: Symbol, value: ast::ExprId },
+    Type { name: Symbol, ty: ast::TypeId, attrs: Vec<crate::ast::Attribute>, ctor_params: Vec<crate::ast::ConstructorParam> },
+    Expr(ast::ExprId),
+}
+
 // ── Lowering pass ──────────────────────────────────────────────
 
 struct Lowering {
@@ -108,29 +115,27 @@ impl Lowering {
         // Pre-scan: collect type declarations (types can be referenced before their
         // body is lowered, e.g. in other type fields). Lets are NOT pre-scanned —
         // they must be defined before use.
-        let root: Vec<_> = self.ast.root.clone();
-        for &stmt_id in &root {
-            let stmt = self.ast.stmts.get(stmt_id);
-            let loc = stmt.loc;
-            match &stmt.kind.clone() {
-                ast::StmtKind::Type { name, .. } => {
-                    if self.scopes.current_mut().types.contains_key(name) {
-                        let name_str = self.gcx.interner.resolve(*name).to_string();
-                        errors.push(FossilError::already_defined(name_str, loc, loc));
-                    } else {
-                        let def_id =
-                            self.gcx.definitions.insert(None, *name, DefKind::Type);
-                        self.scopes.current_mut().types.insert(*name, def_id);
-
-                        if let Some(metadata) = self.pending_metadata.remove(name) {
-                            self.gcx.type_metadata.insert(def_id, Arc::new(metadata));
-                        }
-                    }
+        // Collect root stmt ids (Vec<StmtId> = Vec<u32 wrapper>, cheap)
+        let root: Vec<_> = self.ast.root.iter().copied().collect();
+        // Pre-scan: extract (loc, name) for Type declarations
+        let type_decls: Vec<_> = root.iter().filter_map(|&sid| {
+            let stmt = self.ast.stmts.get(sid);
+            if let ast::StmtKind::Type { name, .. } = &stmt.kind {
+                Some((stmt.loc, *name))
+            } else {
+                None
+            }
+        }).collect();
+        for (loc, name) in type_decls {
+            if self.scopes.current_mut().types.contains_key(&name) {
+                let name_str = self.gcx.interner.resolve(name).to_string();
+                errors.push(FossilError::already_defined(name_str, loc, loc));
+            } else {
+                let def_id = self.gcx.definitions.insert(None, name, DefKind::Type);
+                self.scopes.current_mut().types.insert(name, def_id);
+                if let Some(metadata) = self.pending_metadata.remove(&name) {
+                    self.gcx.type_metadata.insert(def_id, Arc::new(metadata));
                 }
-                ast::StmtKind::ProviderType { .. } => {
-                    unreachable!("ProviderType should be expanded before lowering")
-                }
-                ast::StmtKind::Let { .. } | ast::StmtKind::Expr(_) => {}
             }
         }
 
@@ -154,12 +159,26 @@ impl Lowering {
     // ── Statements ─────────────────────────────────────────────
 
     fn fold_stmt(&mut self, stmt_id: ast::StmtId, errors: &mut FossilErrors) -> StmtId {
-        let stmt = self.ast.stmts.get(stmt_id);
-        let loc = stmt.loc;
-        let kind_clone = stmt.kind.clone();
+        // Extract what we need from AST, then drop the borrow
+        let (loc, snapshot) = {
+            let stmt = self.ast.stmts.get(stmt_id);
+            let snap = match &stmt.kind {
+                ast::StmtKind::Let { name, value } => StmtSnapshot::Let { name: *name, value: *value },
+                ast::StmtKind::Type { name, ty, attrs, ctor_params } => StmtSnapshot::Type {
+                    name: *name, ty: *ty, attrs: attrs.clone(), ctor_params: ctor_params.clone(),
+                },
+                ast::StmtKind::ProviderType { .. } => {
+                    // Provider types handled by register_builtins in queries.rs
+                    return self.ir.stmts.alloc(Stmt { loc: stmt.loc, kind: StmtKind::Expr(self.ir.exprs.alloc(Expr { loc: stmt.loc, kind: ExprKind::Unit })) });
+                }
+                ast::StmtKind::Expr(e) => StmtSnapshot::Expr(*e),
+            };
+            (stmt.loc, snap)
+        };
+        // AST borrow dropped — free to mutate self
 
-        let (ir_kind, ir_stmt_id) = match kind_clone {
-            ast::StmtKind::Let { name, value } => {
+        let (ir_kind, ir_stmt_id) = match snapshot {
+            StmtSnapshot::Let { name, value } => {
                 let ir_value = self.fold_expr(value, errors);
                 let kind = StmtKind::Let {
                     name,
@@ -178,7 +197,7 @@ impl Lowering {
                 return ir_id;
             }
 
-            ast::StmtKind::Type {
+            StmtSnapshot::Type {
                 name,
                 ty,
                 attrs,
@@ -209,11 +228,7 @@ impl Lowering {
                 return ir_id;
             }
 
-            ast::StmtKind::ProviderType { .. } => {
-                unreachable!("ProviderType should be expanded before lowering")
-            }
-
-            ast::StmtKind::Expr(expr) => {
+            StmtSnapshot::Expr(expr) => {
                 let ir_expr = self.fold_expr(expr, errors);
                 let kind = StmtKind::Expr(ir_expr);
                 (kind, None)
