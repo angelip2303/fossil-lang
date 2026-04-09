@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use crate::context::{DefId, DefKindTag, Symbol};
+use crate::context::{DefKindTag, Symbol};
 use crate::db::Db;
 use crate::error::FossilError;
 use crate::ir::{ExprId, ExprKind, Ir, Resolutions, TypeIndex};
@@ -29,14 +29,12 @@ enum RqValue {
         specs: Vec<EmissionSpec>,
     },
     Reference {
-        def_id: DefId,
         keys: Vec<RqExpr>,
     },
 }
 
 #[derive(Clone, Debug)]
 struct EmissionSpec {
-    type_def_id: DefId,
     type_name: String,
     select_items: Vec<(String, RqExpr)>,
     identity_exprs: Vec<(String, RqExpr)>,
@@ -108,7 +106,7 @@ impl<'a> RqLowering<'a> {
 
     fn lower_stmt(&mut self, stmt_id: crate::ir::StmtId) -> Result<(), FossilError> {
         // Extract small values from IR stmt, then drop borrow
-        let (name, value, is_expr) = {
+        let (name, value, _) = {
             let stmt = self.ir.stmts.get(stmt_id);
             match &stmt.kind {
                 crate::ir::StmtKind::Let { name, value, .. } => (Some(*name), Some(*value), false),
@@ -359,9 +357,6 @@ impl<'a> RqLowering<'a> {
                 Ok(RqValue::Emission {
                     table: TableId(0), // placeholder, projection sets real table
                     specs: vec![EmissionSpec {
-                        type_def_id: type_def_id.unwrap_or_else(|| {
-                            DefId::new(self.db, None, Symbol::intern("_unknown"), DefKindTag::Type)
-                        }),
                         type_name,
                         select_items,
                         identity_exprs,
@@ -408,22 +403,11 @@ impl<'a> RqLowering<'a> {
             }
 
             ExprKind::Ref { args, .. } => {
-                let type_def_id = self
-                    .resolutions
-                    .expr_defs
-                    .get(&expr_id)
-                    .copied()
-                    .unwrap_or_else(|| {
-                        DefId::new(self.db, None, Symbol::intern("_unknown"), DefKindTag::Type)
-                    });
                 let keys: Vec<RqExpr> = args
                     .iter()
                     .map(|&a| self.lower_expr(a).and_then(|v| v.into_expr()))
                     .collect::<Result<_, _>>()?;
-                Ok(RqValue::Reference {
-                    def_id: type_def_id,
-                    keys,
-                })
+                Ok(RqValue::Reference { keys })
             }
 
             ExprKind::Unit => Ok(RqValue::Unit),
