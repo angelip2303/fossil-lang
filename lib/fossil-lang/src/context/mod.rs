@@ -14,127 +14,69 @@ pub mod metadata;
 pub use self::global::*;
 pub use self::metadata::*;
 
-pub struct NodeId<T> {
-    idx: u32,
-    _marker: PhantomData<T>,
-}
+// ── Arena + NodeId: thin wrappers over la-arena ──────────────────────
+//
+// Same public API as before. Internally uses la-arena (rust-analyzer).
+// NodeId<T> wraps la_arena::Idx<T>; Arena<T> wraps la_arena::Arena<T>.
+
+pub struct NodeId<T>(la_arena::Idx<T>);
 
 impl<T> NodeId<T> {
     pub fn new(idx: usize) -> Self {
-        Self {
-            idx: idx as u32,
-            _marker: PhantomData,
-        }
+        Self(la_arena::Idx::from_raw(la_arena::RawIdx::from(idx as u32)))
     }
-
     pub fn idx(&self) -> usize {
-        self.idx as usize
+        self.0.into_raw().into_u32() as usize
+    }
+    pub fn raw(self) -> la_arena::Idx<T> {
+        self.0
     }
 }
 
-impl<T> PartialEq for NodeId<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.idx == other.idx
-    }
-}
-
+impl<T> Clone for NodeId<T> { fn clone(&self) -> Self { *self } }
+impl<T> Copy for NodeId<T> {}
+impl<T> PartialEq for NodeId<T> { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
 impl<T> Eq for NodeId<T> {}
-
-impl<T> Clone for NodeId<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T> Copy for NodeId<T> where NodeId<T>: Clone {}
-
-impl<T> Hash for NodeId<T> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.idx.hash(state);
-    }
-}
-
+impl<T> Hash for NodeId<T> { fn hash<H: Hasher>(&self, state: &mut H) { self.0.hash(state); } }
 impl<T> Debug for NodeId<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "NodeId({})", self.idx)
+        write!(f, "NodeId({})", self.idx())
     }
 }
 
-pub struct Arena<T> {
-    items: Vec<T>,
-}
+pub struct Arena<T>(la_arena::Arena<T>);
 
-impl<T: Clone> Clone for Arena<T> {
-    fn clone(&self) -> Self {
-        Self {
-            items: self.items.clone(),
-        }
+impl<T: Clone> Clone for Arena<T> { fn clone(&self) -> Self { Self(self.0.clone()) } }
+impl<T> Default for Arena<T> { fn default() -> Self { Self(la_arena::Arena::new()) } }
+impl<T: Debug> Debug for Arena<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Arena").field("len", &self.0.len()).finish()
     }
 }
 
 impl<T> Arena<T> {
     pub fn alloc(&mut self, item: T) -> NodeId<T> {
-        let id = NodeId::new(self.items.len());
-        self.items.push(item);
-        id
+        NodeId(self.0.alloc(item))
     }
-
     pub fn get(&self, id: NodeId<T>) -> &T {
-        debug_assert!(id.idx() < self.items.len(), "Arena::get out of bounds: index {} but len {}", id.idx(), self.items.len());
-        &self.items[id.idx()]
+        &self.0[id.0]
     }
-
     pub fn get_mut(&mut self, id: NodeId<T>) -> &mut T {
-        debug_assert!(id.idx() < self.items.len(), "Arena::get_mut out of bounds: index {} but len {}", id.idx(), self.items.len());
-        &mut self.items[id.idx()]
+        &mut self.0[id.0]
     }
-
     pub fn iter(&self) -> impl Iterator<Item = (NodeId<T>, &T)> {
-        self.items
-            .iter()
-            .enumerate()
-            .map(|(idx, item)| (NodeId::new(idx), item))
+        self.0.iter().map(|(idx, item)| (NodeId(idx), item))
     }
 }
 
 impl<T> IntoIterator for Arena<T> {
     type Item = (NodeId<T>, T);
-    type IntoIter = ArenaIntoIter<T>;
-
+    type IntoIter = std::iter::Map<
+        la_arena::IntoIter<T>,
+        fn((la_arena::Idx<T>, T)) -> (NodeId<T>, T),
+    >;
     fn into_iter(self) -> Self::IntoIter {
-        ArenaIntoIter {
-            inner: self.items.into_iter().enumerate(),
-        }
-    }
-}
-
-pub struct ArenaIntoIter<T> {
-    inner: std::iter::Enumerate<std::vec::IntoIter<T>>,
-}
-
-impl<T> Iterator for ArenaIntoIter<T> {
-    type Item = (NodeId<T>, T);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inner
-            .next()
-            .map(|(idx, item)| (NodeId::new(idx), item))
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
-    }
-}
-
-impl<T> Default for Arena<T> {
-    fn default() -> Self {
-        Self { items: Vec::new() }
-    }
-}
-
-impl<T: Debug> Debug for Arena<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Arena").field("items", &self.items).finish()
+        self.0.into_iter().map(|(idx, item)| (NodeId(idx), item))
     }
 }
 
