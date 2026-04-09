@@ -75,6 +75,13 @@ pub struct FieldMapping {
     pub data_type: String,
 }
 
+/// Result of executing an output step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputResult {
+    pub format: String,
+    pub path: String,
+}
+
 impl FossilPlan {
     /// Create a plan from a RelationalQuery and its emitted SQL.
     pub fn from_rq(rq: RelationalQuery, sql: String) -> Self {
