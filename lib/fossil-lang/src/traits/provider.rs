@@ -58,10 +58,6 @@ impl ProviderOutput {
     }
 }
 
-// Re-export under old name for backward compat
-#[cfg(feature = "polars")]
-pub type FunctionDef = LegacyFunctionDef;
-
 #[derive(Debug, Clone)]
 pub struct ProviderParamInfo {
     pub name: &'static str,
