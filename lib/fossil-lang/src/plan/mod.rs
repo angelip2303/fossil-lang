@@ -14,7 +14,7 @@ use crate::rq::RelationalQuery;
 /// The complete execution plan produced by the compiler.
 ///
 /// Serializable as JSON. The host (keasy) deserializes and executes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FossilPlan {
     /// Phase 1: load external data into DuckDB (before SQL).
     pub sources: Vec<SourceDef>,
@@ -27,7 +27,7 @@ pub struct FossilPlan {
 }
 
 /// Source data to load before the main SQL query.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceDef {
     /// Handler name (e.g. "pdf_extract", "docx_extract").
     pub handler: String,
@@ -42,7 +42,7 @@ pub struct SourceDef {
 }
 
 /// Output to materialize after the main SQL query.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputDef {
     /// Output format handler (e.g. "graphar", "turtle").
     pub format: String,
@@ -55,7 +55,7 @@ pub struct OutputDef {
 }
 
 /// Maps a SQL table to an RDF entity type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EntityProjection {
     /// RDF type name (e.g. "Person").
     pub type_name: String,
@@ -68,7 +68,7 @@ pub struct EntityProjection {
 }
 
 /// Maps an RDF field to a SQL expression.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldMapping {
     pub field_name: String,
     pub sql_expr: String,
@@ -76,7 +76,7 @@ pub struct FieldMapping {
 }
 
 /// Result of executing an output step.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputResult {
     pub format: String,
     pub path: String,

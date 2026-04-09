@@ -36,12 +36,14 @@ pub const PDF: FunctionDef = FunctionDef::preprocess(
     "pdf",
     "pdf_extract",
     &[ParamDef::required("path")],
+    &[("text", "String"), ("page", "Int"), ("source", "String")],
 );
 
 pub const DOCX: FunctionDef = FunctionDef::preprocess(
     "docx",
     "docx_extract",
     &[ParamDef::required("path")],
+    &[("text", "String"), ("source", "String")],
 );
 
 pub const SOURCES: &[FunctionDef] = &[CSV, EXCEL, PARQUET, PDF, DOCX];

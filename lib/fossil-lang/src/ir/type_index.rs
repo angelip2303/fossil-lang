@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::context::{DefId, Symbol};
 use crate::ir::TypeId;
 
+#[derive(Clone)]
 pub struct TypeDeclInfo {
     pub ty: TypeId,
     pub ctor_param_count: usize,
@@ -10,7 +11,7 @@ pub struct TypeDeclInfo {
     pub field_names: Vec<Symbol>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct TypeIndex {
     entries: HashMap<DefId, TypeDeclInfo>,
 }

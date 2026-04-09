@@ -15,7 +15,7 @@ pub type StmtId = NodeId<Stmt>;
 pub type ExprId = NodeId<Expr>;
 pub type TypeId = NodeId<Type>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CommonTypes {
     pub int: TypeId,
     pub float: TypeId,
@@ -24,7 +24,7 @@ pub struct CommonTypes {
     pub unit: TypeId,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Ir {
     pub stmts: Arena<Stmt>,
     pub exprs: Arena<Expr>,

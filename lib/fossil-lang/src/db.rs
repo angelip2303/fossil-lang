@@ -7,10 +7,29 @@
 //! Reference: Salsa Calc tutorial, rust-analyzer RootDatabase.
 
 
-/// The Fossil compiler database.
+/// Host capability: resolve source schemas at compile time.
 ///
-/// All compiler state lives here. Queries are memoized and incrementally
-/// recomputed when inputs change.
+/// Implement this trait on your database struct to provide schema resolution.
+/// Same role as rust-analyzer's `HasLogger` or Malloy's `Connection`.
+pub trait HasSchemaResolver {
+    /// Resolve the schema of a data source at compile time.
+    ///
+    /// Returns `[(column_name, sql_type)]`. The compiler maps sql_type → PrimitiveType.
+    /// For cloud sources, the host pre-resolves schemas via `schema_needs` and caches here.
+    fn source_schema(&self, provider: &str, path: &str) -> Option<Vec<(String, String)>>;
+}
+
+/// Compiler database trait. All tracked functions use `&dyn Db`.
+///
+/// Combines Salsa's `Database` with host schema resolution.
+/// Pattern: rust-analyzer `LogDatabase` = `HasLogger + Database`.
+#[salsa::db]
+pub trait Db: HasSchemaResolver + salsa::Database {}
+
+#[salsa::db]
+impl<T: HasSchemaResolver + salsa::Database> Db for T {}
+
+/// Default compiler database (tests, pure compilation without I/O).
 #[salsa::db]
 #[derive(Clone, Default)]
 pub struct FossilDb {
@@ -19,6 +38,12 @@ pub struct FossilDb {
 
 #[salsa::db]
 impl salsa::Database for FossilDb {}
+
+impl HasSchemaResolver for FossilDb {
+    fn source_schema(&self, _provider: &str, _path: &str) -> Option<Vec<(String, String)>> {
+        None
+    }
+}
 
 /// Source file input — the root of all compilation queries.
 #[salsa::input(debug)]

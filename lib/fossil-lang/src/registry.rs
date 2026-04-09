@@ -21,7 +21,12 @@ pub enum OpImpl {
     /// SQL expression that loads data: "SELECT * FROM read_csv('{path}')"
     SourceSql(&'static str),
     /// Host-side preprocessing (PDF, DOCX, IFC).
-    Preprocess { handler: &'static str },
+    Preprocess {
+        handler: &'static str,
+        /// Static schema for the preprocessed output.
+        /// Defined by the plugin (e.g., fossil-doc defines PDF → {text: String, page: Int}).
+        schema: &'static [(&'static str, &'static str)],
+    },
     /// Output materialization (GraphAr, Turtle).
     Output { format: &'static str },
     /// Multi-step pipeline requiring host orchestration.
@@ -84,13 +89,18 @@ impl FunctionDef {
         }
     }
 
-    pub const fn preprocess(name: &'static str, handler: &'static str, params: &'static [ParamDef]) -> Self {
+    pub const fn preprocess(
+        name: &'static str,
+        handler: &'static str,
+        params: &'static [ParamDef],
+        schema: &'static [(&'static str, &'static str)],
+    ) -> Self {
         Self {
             name,
             namespace: "",
             params,
             returns: ReturnType::Table,
-            impl_: OpImpl::Preprocess { handler },
+            impl_: OpImpl::Preprocess { handler, schema },
         }
     }
 }

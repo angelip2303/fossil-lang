@@ -6,7 +6,7 @@ pub type StmtId = NodeId<Stmt>;
 pub type ExprId = NodeId<Expr>;
 pub type TypeId = NodeId<Type>;
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Ast {
     pub stmts: Arena<Stmt>,
     pub exprs: Arena<Expr>,
@@ -54,7 +54,7 @@ pub enum StmtKind {
     Expr(ExprId),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Expr {
     pub loc: Loc,
     pub kind: ExprKind,
@@ -113,7 +113,7 @@ pub enum ExprKind {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Type {
     pub loc: Loc,
     pub kind: TypeKind,

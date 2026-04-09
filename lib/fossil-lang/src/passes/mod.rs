@@ -7,11 +7,13 @@ pub mod typecheck;
 
 pub use crate::context::GlobalContext;
 
+#[derive(Clone)]
 pub struct ParsedProgram {
     pub ast: Ast,
     pub gcx: GlobalContext,
 }
 
+#[derive(Clone)]
 pub struct IrProgram {
     pub ir: ir::Ir,
     pub gcx: GlobalContext,

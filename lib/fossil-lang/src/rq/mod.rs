@@ -25,7 +25,7 @@ pub struct ColId(pub usize);
 ///
 /// The pipeline is linear: transforms execute in order, each consuming
 /// input table(s) and producing an output table.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelationalQuery {
     /// Ordered pipeline of transforms.
     pub transforms: Vec<Transform>,
@@ -40,7 +40,7 @@ pub struct RelationalQuery {
 }
 
 /// A single relational operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Transform {
     /// Load data from source.
     Scan {
@@ -77,7 +77,7 @@ pub enum Transform {
 }
 
 /// How data enters the pipeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ScanSource {
     /// SQL expression: e.g. "SELECT * FROM read_csv('path')"
     Sql(String),
@@ -117,7 +117,7 @@ pub enum JoinKind {
 }
 
 /// Maps a table to an RDF entity type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmissionDecl {
     pub table: TableId,
     pub type_name: String,
@@ -127,7 +127,7 @@ pub struct EmissionDecl {
 }
 
 /// Output materialization instruction.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputDecl {
     pub emissions: Vec<usize>,
     pub format: String,

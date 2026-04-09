@@ -499,7 +499,7 @@ impl<'a> RqLowering<'a> {
                 Ok(RqValue::Table(table))
             }
 
-            crate::registry::OpImpl::Preprocess { handler } => {
+            crate::registry::OpImpl::Preprocess { handler, .. } => {
                 let path = args
                     .first()
                     .and_then(|a| {
