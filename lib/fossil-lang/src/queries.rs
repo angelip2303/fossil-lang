@@ -81,12 +81,24 @@ pub fn plan(db: &dyn Db, file: SourceFile) -> FossilPlan {
 
 /// Parse source text into an AST.
 pub fn parse(db: &dyn Db, file: SourceFile) -> ParsedProgram {
+    use salsa::Accumulator;
     match Parser::parse(file.text(db), 0) {
         Ok(p) => p,
-        Err(_errors) => ParsedProgram {
-            ast: Default::default(),
-            gcx: Default::default(),
-        },
+        Err(errors) => {
+            for e in &errors.0 {
+                Diagnostic {
+                    message: e.to_string(),
+                    offset: 0,
+                    len: 0,
+                    severity: Severity::Error,
+                }
+                .accumulate(db);
+            }
+            ParsedProgram {
+                ast: Default::default(),
+                gcx: Default::default(),
+            }
+        }
     }
 }
 
