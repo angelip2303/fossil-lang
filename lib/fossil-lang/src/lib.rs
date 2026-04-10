@@ -1,14 +1,15 @@
 pub mod ast;
 pub mod builtins;
 pub mod common;
-pub mod context;
 pub mod db;
+pub mod def_map;
 pub mod error;
 pub mod ir;
+pub mod metadata;
 pub mod parser;
 pub mod passes;
 pub mod plan;
 pub mod queries;
 pub mod registry;
+pub mod resolver;
 pub mod rq;
-pub mod traits;

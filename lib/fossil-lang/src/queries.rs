@@ -14,12 +14,12 @@ use std::sync::OnceLock;
 use crate::ast::Ast;
 use crate::builtins;
 use crate::common::PrimitiveType;
-use crate::context::global::{BuiltInFieldType, DefMap, RegisteredTypes};
-use crate::context::{DefKind, Symbol, extract_type_metadata};
-use crate::db::{Db, Diagnostic, Severity, SourceFile};
+use crate::def_map::{BuiltInFieldType, DefMap, RegisteredTypes};
+use crate::db::{Db, DefKindTag, Diagnostic, Severity, SourceFile, Symbol};
+use crate::metadata::extract_type_metadata;
 use crate::passes::parse::Parser;
 use crate::passes::typecheck::TypeChecker;
-use crate::passes::{IrProgram, LowerResult};
+use crate::passes::{InferResult, LowerResult};
 use crate::plan::FossilPlan;
 use crate::registry::{OpImpl, Registry};
 use crate::rq::emit_sql::rq_to_sql;
@@ -50,7 +50,7 @@ pub struct SchemaRequest {
 #[salsa::tracked]
 pub fn schema_needs(db: &dyn Db, file: SourceFile) -> Vec<SchemaRequest> {
     let ast = parse(db, file);
-    find_provider_calls_from_ast(&ast)
+    find_provider_calls_from_ast(db, &ast)
 }
 
 // ── parse ───────────────────────────────────────────────────────────
@@ -59,10 +59,10 @@ pub fn schema_needs(db: &dyn Db, file: SourceFile) -> Vec<SchemaRequest> {
 #[salsa::tracked]
 pub fn parse(db: &dyn Db, file: SourceFile) -> Ast {
     use salsa::Accumulator;
-    match Parser::parse(file.text(db), 0) {
+    match Parser::parse(db, file.text(db), 0) {
         Ok(ast) => ast,
         Err(errors) => {
-            for e in &errors.0 {
+            for e in &errors {
                 Diagnostic {
                     message: e.to_string(),
                     offset: 0,
@@ -101,7 +101,7 @@ pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
             resolutions,
         },
         Err(errors) => {
-            for e in errors.0 {
+            for e in errors {
                 Diagnostic {
                     message: e.to_string(),
                     offset: 0,
@@ -123,9 +123,9 @@ pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
 
 // ── infer ───────────────────────────────────────────────────────────
 
-/// Type-check the IR. Returns IrProgram with per-expression types.
+/// Type-check the IR. Returns only the new artifacts from type-checking.
 #[salsa::tracked]
-pub fn infer(db: &dyn Db, file: SourceFile) -> IrProgram {
+pub fn infer(db: &dyn Db, file: SourceFile) -> InferResult {
     use salsa::Accumulator;
     let lowered = lower(db, file);
     match TypeChecker::new(
@@ -133,14 +133,13 @@ pub fn infer(db: &dyn Db, file: SourceFile) -> IrProgram {
         lowered.ir,
         lowered.def_map,
         lowered.registered_types,
-        lowered.type_metadata,
         lowered.resolutions,
     )
     .check()
     {
-        Ok(program) => program,
+        Ok(result) => result,
         Err(errors) => {
-            for e in errors.0 {
+            for e in errors {
                 Diagnostic {
                     message: e.to_string(),
                     offset: 0,
@@ -149,11 +148,8 @@ pub fn infer(db: &dyn Db, file: SourceFile) -> IrProgram {
                 }
                 .accumulate(db);
             }
-            IrProgram {
+            InferResult {
                 ir: Default::default(),
-                def_map: Default::default(),
-                registered_types: Default::default(),
-                type_metadata: Default::default(),
                 type_index: Default::default(),
                 resolutions: Default::default(),
                 typeck_results: Default::default(),
@@ -208,15 +204,15 @@ pub fn plan(db: &dyn Db, file: SourceFile) -> FossilPlan {
 fn register_builtins(db: &dyn Db, def_map: &mut DefMap, reg: &Registry) {
     for func in &reg.functions {
         if func.namespace.is_empty() {
-            let sym = Symbol::intern(func.name);
-            def_map.insert(db, None, sym, DefKind::Let);
+            let sym = Symbol::new(db,func.name);
+            def_map.insert(db, None, sym, DefKindTag::Let);
         } else {
-            let ns_sym = Symbol::intern(func.namespace);
+            let ns_sym = Symbol::new(db,func.namespace);
             let ns_def = def_map
                 .get_by_symbol(ns_sym)
-                .unwrap_or_else(|| def_map.insert(db, None, ns_sym, DefKind::Mod));
-            let name_sym = Symbol::intern(func.name);
-            def_map.insert(db, Some(ns_def), name_sym, DefKind::Let);
+                .unwrap_or_else(|| def_map.insert(db, None, ns_sym, DefKindTag::Mod));
+            let name_sym = Symbol::new(db,func.name);
+            def_map.insert(db, Some(ns_def), name_sym, DefKindTag::Let);
         }
     }
 }
@@ -228,7 +224,7 @@ fn register_provider_schemas_from_ast(
     registered_types: &mut RegisteredTypes,
     reg: &Registry,
 ) {
-    for call in find_provider_calls_from_ast(ast) {
+    for call in find_provider_calls_from_ast(db, ast) {
         let func = match reg.find_source(&call.provider) {
             Some(f) => f,
             None => continue,
@@ -258,6 +254,7 @@ fn register_provider_schemas_from_ast(
 }
 
 fn find_provider_calls_from_ast(
+    db: &dyn Db,
     ast: &crate::ast::Ast,
 ) -> Vec<SchemaRequest> {
     use crate::ast::{ExprKind, StmtKind};
@@ -265,14 +262,14 @@ fn find_provider_calls_from_ast(
     let mut calls = Vec::new();
 
     for &stmt_id in &ast.root {
-        let stmt = ast.stmts.get(stmt_id);
+        let stmt = &ast.stmts[stmt_id];
         if let StmtKind::Let { value, .. } = &stmt.kind {
-            let expr = ast.exprs.get(*value);
+            let expr = &ast.exprs[*value];
             if let ExprKind::ProviderInvocation { provider, args } = &expr.kind {
-                let provider_name = provider.display_global();
+                let provider_name = provider.display(db);
                 let path = args.iter().find_map(|arg| match arg {
                     ProviderArgument::Positional(Literal::String(s)) => {
-                        Some(s.as_str())
+                        Some(s.text(db).to_string())
                     }
                     _ => None,
                 });

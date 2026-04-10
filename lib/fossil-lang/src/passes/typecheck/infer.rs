@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::context::Symbol;
+use crate::db::Symbol;
 use crate::error::FossilError;
 use crate::ir::{
     ExprId, ExprKind, Literal, Polytype, PrimitiveType, RecordFields, Type, TypeId, TypeKind,
@@ -17,7 +17,7 @@ impl TypeChecker<'_> {
             return Ok((Subst::default(), resolved_ty));
         }
 
-        let expr = self.ir.exprs.get(expr_id);
+        let expr = &self.ir.exprs[expr_id];
         let expr_kind = expr.kind.clone();
         let loc = expr.loc;
 
@@ -52,7 +52,7 @@ impl TypeChecker<'_> {
                     .env
                     .lookup(*def_id)
                     .ok_or_else(|| {
-                        let name_str = def_id.name(self.db).as_str();
+                        let name_str = def_id.name(self.db).text(self.db);
                         FossilError::undefined_variable(name_str, loc)
                     })?
                     .clone();
@@ -95,7 +95,7 @@ impl TypeChecker<'_> {
                     let valid_fields = &info.field_names;
                     for (field_name, _) in fields {
                         if !valid_fields.contains(field_name) {
-                            let name = field_name.as_str();
+                            let name = field_name.text(self.db);
                             return Err(FossilError::field_not_found(name, loc));
                         }
                     }
@@ -138,7 +138,7 @@ impl TypeChecker<'_> {
                 // Validate that left_on fields exist in left record
                 for on_sym in left_on {
                     if left_fields.lookup(*on_sym).is_none() {
-                        let name = on_sym.as_str();
+                        let name = on_sym.text(self.db);
                         return Err(FossilError::field_not_found(name, loc));
                     }
                 }
@@ -146,14 +146,14 @@ impl TypeChecker<'_> {
                 // Validate that right_on fields exist in right record
                 for on_sym in right_on {
                     if right_fields.lookup(*on_sym).is_none() {
-                        let name = on_sym.as_str();
+                        let name = on_sym.text(self.db);
                         return Err(FossilError::field_not_found(name, loc));
                     }
                 }
 
                 // Build merged Record type: left fields + right fields (suffix on conflicts)
                 let suffix_str = suffix
-                    .map(|s| s.as_str())
+                    .map(|s| s.text(self.db).to_string())
                     .unwrap_or_else(|| "_right".to_string());
 
                 let left_names: HashSet<_> =
@@ -162,9 +162,9 @@ impl TypeChecker<'_> {
                 let mut merged = left_fields.fields.clone();
                 for (name, ty) in &right_fields.fields {
                     if left_names.contains(name) {
-                        let name_str = name.as_str();
+                        let name_str = name.text(self.db);
                         let suffixed = format!("{}{}", name_str, suffix_str);
-                        let suffixed_sym = Symbol::intern(&suffixed);
+                        let suffixed_sym = Symbol::new(self.db, &suffixed);
                         merged.push((suffixed_sym, *ty));
                     } else {
                         merged.push((*name, *ty));
@@ -210,22 +210,22 @@ impl TypeChecker<'_> {
 
                 if let Some(def_id) = self.named_def_id(expr_ty) {
                     if let Some(underlying_ty) = self.resolve_named_type(def_id)
-                        && let TypeKind::Record(fields) = &self.ir.types.get(underlying_ty).kind
+                        && let TypeKind::Record(fields) = &self.ir.types[underlying_ty].kind
                         && let Some(field_ty) = fields.lookup(*field)
                     {
                         return Ok((subst, field_ty));
                     }
-                    let field_str = field.as_str();
+                    let field_str = field.text(self.db);
                     return Err(FossilError::field_not_found(field_str, loc));
                 }
 
-                let ty = self.ir.types.get(expr_ty);
+                let ty = &self.ir.types[expr_ty];
                 match &ty.kind {
                     TypeKind::Record(fields) => {
                         if let Some(field_ty) = fields.lookup(*field) {
                             Ok((subst, field_ty))
                         } else {
-                            let field_str = field.as_str();
+                            let field_str = field.text(self.db);
                             Err(FossilError::field_not_found(field_str, loc))
                         }
                     }
@@ -236,7 +236,7 @@ impl TypeChecker<'_> {
                     }
 
                     _ => {
-                        let field_str = field.as_str();
+                        let field_str = field.text(self.db);
                         Err(FossilError::field_not_found(field_str, loc))
                     }
                 }
@@ -260,7 +260,7 @@ impl TypeChecker<'_> {
                 // If value is T?, result is T (unwrap optional via default).
                 // If value is T (non-optional), result is T.
                 let value_ty_applied = subst.apply(value_ty, &mut self.ir);
-                let inner_ty = match &self.ir.types.get(value_ty_applied).kind {
+                let inner_ty = match &self.ir.types[value_ty_applied].kind {
                     TypeKind::Optional(inner) => *inner,
                     _ => value_ty_applied,
                 };
@@ -298,13 +298,13 @@ impl TypeChecker<'_> {
         // Try Named type → resolve to Record
         if let Some(def_id) = self.named_def_id(ty_id) {
             if let Some(underlying) = self.resolve_named_type(def_id) {
-                if let TypeKind::Record(fields) = &self.ir.types.get(underlying).kind {
+                if let TypeKind::Record(fields) = &self.ir.types[underlying].kind {
                     return Ok(fields.clone());
                 }
             }
         }
         // Direct Record type
-        if let TypeKind::Record(fields) = &self.ir.types.get(ty_id).kind {
+        if let TypeKind::Record(fields) = &self.ir.types[ty_id].kind {
             return Ok(fields.clone());
         }
         Err(FossilError::internal("typecheck", "Join requires record types", loc))

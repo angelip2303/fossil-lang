@@ -8,7 +8,8 @@ use chumsky::prelude::*;
 use logos::Logos;
 
 use crate::ast::{Loc, ast::Ast};
-use crate::error::{FossilError, FossilErrors};
+use crate::db::Db;
+use crate::error::FossilError;
 use crate::parser::{
     grammar::{AstCtx, parse_stmt},
     lexer::Token,
@@ -17,7 +18,7 @@ use crate::parser::{
 pub struct Parser;
 
 impl Parser {
-    pub fn parse(src: &str, source_id: usize) -> Result<Ast, FossilErrors> {
+    pub fn parse(db: &dyn Db, src: &str, source_id: usize) -> Result<Ast, Vec<FossilError>> {
         // Tokenize with Logos - collect tokens WITH their original byte spans
         // Lexer errors are converted to Token::Error and reported separately
         let lexer = Token::lexer(src);
@@ -40,7 +41,7 @@ impl Parser {
 
         // Report lexer errors before parsing
         if !lexer_errors.is_empty() {
-            let mut compile_errors = FossilErrors::new();
+            let mut compile_errors = Vec::new();
             for span in lexer_errors {
                 let loc = Loc::new(source_id, span.into_range());
                 compile_errors.push(FossilError::syntax("Invalid token", loc));
@@ -52,6 +53,7 @@ impl Parser {
         let ast = Rc::new(RefCell::new(Ast::default()));
 
         let ctx = AstCtx {
+            db,
             ast: ast.clone(),
             source_id,
         };
@@ -80,7 +82,7 @@ impl Parser {
             }
             Err(chumsky_errors) => {
                 // Collect all parse errors
-                let mut compile_errors = FossilErrors::new();
+                let mut compile_errors = Vec::new();
 
                 for err in chumsky_errors {
                     // Extract custom messages cleanly, fall back to debug format for others

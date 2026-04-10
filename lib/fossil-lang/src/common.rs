@@ -1,6 +1,6 @@
 //! Types shared between AST and IR (identical in both representations).
 
-use crate::context::{Interner, Symbol};
+use crate::db::Symbol;
 
 /// A path to an identifier (either simple, qualified, or relative)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -21,24 +21,13 @@ impl Path {
         }
     }
 
-    pub fn display(&self, interner: &Interner) -> String {
+    /// Display this path as a dot-separated string.
+    pub fn display(&self, db: &dyn crate::db::Db) -> String {
         match self {
-            Path::Simple(sym) => interner.resolve(*sym).to_string(),
+            Path::Simple(sym) => sym.text(db).to_string(),
             Path::Qualified(parts) => parts
                 .iter()
-                .map(|sym| interner.resolve(*sym))
-                .collect::<Vec<_>>()
-                .join("."),
-        }
-    }
-
-    /// Display using the global interner (no Interner parameter needed).
-    pub fn display_global(&self) -> String {
-        match self {
-            Path::Simple(sym) => sym.as_str(),
-            Path::Qualified(parts) => parts
-                .iter()
-                .map(|sym| sym.as_str())
+                .map(|sym| sym.text(db))
                 .collect::<Vec<_>>()
                 .join("."),
         }

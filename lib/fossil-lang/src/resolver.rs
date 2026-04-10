@@ -38,15 +38,3 @@ pub trait PathResolver: Send + Sync + std::fmt::Debug {
     fn resolve(&self, raw_path: &str) -> Result<ResolvedPath, String>;
 }
 
-/// Default resolver: local/cloud pass through, @ rejected.
-#[derive(Debug)]
-pub struct DefaultPathResolver;
-
-impl PathResolver for DefaultPathResolver {
-    fn resolve(&self, raw_path: &str) -> Result<ResolvedPath, String> {
-        if raw_path.starts_with('@') {
-            return Err(format!("Host references ({raw_path}) not available in standalone mode"));
-        }
-        Ok(ResolvedPath::new(raw_path, None))
-    }
-}

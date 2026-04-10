@@ -1,15 +1,26 @@
 use crate::ast::Loc;
 use crate::ast::Attribute;
 pub use crate::common::{Literal, Path, PrimitiveType};
-use crate::context::{Arena, DefId, NodeId, Symbol};
+use crate::db::{DefId, Symbol};
+use la_arena::{Arena, Idx as NodeId};
 
 pub mod resolutions;
-pub mod type_index;
 pub mod typeck_results;
 
 pub use resolutions::Resolutions;
-pub use type_index::{TypeDeclInfo, TypeIndex};
 pub use typeck_results::TypeckResults;
+
+/// Type declaration info for user-defined and provider types.
+#[derive(Clone, PartialEq)]
+pub struct TypeDeclInfo {
+    pub ty: TypeId,
+    pub ctor_param_count: usize,
+    pub ctor_param_names: Vec<Symbol>,
+    pub field_names: Vec<Symbol>,
+}
+
+/// Index of type declarations: DefId → TypeDeclInfo.
+pub type TypeIndex = std::collections::HashMap<DefId, TypeDeclInfo>;
 
 pub type StmtId = NodeId<Stmt>;
 pub type ExprId = NodeId<Expr>;
@@ -133,7 +144,7 @@ pub enum ExprKind {
         callee: ExprId,
         args: Vec<Argument>,
         /// Resolved type arguments for generic calls: `f<Type1, Type2>(args)`
-        type_args: Vec<crate::context::DefId>,
+        type_args: Vec<crate::db::DefId>,
     },
     Projection {
         source: ExprId,

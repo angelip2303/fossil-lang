@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::Loc;
-use crate::context::DefId;
+use crate::db::DefId;
 use crate::error::FossilError;
 use crate::ir::{Ir, Polytype, RecordFields, Type, TypeId, TypeKind, TypeVar};
 
@@ -42,7 +42,7 @@ impl TypeEnv {
     }
 
     pub fn free_vars_type(&self, ty_id: TypeId, ir: &Ir) -> HashSet<TypeVar> {
-        let ty = ir.types.get(ty_id);
+        let ty = &ir.types[ty_id];
         match &ty.kind {
             TypeKind::Var(var) => {
                 let mut set = HashSet::new();
@@ -102,7 +102,7 @@ impl Subst {
             return cached;
         }
 
-        let ty = ir.types.get(ty_id);
+        let ty = &ir.types[ty_id];
         let kind = ty.kind.clone();
         let loc = ty.loc;
 
@@ -212,17 +212,17 @@ impl TypeChecker<'_> {
     }
 
     pub fn format_type(&self, ty_id: TypeId) -> String {
-        let ty = self.ir.types.get(ty_id);
+        let ty = &self.ir.types[ty_id];
         match &ty.kind {
             TypeKind::Primitive(p) => format!("{:?}", p),
             TypeKind::Var(v) => format!("'{}", v.0),
             TypeKind::Unit => "()".to_string(),
             TypeKind::Named(def_id) => {
-                let name = def_id.name(self.db).as_str();
+                let name = def_id.name(self.db).text(self.db);
                 if let Some(ns) = def_id.namespace(self.db) {
-                    format!("{}.{}", ns.as_str(), name)
+                    format!("{}.{}", ns.text(self.db), name)
                 } else {
-                    name
+                    name.to_string()
                 }
             }
             TypeKind::Function(params, ret) => {
@@ -241,7 +241,7 @@ impl TypeChecker<'_> {
             .fields
             .iter()
             .map(|(name, ty)| {
-                let field_name = name.as_str();
+                let field_name = name.text(self.db);
                 let ty_str = self.format_type(*ty);
                 format!("{}: {}", field_name, ty_str)
             })
@@ -278,12 +278,12 @@ impl TypeChecker<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::{DefId, DefKindTag, Symbol};
+    use crate::db::{DefId, DefKindTag, Symbol};
     use crate::db::FossilDb;
     use crate::ir::{Ir, Polytype, PrimitiveType, Type, TypeKind, TypeVar};
 
     fn test_def_id(db: &FossilDb) -> DefId {
-        DefId::new(db, None, Symbol::intern("test"), DefKindTag::Let)
+        DefId::new(db, None, Symbol::new(db, "test"), DefKindTag::Let)
     }
 
     #[test]
@@ -458,14 +458,14 @@ mod tests {
 
         let result = subst.apply(fn_ty, &mut ir);
 
-        match &ir.types.get(result).kind {
+        match &ir.types[result].kind {
             TypeKind::Function(params, ret) => {
                 assert_eq!(
-                    ir.types.get(params[0]).kind,
+                    ir.types[params[0]].kind,
                     TypeKind::Primitive(PrimitiveType::Int)
                 );
                 assert_eq!(
-                    ir.types.get(*ret).kind,
+                    ir.types[*ret].kind,
                     TypeKind::Primitive(PrimitiveType::String)
                 );
             }
@@ -479,7 +479,8 @@ mod tests {
         let int_ty = ir.int_type();
         let var0 = TypeVar(0);
         let var0_ty = ir.var_type(var0);
-        let field_name = Symbol::synthetic();
+        let db = FossilDb::default();
+        let field_name = Symbol::new(&db, "_test");
 
         let record_ty = ir.types.alloc(Type {
             loc: crate::ast::Loc::generated(),
@@ -491,11 +492,11 @@ mod tests {
 
         let result = subst.apply(record_ty, &mut ir);
 
-        match &ir.types.get(result).kind {
+        match &ir.types[result].kind {
             TypeKind::Record(fields) => {
                 let (_, field_ty) = &fields.fields[0];
                 assert_eq!(
-                    ir.types.get(*field_ty).kind,
+                    ir.types[*field_ty].kind,
                     TypeKind::Primitive(PrimitiveType::Int)
                 );
             }
@@ -531,10 +532,10 @@ mod tests {
         subst.insert(var0, int_ty);
 
         let result = subst.apply(opt_ty, &mut ir);
-        match &ir.types.get(result).kind {
+        match &ir.types[result].kind {
             TypeKind::Optional(inner) => {
                 assert_eq!(
-                    ir.types.get(*inner).kind,
+                    ir.types[*inner].kind,
                     TypeKind::Primitive(PrimitiveType::Int)
                 );
             }
@@ -561,7 +562,7 @@ mod tests {
 
         let result = composed.apply(var1_ty, &mut ir);
         assert_eq!(
-            ir.types.get(result).kind,
+            ir.types[result].kind,
             TypeKind::Primitive(PrimitiveType::Int)
         );
     }

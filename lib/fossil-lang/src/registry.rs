@@ -115,14 +115,6 @@ impl ParamDef {
         }
     }
 
-    pub const fn optional(name: &'static str) -> Self {
-        Self {
-            name,
-            required: false,
-            default: "",
-        }
-    }
-
     pub const fn with_default(name: &'static str, default: &'static str) -> Self {
         Self {
             name,

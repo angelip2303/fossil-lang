@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use crate::context::{DefKindTag, Symbol};
+use crate::db::{DefKindTag, Symbol};
 use crate::db::Db;
 use crate::error::FossilError;
 use crate::ir::{ExprId, ExprKind, Ir, Resolutions, TypeIndex};
@@ -107,7 +107,7 @@ impl<'a> RqLowering<'a> {
     fn lower_stmt(&mut self, stmt_id: crate::ir::StmtId) -> Result<(), FossilError> {
         // Extract small values from IR stmt, then drop borrow
         let (name, value, _) = {
-            let stmt = self.ir.stmts.get(stmt_id);
+            let stmt = &self.ir.stmts[stmt_id];
             match &stmt.kind {
                 crate::ir::StmtKind::Let { name, value, .. } => (Some(*name), Some(*value), false),
                 crate::ir::StmtKind::Type { .. } => return Ok(()),
@@ -132,7 +132,7 @@ impl<'a> RqLowering<'a> {
             .unwrap_or(expr_id);
         // Extract kind by cloning — ExprKind contains nested Vecs that are needed
         // by value in the match arms. TODO: further optimize with snapshot extraction.
-        let kind = self.ir.exprs.get(expr_id).kind.clone();
+        let kind = &self.ir.exprs[expr_id].kind.clone();
 
         match &kind {
             ExprKind::Literal(lit) => {
@@ -140,8 +140,7 @@ impl<'a> RqLowering<'a> {
                 Ok(RqValue::Expr(match lit {
                     Literal::Integer(i) => RqExpr::Lit(RqLiteral::Integer(*i)),
                     Literal::String(s) => {
-                        let text = s.as_str();
-                        RqExpr::Lit(RqLiteral::String(text))
+                        RqExpr::Lit(RqLiteral::String(s.text(self.db).to_string()))
                     }
                     Literal::Boolean(b) => RqExpr::Lit(RqLiteral::Boolean(*b)),
                 }))
@@ -155,7 +154,7 @@ impl<'a> RqLowering<'a> {
                     .ok_or_else(|| {
                         FossilError::evaluation(
                             "Unresolved identifier in RQ lowering",
-                            self.ir.exprs.get(expr_id).loc,
+                            self.ir.exprs[expr_id].loc,
                         )
                     })?;
 
@@ -172,7 +171,7 @@ impl<'a> RqLowering<'a> {
             }
 
             ExprKind::FieldAccess { field, .. } => {
-                let field_name = field.as_str();
+                let field_name = field.text(self.db).to_string();
                 let col = self.rq.intern_col(&field_name);
                 Ok(RqValue::Expr(RqExpr::Col(col)))
             }
@@ -186,7 +185,7 @@ impl<'a> RqLowering<'a> {
             ExprKind::StringInterpolation { parts, exprs } => {
                 let mut concat_parts = Vec::new();
                 for (i, part) in parts.iter().enumerate() {
-                    let s = part.as_str();
+                    let s = part.text(self.db).to_string();
                     if !s.is_empty() {
                         concat_parts.push(RqExpr::Lit(RqLiteral::String(s)));
                     }
@@ -212,13 +211,13 @@ impl<'a> RqLowering<'a> {
                     .iter()
                     .zip(right_on.iter())
                     .map(|(l, r)| {
-                        let lname = l.as_str();
-                        let rname = r.as_str();
+                        let lname = l.text(self.db).to_string();
+                        let rname = r.text(self.db).to_string();
                         (self.rq.intern_col(&lname), self.rq.intern_col(&rname))
                     })
                     .collect();
 
-                let suffix_str = suffix.map(|s| s.as_str());
+                let suffix_str = suffix.map(|s| s.text(self.db).to_string());
                 let output = self.next_table("joined");
                 self.rq.transforms.push(Transform::Join {
                     left: left_table,
@@ -316,7 +315,7 @@ impl<'a> RqLowering<'a> {
             } => {
                 let type_def_id = self.resolutions.expr_defs.get(&expr_id).copied();
                 let type_name = type_def_id
-                    .map(|id| id.name(self.db).as_str())
+                    .map(|id| id.name(self.db).text(self.db).to_string())
                     .unwrap_or_else(|| "_unresolved".to_string());
 
                 let mut select_items = Vec::new();
@@ -324,13 +323,13 @@ impl<'a> RqLowering<'a> {
 
                 // Process ctor args (identity columns)
                 if let Some(type_def_id) = type_def_id {
-                    if let Some(info) = self.type_index.get(type_def_id) {
+                    if let Some(info) = self.type_index.get(&type_def_id) {
                         for (i, arg) in ctor_args.iter().enumerate() {
                             let val = self.lower_expr(arg.value())?.into_expr()?;
                             let name = info
                                 .ctor_param_names
                                 .get(i)
-                                .map(|n| n.as_str())
+                                .map(|n| n.text(self.db).to_string())
                                 .unwrap_or_else(|| format!("_ctor_{i}"));
                             identity_exprs.push((name, val));
                         }
@@ -339,7 +338,7 @@ impl<'a> RqLowering<'a> {
 
                 // Process fields
                 for (name_sym, expr_id) in fields {
-                    let name = name_sym.as_str();
+                    let name = name_sym.text(self.db).to_string();
                     let val = self.lower_expr(*expr_id)?;
                     let rq_expr = match val {
                         RqValue::Expr(e) => e,
@@ -373,9 +372,9 @@ impl<'a> RqLowering<'a> {
                 let callee_def_id = self.resolutions.expr_defs.get(callee).copied();
 
                 if let Some(def_id) = callee_def_id {
-                    let func_name = def_id.name(self.db).as_str();
+                    let func_name = def_id.name(self.db).text(self.db).to_string();
                     let namespace = def_id.namespace(self.db)
-                        .map(|ns| ns.as_str())
+                        .map(|ns| ns.text(self.db).to_string())
                         .unwrap_or_default();
 
                     // Try Registry lookup

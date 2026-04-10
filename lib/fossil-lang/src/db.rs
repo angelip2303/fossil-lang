@@ -6,8 +6,6 @@
 //!
 //! Reference: Salsa Calc tutorial, rust-analyzer RootDatabase.
 
-use crate::context::Symbol;
-
 /// Host capability: resolve source schemas at compile time.
 ///
 /// Implement this trait on your database struct to provide schema resolution.
@@ -43,6 +41,42 @@ impl salsa::Database for FossilDb {}
 impl HasSchemaResolver for FossilDb {
     fn source_schema(&self, _provider: &str, _path: &str) -> Option<Vec<(String, String)>> {
         None
+    }
+}
+
+// ── Symbol: Salsa-interned string identifier ──────────────────────
+//
+// Same pattern as DefId: InternedSymbol<'db> is the Salsa type,
+// Symbol(salsa::Id) is the lifetime-free wrapper stored in AST/IR.
+
+#[salsa::interned]
+pub struct InternedSymbol<'db> {
+    #[returns(ref)]
+    pub text: String,
+}
+
+/// Lifetime-free interned string. Wraps `salsa::Id` so it can be stored
+/// in AST/IR arenas without propagating `'db`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Symbol(salsa::Id);
+
+impl std::fmt::Debug for Symbol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Symbol({:?})", self.0)
+    }
+}
+
+impl Symbol {
+    /// Intern a string, returning a stable Symbol.
+    pub fn new(db: &dyn Db, text: &str) -> Self {
+        let interned = InternedSymbol::new(db, text.to_string());
+        Self(salsa::plumbing::AsId::as_id(&interned))
+    }
+
+    /// Resolve this symbol to its string representation.
+    pub fn text(self, db: &dyn Db) -> &str {
+        let interned = <InternedSymbol<'_> as salsa::plumbing::FromId>::from_id(self.0);
+        interned.text(db)
     }
 }
 
@@ -150,5 +184,25 @@ pub struct Diagnostic {
 pub enum Severity {
     Error,
     Warning,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn symbol_intern_and_resolve() {
+        let db = FossilDb::default();
+        let sym = Symbol::new(&db, "hello");
+        assert_eq!(sym.text(&db), "hello");
+    }
+
+    #[test]
+    fn symbol_dedup() {
+        let db = FossilDb::default();
+        let a = Symbol::new(&db, "foo");
+        let b = Symbol::new(&db, "foo");
+        assert_eq!(a, b);
+    }
 }
 

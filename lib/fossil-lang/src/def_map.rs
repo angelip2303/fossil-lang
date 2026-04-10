@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::common::{Path, PrimitiveType};
-use crate::context::{DefId, DefKindTag, Symbol, TypeMetadata};
-use crate::db::Db;
+use crate::db::{Db, DefId, DefKindTag, Symbol};
+use crate::metadata::TypeMetadata;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltInFieldType {
@@ -82,11 +82,11 @@ impl DefMap {
         name: &str,
         fields: Vec<(&str, BuiltInFieldType)>,
     ) -> DefId {
-        let symbol = Symbol::intern(name);
+        let symbol = Symbol::new(db,name);
         let def_id = self.insert(db, None, symbol, DefKindTag::Type);
         let interned_fields: Vec<_> = fields
             .into_iter()
-            .map(|(fname, ftype)| (Symbol::intern(fname), ftype))
+            .map(|(fname, ftype)| (Symbol::new(db,fname), ftype))
             .collect();
         registered_types.insert(def_id, interned_fields);
         def_id

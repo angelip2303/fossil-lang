@@ -47,15 +47,6 @@ pub enum FossilError {
         first_def: SourceSpan,
     },
 
-    #[error("'{name}' is not a {kind}")]
-    #[diagnostic(code(fossil::resolve::not_a))]
-    NotA {
-        kind: &'static str,
-        name: String,
-        #[label("expected a {kind}")]
-        span: SourceSpan,
-    },
-
     #[error("type mismatch: {message}")]
     #[diagnostic(code(fossil::types::mismatch))]
     TypeMismatch {
@@ -103,15 +94,6 @@ pub enum FossilError {
     Evaluation {
         message: String,
         #[label("error occurred here")]
-        span: SourceSpan,
-    },
-
-    #[error("{provider} provider requires '{name}' argument")]
-    #[diagnostic(code(fossil::provider::missing_arg))]
-    MissingArgument {
-        name: &'static str,
-        provider: &'static str,
-        #[label("missing argument")]
         span: SourceSpan,
     },
 
@@ -235,18 +217,6 @@ impl FossilError {
         Self::undefined("type", path, loc)
     }
 
-    pub fn not_a(kind: &'static str, name: impl Into<String>, loc: Loc) -> Self {
-        Self::NotA {
-            kind,
-            name: name.into(),
-            span: loc.into(),
-        }
-    }
-
-    pub fn not_a_provider(path: impl Into<String>, loc: Loc) -> Self {
-        Self::not_a("provider", path, loc)
-    }
-
     pub fn type_mismatch(message: impl Into<String>, loc: Loc) -> Self {
         Self::TypeMismatch {
             message: message.into(),
@@ -287,14 +257,6 @@ impl FossilError {
     pub fn evaluation(message: impl Into<String>, loc: Loc) -> Self {
         Self::Evaluation {
             message: message.into(),
-            span: loc.into(),
-        }
-    }
-
-    pub fn missing_argument(name: &'static str, provider: &'static str, loc: Loc) -> Self {
-        Self::MissingArgument {
-            name,
-            provider,
             span: loc.into(),
         }
     }
@@ -377,64 +339,6 @@ impl FossilError {
     }
 }
 
-pub trait AtLoc {
-    fn at(self, loc: Loc) -> FossilError;
-}
-
-impl AtLoc for std::io::Error {
-    fn at(self, loc: Loc) -> FossilError {
-        FossilError::read_error("<unknown>", self.to_string(), loc)
-    }
-}
-
-
-#[derive(Debug, Default)]
-pub struct FossilErrors(pub Vec<FossilError>);
-
-impl FossilErrors {
-    pub fn new() -> Self {
-        Self(Vec::new())
-    }
-
-    pub fn push(&mut self, error: impl Into<FossilError>) {
-        self.0.push(error.into());
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn into_result<T>(self, ok: T) -> Result<T, Self> {
-        if self.is_empty() { Ok(ok) } else { Err(self) }
-    }
-}
-
-impl std::fmt::Display for FossilErrors {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} error(s)", self.0.len())
-    }
-}
-
-impl std::error::Error for FossilErrors {}
-
-impl<E: Into<FossilError>> From<E> for FossilErrors {
-    fn from(err: E) -> Self {
-        Self(vec![err.into()])
-    }
-}
-
-impl IntoIterator for FossilErrors {
-    type Item = FossilError;
-    type IntoIter = std::vec::IntoIter<FossilError>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -446,35 +350,11 @@ mod tests {
     }
 
     #[test]
-    fn errors_push_and_len() {
-        let mut errors = FossilErrors::new();
+    fn errors_vec_push_and_len() {
+        let mut errors: Vec<FossilError> = Vec::new();
         errors.push(FossilError::syntax("bad token", dummy_loc()));
         errors.push(FossilError::syntax("another error", dummy_loc()));
         assert_eq!(errors.len(), 2);
-    }
-
-    #[test]
-    fn errors_is_empty() {
-        let mut errors = FossilErrors::new();
-        assert!(errors.is_empty());
-        errors.push(FossilError::syntax("oops", dummy_loc()));
-        assert!(!errors.is_empty());
-    }
-
-    #[test]
-    fn errors_into_result_ok() {
-        let errors = FossilErrors::new();
-        let result = errors.into_result(42);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 42);
-    }
-
-    #[test]
-    fn errors_into_result_err() {
-        let mut errors = FossilErrors::new();
-        errors.push(FossilError::syntax("fail", dummy_loc()));
-        let result = errors.into_result(42);
-        assert!(result.is_err());
     }
 
     #[test]

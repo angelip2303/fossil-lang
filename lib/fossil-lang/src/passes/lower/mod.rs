@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
 use crate::ast::{self, Loc};
-use crate::context::{DefId, DefKind, Symbol, TypeMetadata};
-use crate::context::global::{DefMap, RegisteredTypes, TypeMetadataMap};
+use crate::db::{DefId, Symbol};
+use crate::metadata::TypeMetadata;
+use crate::db::DefKindTag;
+use crate::def_map::{DefMap, RegisteredTypes, TypeMetadataMap};
 use crate::db::Db;
-use crate::error::{FossilError, FossilErrors};
+use crate::error::FossilError;
 use crate::ir::{
     Argument, Expr, ExprId, ExprKind, Ir, Path, RecordFields, Resolutions, Stmt, StmtId, StmtKind,
     Type, TypeId, TypeKind,
@@ -16,7 +18,7 @@ pub fn lower_with_metadata(
     def_map: DefMap,
     registered_types: RegisteredTypes,
     metadata: HashMap<Symbol, TypeMetadata>,
-) -> Result<(Ir, DefMap, TypeMetadataMap, RegisteredTypes, Resolutions), FossilErrors> {
+) -> Result<(Ir, DefMap, TypeMetadataMap, RegisteredTypes, Resolutions), Vec<FossilError>> {
     Lowering::new(db, ast, def_map, registered_types, metadata).run()
 }
 
@@ -112,8 +114,8 @@ impl<'a> Lowering<'a> {
         }
     }
 
-    fn run(mut self) -> Result<(Ir, DefMap, TypeMetadataMap, RegisteredTypes, Resolutions), FossilErrors> {
-        let mut errors = FossilErrors::new();
+    fn run(mut self) -> Result<(Ir, DefMap, TypeMetadataMap, RegisteredTypes, Resolutions), Vec<FossilError>> {
+        let mut errors = Vec::new();
 
         // Pre-scan: collect type declarations (types can be referenced before their
         // body is lowered, e.g. in other type fields). Lets are NOT pre-scanned —
@@ -122,7 +124,7 @@ impl<'a> Lowering<'a> {
         let root: Vec<_> = self.ast.root.iter().copied().collect();
         // Pre-scan: extract (loc, name) for Type declarations
         let type_decls: Vec<_> = root.iter().filter_map(|&sid| {
-            let stmt = self.ast.stmts.get(sid);
+            let stmt = &self.ast.stmts[sid];
             if let ast::StmtKind::Type { name, .. } = &stmt.kind {
                 Some((stmt.loc, *name))
             } else {
@@ -131,10 +133,10 @@ impl<'a> Lowering<'a> {
         }).collect();
         for (loc, name) in type_decls {
             if self.scopes.current_mut().types.contains_key(&name) {
-                let name_str = name.as_str().to_string();
+                let name_str = name.text(self.db).to_string();
                 errors.push(FossilError::already_defined(name_str, loc, loc));
             } else {
-                let def_id = self.def_map.insert(self.db, None, name, DefKind::Type);
+                let def_id = self.def_map.insert(self.db, None, name, DefKindTag::Type);
                 self.scopes.current_mut().types.insert(name, def_id);
                 if let Some(metadata) = self.pending_metadata.remove(&name) {
                     self.type_metadata.insert(def_id, metadata);
@@ -161,10 +163,10 @@ impl<'a> Lowering<'a> {
 
     // ── Statements ─────────────────────────────────────────────
 
-    fn fold_stmt(&mut self, stmt_id: ast::StmtId, errors: &mut FossilErrors) -> StmtId {
+    fn fold_stmt(&mut self, stmt_id: ast::StmtId, errors: &mut Vec<FossilError>) -> StmtId {
         // Extract what we need from AST, then drop the borrow
         let (loc, snapshot) = {
-            let stmt = self.ast.stmts.get(stmt_id);
+            let stmt = &self.ast.stmts[stmt_id];
             let snap = match &stmt.kind {
                 ast::StmtKind::Let { name, value } => StmtSnapshot::Let { name: *name, value: *value },
                 ast::StmtKind::Type { name, ty, attrs, ctor_params } => StmtSnapshot::Type {
@@ -191,7 +193,7 @@ impl<'a> Lowering<'a> {
 
                 // Register let binding
                 let def_id = self.scopes.lookup_value(name).unwrap_or_else(|| {
-                    let def_id = self.def_map.insert(self.db, None, name, DefKind::Let);
+                    let def_id = self.def_map.insert(self.db, None, name, DefKindTag::Let);
                     self.scopes.current_mut().values.insert(name, def_id);
                     def_id
                 });
@@ -247,8 +249,8 @@ impl<'a> Lowering<'a> {
 
     // ── Expressions ────────────────────────────────────────────
 
-    fn fold_expr(&mut self, expr_id: ast::ExprId, errors: &mut FossilErrors) -> ExprId {
-        let expr = self.ast.exprs.get(expr_id);
+    fn fold_expr(&mut self, expr_id: ast::ExprId, errors: &mut Vec<FossilError>) -> ExprId {
+        let expr = &self.ast.exprs[expr_id];
         let loc = expr.loc;
         let kind_clone = expr.kind.clone();
 
@@ -295,7 +297,7 @@ impl<'a> Lowering<'a> {
                                 .expr_rewrites
                                 .insert(ir_expr_id, current);
                         } else {
-                            let path_str = ast_path.display_global();
+                            let path_str = ast_path.display(self.db);
                             errors.push(FossilError::undefined_path(path_str, loc));
                         }
                     }
@@ -350,10 +352,10 @@ impl<'a> Lowering<'a> {
                 let ir_callee = self.fold_expr(callee, errors);
                 let ir_args = self.fold_args(&args, errors);
                 // Resolve type arguments from AST TypeIds to DefIds
-                let resolved_type_args: Vec<crate::context::DefId> = type_args
+                let resolved_type_args: Vec<crate::db::DefId> = type_args
                     .iter()
                     .filter_map(|ast_type_id| {
-                        let ast_type = self.ast.types.get(*ast_type_id);
+                        let ast_type = &self.ast.types[*ast_type_id];
                         if let crate::ast::TypeKind::Named(path) = &ast_type.kind {
                             self.resolve_type_path(path, ast_type.loc, errors)
                         } else {
@@ -384,7 +386,7 @@ impl<'a> Lowering<'a> {
 
                 // Push scope for the binding
                 self.scopes.push();
-                let def_id = self.def_map.insert(self.db, None, param, DefKind::Let);
+                let def_id = self.def_map.insert(self.db, None, param, DefKindTag::Let);
                 self.scopes.current_mut().values.insert(param, def_id);
 
                 let ir_outputs: Vec<_> = outputs
@@ -495,7 +497,7 @@ impl<'a> Lowering<'a> {
     fn fold_args(
         &mut self,
         args: &[ast::Argument],
-        errors: &mut FossilErrors,
+        errors: &mut Vec<FossilError>,
     ) -> Vec<Argument> {
         args.iter()
             .map(|arg| match arg {
@@ -512,8 +514,8 @@ impl<'a> Lowering<'a> {
 
     // ── Types ──────────────────────────────────────────────────
 
-    fn fold_type(&mut self, type_id: ast::TypeId, errors: &mut FossilErrors) -> TypeId {
-        let ty = self.ast.types.get(type_id);
+    fn fold_type(&mut self, type_id: ast::TypeId, errors: &mut Vec<FossilError>) -> TypeId {
+        let ty = &self.ast.types[type_id];
         let loc = ty.loc;
         let kind_clone = ty.kind.clone();
 
@@ -574,7 +576,7 @@ impl<'a> Lowering<'a> {
         loc: Loc,
         scope_lookup: impl Fn(&ScopeStack, Symbol) -> Option<DefId>,
         make_error: impl Fn(String, Loc) -> FossilError,
-        errors: &mut FossilErrors,
+        errors: &mut Vec<FossilError>,
     ) -> Option<DefId> {
         match path {
             Path::Simple(name) => {
@@ -584,14 +586,13 @@ impl<'a> Lowering<'a> {
                 if let Some(def_id) = self.def_map.resolve(self.db,&Path::Simple(*name)) {
                     return Some(def_id);
                 }
-                let name_str = name.as_str();
-                errors.push(make_error(name_str, loc));
+                errors.push(make_error(name.text(self.db).to_string(), loc));
                 None
             }
             Path::Qualified(parts) => {
                 let ast_path = Path::Qualified(parts.clone());
                 self.def_map.resolve(self.db,&ast_path).or_else(|| {
-                    let path_str = ast_path.display_global();
+                    let path_str = ast_path.display(self.db);
                     errors.push(make_error(path_str, loc));
                     None
                 })
@@ -603,7 +604,7 @@ impl<'a> Lowering<'a> {
         &self,
         path: &Path,
         loc: Loc,
-        errors: &mut FossilErrors,
+        errors: &mut Vec<FossilError>,
     ) -> Option<DefId> {
         self.resolve_path(
             path,
@@ -618,7 +619,7 @@ impl<'a> Lowering<'a> {
         &self,
         path: &Path,
         loc: Loc,
-        errors: &mut FossilErrors,
+        errors: &mut Vec<FossilError>,
     ) -> Option<DefId> {
         self.resolve_path(
             path,
@@ -635,7 +636,7 @@ impl<'a> Lowering<'a> {
         type_id: TypeId,
         type_def_id: Option<DefId>,
     ) {
-        let ty = self.ir.types.get(type_id);
+        let ty = &self.ir.types[type_id];
         if let TypeKind::Record(_) = &ty.kind {
             if self.scopes.current_mut().values.contains_key(&type_name) {
                 return;
@@ -644,7 +645,7 @@ impl<'a> Lowering<'a> {
                 self.db,
                 type_def_id,
                 type_name,
-                DefKind::RecordConstructor,
+                DefKindTag::RecordConstructor,
             );
             self.scopes
                 .current_mut()

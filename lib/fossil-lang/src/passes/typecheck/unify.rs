@@ -1,5 +1,5 @@
 use crate::ast::Loc;
-use crate::context::DefId;
+use crate::db::DefId;
 use crate::error::FossilError;
 use crate::ir::{RecordFields, TypeId, TypeKind, TypeVar};
 
@@ -45,8 +45,8 @@ impl TypeChecker<'_> {
             };
         }
 
-        let ty1 = self.ir.types.get(ty1_id);
-        let ty2 = self.ir.types.get(ty2_id);
+        let ty1 = &self.ir.types[ty1_id];
+        let ty2 = &self.ir.types[ty2_id];
 
         match (&ty1.kind, &ty2.kind) {
             (TypeKind::Var(v1), TypeKind::Var(v2)) if v1 == v2 => Ok(Subst::default()),
@@ -110,7 +110,7 @@ impl TypeChecker<'_> {
     }
 
     pub fn bind_var(&mut self, var: TypeVar, ty_id: TypeId, loc: Loc) -> Result<Subst, FossilError> {
-        let ty = self.ir.types.get(ty_id);
+        let ty = &self.ir.types[ty_id];
 
         if matches!(ty.kind, TypeKind::Var(v) if v == var) {
             return Ok(Subst::default());
@@ -127,7 +127,7 @@ impl TypeChecker<'_> {
     }
 
     pub fn occurs_in(&self, var: TypeVar, ty_id: TypeId) -> bool {
-        let ty = self.ir.types.get(ty_id);
+        let ty = &self.ir.types[ty_id];
         match &ty.kind {
             TypeKind::Var(v) => *v == var,
             TypeKind::Record(fields) => fields.fields.iter().any(|(_, ty)| self.occurs_in(var, *ty)),
@@ -157,7 +157,7 @@ impl TypeChecker<'_> {
                 let s = self.unify(ty1_applied, ty2_applied, loc)?;
                 subst = subst.compose(&s, &mut self.ir);
             } else {
-                let field_str = name1.as_str();
+                let field_str = name1.text(self.db);
                 return Err(FossilError::field_not_found(field_str, loc));
             }
         }

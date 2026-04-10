@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::context::DefId;
+use crate::db::DefId;
 use crate::ir::{ExprId, TypeId};
 
 #[derive(Default, Clone, PartialEq)]

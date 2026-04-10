@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
-use crate::context::DefId;
-use crate::context::global::{BuiltInFieldType, DefMap, RegisteredTypes, TypeMetadataMap};
+use crate::db::DefId;
+use crate::def_map::{BuiltInFieldType, DefMap, RegisteredTypes};
 use crate::db::Db;
-use crate::error::{FossilError, FossilErrors};
+use crate::error::FossilError;
 use crate::ir::{ExprId, Ir, Polytype, PrimitiveType, RecordFields, Resolutions, StmtId, StmtKind, Type, TypeDeclInfo, TypeId, TypeIndex, TypeKind, TypeVar, TypeckResults};
-use crate::passes::IrProgram;
+use crate::passes::InferResult;
 
 pub mod typeutil;
 pub mod infer;
@@ -31,7 +31,6 @@ pub struct TypeChecker<'a> {
     pub(crate) ir: Ir,
     pub(crate) def_map: DefMap,
     pub(crate) registered_types: RegisteredTypes,
-    pub(crate) type_metadata: TypeMetadataMap,
     pub(crate) resolutions: Resolutions,
     pub(crate) tvg: TypeVarGen,
     pub(crate) env: TypeEnv,
@@ -48,7 +47,6 @@ impl<'a> TypeChecker<'a> {
         ir: Ir,
         def_map: DefMap,
         registered_types: RegisteredTypes,
-        type_metadata: TypeMetadataMap,
         resolutions: Resolutions,
     ) -> Self {
         let mut checker = Self {
@@ -56,7 +54,6 @@ impl<'a> TypeChecker<'a> {
             ir,
             def_map,
             registered_types,
-            type_metadata,
             resolutions,
             tvg: TypeVarGen::default(),
             env: TypeEnv::default(),
@@ -74,10 +71,10 @@ impl<'a> TypeChecker<'a> {
 
     fn build_type_index(&mut self) {
         for &stmt_id in &self.ir.root {
-            let stmt = self.ir.stmts.get(stmt_id);
+            let stmt = &self.ir.stmts[stmt_id];
             if let StmtKind::Type { ty, ctor_params, .. } = &stmt.kind {
                 if let Some(&def_id) = self.resolutions.stmt_defs.get(&stmt_id) {
-                    let field_names = match &self.ir.types.get(*ty).kind {
+                    let field_names = match &self.ir.types[*ty].kind {
                         TypeKind::Record(fields) => fields.field_names(),
                         _ => vec![],
                     };
@@ -91,7 +88,7 @@ impl<'a> TypeChecker<'a> {
                     // Populate registered_types for user-defined types (providers, etc.)
                     // This makes registered_types the universal source of field type info.
                     if !self.registered_types.contains_key(&def_id) {
-                        if let TypeKind::Record(fields) = &self.ir.types.get(*ty).kind {
+                        if let TypeKind::Record(fields) = &self.ir.types[*ty].kind {
                             let field_types: Vec<_> = fields.fields.iter()
                                 .filter_map(|(sym, ty_id)| {
                                     extract_field_type(&self.ir, *ty_id).map(|ft| (*sym, ft))
@@ -111,7 +108,7 @@ impl<'a> TypeChecker<'a> {
             .collect();
 
         for (def_id, fields) in registered {
-            if self.type_index.contains(def_id) { continue; }
+            if self.type_index.contains_key(&def_id) { continue; }
             let ir_fields = materialize_registered_fields(&fields, &mut self.ir);
             let field_names: Vec<_> = ir_fields.iter().map(|(name, _)| *name).collect();
             let record_ty = self.ir.alloc_type(TypeKind::Record(RecordFields::from_fields(ir_fields)));
@@ -129,13 +126,13 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn init_record_constructors(&mut self) {
-        use crate::context::DefKindTag;
+        use crate::db::DefKindTag;
         use crate::ir::CtorParam;
 
         // Collect ctor_params from IR statements for types that have them
         let mut type_ctor_params: HashMap<DefId, Vec<CtorParam>> = HashMap::new();
         for &stmt_id in &self.ir.root {
-            let stmt = self.ir.stmts.get(stmt_id);
+            let stmt = &self.ir.stmts[stmt_id];
             if let StmtKind::Type { ctor_params, .. } = &stmt.kind {
                 if !ctor_params.is_empty() {
                     if let Some(&def_id) = self.resolutions.stmt_defs.get(&stmt_id) {
@@ -153,8 +150,8 @@ impl<'a> TypeChecker<'a> {
         }).collect();
 
         for (type_def_id, ctor_def_id) in pairs {
-            let info = self.type_index.get(type_def_id).unwrap();
-            let ty = self.ir.types.get(info.ty);
+            let info = self.type_index.get(&type_def_id).unwrap();
+            let ty = &self.ir.types[info.ty];
             let loc = ty.loc;
 
             if let TypeKind::Record(fields) = &ty.kind {
@@ -192,20 +189,20 @@ impl<'a> TypeChecker<'a> {
     }
 
     pub(crate) fn lookup_type_info(&self, def_id: DefId) -> Option<&TypeDeclInfo> {
-        self.type_index.get(def_id)
+        self.type_index.get(&def_id)
     }
 
     pub(crate) fn named_def_id(&self, ty_id: TypeId) -> Option<DefId> {
-        match &self.ir.types.get(ty_id).kind {
+        match &self.ir.types[ty_id].kind {
             TypeKind::Named(def_id) => Some(*def_id),
             _ => None,
         }
     }
 
-    pub fn check(self) -> Result<IrProgram, FossilErrors> {
-        let (program, errors) = self.check_tolerant();
+    pub fn check(self) -> Result<InferResult, Vec<FossilError>> {
+        let (result, errors) = self.check_tolerant();
         if errors.is_empty() {
-            Ok(program)
+            Ok(result)
         } else {
             Err(errors)
         }
@@ -213,9 +210,9 @@ impl<'a> TypeChecker<'a> {
 
     /// Type-check and always return partial results, even when there are errors.
     /// Used by the LSP to keep the snapshot up-to-date for completions.
-    pub fn check_tolerant(mut self) -> (IrProgram, FossilErrors) {
+    pub fn check_tolerant(mut self) -> (InferResult, Vec<FossilError>) {
         let root_ids = self.ir.root.clone();
-        let mut errors = FossilErrors::new();
+        let mut errors = Vec::new();
 
         for stmt_id in root_ids {
             if let Err(e) = self.check_stmt(stmt_id) {
@@ -224,8 +221,6 @@ impl<'a> TypeChecker<'a> {
         }
 
         // Finalize: populate expr_types for ALL expressions with fully-resolved types.
-        // check_stmt only inserts root expressions of Let/Expr statements.
-        // This fills in all sub-expressions (joins, applications, etc.) from infer_cache.
         let cached: Vec<_> = self.infer_cache.iter().map(|(&k, &v)| (k, v)).collect();
         for (expr_id, raw_ty) in cached {
             self.typeck_results.expr_types
@@ -233,9 +228,9 @@ impl<'a> TypeChecker<'a> {
                 .or_insert_with(|| self.global_subst.apply(raw_ty, &mut self.ir));
         }
 
-        // Export binding types for LSP completions (Let bindings: projections, let statements).
+        // Export binding types for LSP completions.
         {
-            use crate::context::DefKindTag;
+            use crate::db::DefKindTag;
             for (&def_id, poly) in &self.env.bindings {
                 if matches!(def_id.kind(self.db), DefKindTag::Let) {
                     let resolved_ty = self.global_subst.apply(poly.ty, &mut self.ir);
@@ -244,20 +239,17 @@ impl<'a> TypeChecker<'a> {
             }
         }
 
-        let program = IrProgram {
+        let result = InferResult {
             ir: self.ir,
-            def_map: self.def_map,
-            registered_types: self.registered_types,
-            type_metadata: self.type_metadata,
             type_index: self.type_index,
             resolutions: self.resolutions,
             typeck_results: self.typeck_results,
         };
-        (program, errors)
+        (result, errors)
     }
 
     fn check_stmt(&mut self, stmt_id: StmtId) -> Result<(), FossilError> {
-        let stmt = self.ir.stmts.get(stmt_id);
+        let stmt = &self.ir.stmts[stmt_id];
         let stmt_kind = stmt.kind.clone();
 
         match stmt_kind {
@@ -306,9 +298,9 @@ impl<'a> TypeChecker<'a> {
 /// Returns None for types without a clear runtime representation (e.g. functions, records).
 /// Named types map to String (at runtime, record references become string identifiers/IRIs).
 fn extract_field_type(ir: &Ir, ty_id: TypeId) -> Option<BuiltInFieldType> {
-    match &ir.types.get(ty_id).kind {
+    match &ir.types[ty_id].kind {
         TypeKind::Primitive(p) => Some(BuiltInFieldType::Required(*p)),
-        TypeKind::Optional(inner_id) => match &ir.types.get(*inner_id).kind {
+        TypeKind::Optional(inner_id) => match &ir.types[*inner_id].kind {
             TypeKind::Primitive(p) => Some(BuiltInFieldType::Optional(*p)),
             TypeKind::Named(_) =>
                 Some(BuiltInFieldType::Optional(PrimitiveType::String)),
@@ -321,9 +313,9 @@ fn extract_field_type(ir: &Ir, ty_id: TypeId) -> Option<BuiltInFieldType> {
 }
 
 fn materialize_registered_fields(
-    fields: &[(crate::context::Symbol, BuiltInFieldType)],
+    fields: &[(crate::db::Symbol, BuiltInFieldType)],
     ir: &mut Ir,
-) -> Vec<(crate::context::Symbol, TypeId)> {
+) -> Vec<(crate::db::Symbol, TypeId)> {
     fields
         .iter()
         .map(|(sym, ft)| {

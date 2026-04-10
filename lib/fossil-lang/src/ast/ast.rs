@@ -1,6 +1,7 @@
 use crate::ast::Loc;
 pub use crate::common::{Literal, Path, PrimitiveType, ProviderArgument};
-use crate::context::*;
+use crate::db::Symbol;
+use la_arena::{Arena, Idx as NodeId};
 
 pub type StmtId = NodeId<Stmt>;
 pub type ExprId = NodeId<Expr>;

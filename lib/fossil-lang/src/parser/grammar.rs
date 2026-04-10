@@ -11,20 +11,22 @@ use crate::ast::{
 };
 use crate::ast::Loc;
 use crate::ast::SourceId;
-use crate::context::Symbol;
+use crate::db::Symbol;
+use crate::db::Db;
 use crate::parser::lexer::Token;
 
 type ParserError<'a> = extra::Err<Rich<'a, Token<'a>, SimpleSpan>>;
 
 #[derive(Clone)]
-pub struct AstCtx {
+pub struct AstCtx<'db> {
+    pub db: &'db dyn Db,
     pub ast: Rc<RefCell<Ast>>,
     pub source_id: SourceId,
 }
 
-impl AstCtx {
+impl AstCtx<'_> {
     pub fn intern(&self, ident: &str) -> Symbol {
-        Symbol::intern(ident)
+        Symbol::new(self.db, ident)
     }
 
     /// Convert a SimpleSpan to a Loc with this context's source_id
@@ -45,7 +47,7 @@ impl AstCtx {
     }
 }
 
-pub fn parse_stmt<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, StmtId, ParserError<'a>> + Clone
+pub fn parse_stmt<'a, I>(ctx: &'a AstCtx<'_>) -> impl Parser<'a, I, StmtId, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
@@ -174,14 +176,14 @@ where
     choice((let_stmt, type_stmt, expr_stmt))
 }
 
-fn parse_symbol<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
+fn parse_symbol<'a, I>(ctx: &'a AstCtx<'_>) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
     select! { Token::Identifier(ident) => ctx.intern(ident) }
 }
 
-fn parse_path<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Path, ParserError<'a>> + Clone
+fn parse_path<'a, I>(ctx: &'a AstCtx<'_>) -> impl Parser<'a, I, Path, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
@@ -241,7 +243,7 @@ enum PathSuffix {
     Record(Option<ExprId>, Vec<(Symbol, ExprId)>),
 }
 
-fn parse_expr<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, ExprId, ParserError<'a>> + Clone
+fn parse_expr<'a, I>(ctx: &'a AstCtx<'_>) -> impl Parser<'a, I, ExprId, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
@@ -463,7 +465,7 @@ where
                 for val in iter {
                     let loc = {
                         let ast = ctx.ast.borrow();
-                        ast.exprs.get(val).loc.merge(ast.exprs.get(current).loc)
+                        ast.exprs[val].loc.merge(ast.exprs[current].loc)
                     };
                     current = ctx.alloc_expr(
                         ExprKind::Coalesce { value: val, default: current },
@@ -472,7 +474,7 @@ where
                 }
                 let loc = {
                     let ast = ctx.ast.borrow();
-                    ast.exprs.get(first).loc.merge(ast.exprs.get(current).loc)
+                    ast.exprs[first].loc.merge(ast.exprs[current].loc)
                 };
                 ctx.alloc_expr(
                     ExprKind::Coalesce { value: first, default: current },
@@ -534,7 +536,7 @@ where
 
 /// Build a pipe chain from a source expression and a list of stages.
 /// Groups consecutive `+> each` blocks after a `|> each` into a single Projection.
-fn build_pipe_chain(ctx: &AstCtx, source: ExprId, stages: &[(ChainOp, PipeRhs)]) -> ExprId {
+fn build_pipe_chain(ctx: &AstCtx<'_>, source: ExprId, stages: &[(ChainOp, PipeRhs)]) -> ExprId {
     let mut current = source;
     let mut i = 0;
 
@@ -548,7 +550,7 @@ fn build_pipe_chain(ctx: &AstCtx, source: ExprId, stages: &[(ChainOp, PipeRhs)])
                 // x |> f     →  f(x)
                 let (callee, mut args, type_args) = {
                     let ast = ctx.ast.borrow();
-                    let rhs_expr = ast.exprs.get(*rhs);
+                    let rhs_expr = &ast.exprs[*rhs];
                     match &rhs_expr.kind {
                         ExprKind::Application { callee, args, type_args } => (*callee, args.clone(), type_args.clone()),
                         _ => (*rhs, vec![], vec![]),
@@ -557,7 +559,7 @@ fn build_pipe_chain(ctx: &AstCtx, source: ExprId, stages: &[(ChainOp, PipeRhs)])
                 args.insert(0, Argument::Positional(current));
                 let loc = {
                     let ast = ctx.ast.borrow();
-                    ast.exprs.get(current).loc.merge(ast.exprs.get(*rhs).loc)
+                    ast.exprs[current].loc.merge(ast.exprs[*rhs].loc)
                 };
                 current = ctx.alloc_expr(ExprKind::Application { callee, args, type_args }, loc);
                 i += 1;
@@ -578,7 +580,7 @@ fn build_pipe_chain(ctx: &AstCtx, source: ExprId, stages: &[(ChainOp, PipeRhs)])
                 }
                 let loc = {
                     let ast = ctx.ast.borrow();
-                    ast.exprs.get(current).loc.merge(ast.exprs.get(last_output).loc)
+                    ast.exprs[current].loc.merge(ast.exprs[last_output].loc)
                 };
                 current = ctx.alloc_expr(
                     ExprKind::Projection { source: current, param, outputs },
@@ -590,7 +592,7 @@ fn build_pipe_chain(ctx: &AstCtx, source: ExprId, stages: &[(ChainOp, PipeRhs)])
                 // A bare +> each without a preceding |> each — treat as single Projection
                 let loc = {
                     let ast = ctx.ast.borrow();
-                    ast.exprs.get(current).loc.merge(ast.exprs.get(*output).loc)
+                    ast.exprs[current].loc.merge(ast.exprs[*output].loc)
                 };
                 current = ctx.alloc_expr(
                     ExprKind::Projection { source: current, param: *param, outputs: vec![*output] },
@@ -601,7 +603,7 @@ fn build_pipe_chain(ctx: &AstCtx, source: ExprId, stages: &[(ChainOp, PipeRhs)])
             (ChainOp::Pipe, PipeRhs::Join { right, left_on, right_on, suffix }) => {
                 let loc = {
                     let ast = ctx.ast.borrow();
-                    ast.exprs.get(current).loc.merge(ast.exprs.get(*right).loc)
+                    ast.exprs[current].loc.merge(ast.exprs[*right].loc)
                 };
                 current = ctx.alloc_expr(
                     ExprKind::Join {
@@ -624,7 +626,7 @@ fn build_pipe_chain(ctx: &AstCtx, source: ExprId, stages: &[(ChainOp, PipeRhs)])
     current
 }
 
-fn parse_literal<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Literal, ParserError<'a>> + Clone
+fn parse_literal<'a, I>(ctx: &'a AstCtx<'_>) -> impl Parser<'a, I, Literal, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
@@ -699,7 +701,7 @@ fn is_valid_identifier(s: &str) -> bool {
 
 /// Parse a field name: allows identifiers and keywords in field positions
 /// (record constructors, field access after `.`, type field definitions).
-fn parse_field_name<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
+fn parse_field_name<'a, I>(ctx: &'a AstCtx<'_>) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
@@ -723,7 +725,7 @@ where
     }
 }
 
-fn parse_attr_key<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
+fn parse_attr_key<'a, I>(ctx: &'a AstCtx<'_>) -> impl Parser<'a, I, Symbol, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
@@ -731,7 +733,7 @@ where
 }
 
 /// Parse attribute: #[name(key = value, ...)] or #[name("positional")]
-fn parse_attribute<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, Attribute, ParserError<'a>> + Clone
+fn parse_attribute<'a, I>(ctx: &'a AstCtx<'_>) -> impl Parser<'a, I, Attribute, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
@@ -782,7 +784,7 @@ where
     named.or(positional)
 }
 
-fn parse_type<'a, I>(ctx: &'a AstCtx) -> impl Parser<'a, I, TypeId, ParserError<'a>> + Clone
+fn parse_type<'a, I>(ctx: &'a AstCtx<'_>) -> impl Parser<'a, I, TypeId, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {

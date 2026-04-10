@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{Attribute, AttributeArg, Literal, StmtKind, TypeKind};
-use crate::context::{Interner, Symbol};
+use crate::db::Symbol;
 
 /// Type metadata (type-level + field-level attributes) extracted from AST
 #[derive(Debug, Clone, PartialEq)]
@@ -31,14 +31,6 @@ impl TypeMetadata {
             type_attributes: Vec::new(),
             field_metadata: HashMap::new(),
         }
-    }
-
-    pub fn get_type_attribute(&self, name: Symbol) -> Option<&AttributeData> {
-        self.type_attributes.iter().find(|attr| attr.name == name)
-    }
-
-    pub fn get_field(&self, field: Symbol) -> Option<&FieldMetadata> {
-        self.field_metadata.get(&field)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -81,34 +73,6 @@ impl AttributeData {
         self.args.get(&key)
     }
 
-    pub fn get_string<'a>(&self, key: Symbol, interner: &'a Interner) -> Option<&'a str> {
-        match self.args.get(&key) {
-            Some(Literal::String(sym)) => Some(interner.resolve(*sym)),
-            _ => None,
-        }
-    }
-
-    pub fn get_int(&self, key: Symbol) -> Option<i64> {
-        match self.args.get(&key) {
-            Some(Literal::Integer(n)) => Some(*n),
-            _ => None,
-        }
-    }
-
-    pub fn get_bool(&self, key: Symbol) -> Option<bool> {
-        match self.args.get(&key) {
-            Some(Literal::Boolean(b)) => Some(*b),
-            _ => None,
-        }
-    }
-
-    pub fn first_positional_string<'a>(&self, interner: &'a Interner) -> Option<&'a str> {
-        match self.positional.first() {
-            Some(Literal::String(sym)) => Some(interner.resolve(*sym)),
-            _ => None,
-        }
-    }
-
     fn from_attribute(attr: &Attribute) -> Self {
         let mut args = HashMap::new();
         let mut positional = Vec::new();
@@ -134,13 +98,13 @@ pub fn extract_type_metadata(ast: &crate::ast::Ast) -> HashMap<Symbol, TypeMetad
     let mut result = HashMap::new();
 
     for &stmt_id in &ast.root {
-        let stmt = ast.stmts.get(stmt_id);
+        let stmt = &ast.stmts[stmt_id];
 
         if let StmtKind::Type {
             name, ty, attrs, ..
         } = &stmt.kind
         {
-            let ty_node = ast.types.get(*ty);
+            let ty_node = &ast.types[*ty];
 
             let mut metadata = TypeMetadata::new();
 
@@ -173,39 +137,3 @@ pub fn extract_type_metadata(ast: &crate::ast::Ast) -> HashMap<Symbol, TypeMetad
     result
 }
 
-pub struct TypedAttribute<'a> {
-    attr: &'a AttributeData,
-    interner: &'a Interner,
-}
-
-impl<'a> TypedAttribute<'a> {
-    pub fn new(attr: &'a AttributeData, interner: &'a Interner) -> Self {
-        Self { attr, interner }
-    }
-
-    pub fn name(&self) -> &str {
-        self.interner.resolve(self.attr.name)
-    }
-
-    pub fn string(&self, key: &str) -> Option<&str> {
-        let key_sym = self.interner.lookup(key)?;
-        self.attr.get_string(key_sym, self.interner)
-    }
-
-    pub fn int(&self, key: &str) -> Option<i64> {
-        let key_sym = self.interner.lookup(key)?;
-        self.attr.get_int(key_sym)
-    }
-
-    pub fn bool(&self, key: &str) -> Option<bool> {
-        let key_sym = self.interner.lookup(key)?;
-        self.attr.get_bool(key_sym)
-    }
-
-    pub fn has(&self, key: &str) -> bool {
-        self.interner
-            .lookup(key)
-            .map(|sym| self.attr.args.contains_key(&sym))
-            .unwrap_or(false)
-    }
-}
