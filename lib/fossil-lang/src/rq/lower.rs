@@ -381,16 +381,6 @@ impl<'a> RqLowering<'a> {
                     if let Some(func_def) = self.registry.find_function(&namespace, &func_name) {
                         return self.lower_registry_function(func_def, args);
                     }
-
-                    // Try provider lookup via Registry (csv!, excel!)
-                    if self.registry.find_source(&func_name).is_some() {
-                        return self.lower_provider_call(&func_name, args);
-                    }
-
-                    // For known output functions (Rdf.materialize), handle specially
-                    if namespace == "Rdf" && func_name == "materialize" {
-                        return self.lower_materialize(args);
-                    }
                 }
 
                 // Generic application — evaluate and return first arg
@@ -413,19 +403,35 @@ impl<'a> RqLowering<'a> {
         }
     }
 
-    fn lower_provider_call(
+    fn lower_registry_function(
         &mut self,
-        provider_name: &str,
+        func_def: &crate::registry::FunctionDef,
         args: &[crate::ir::Argument],
     ) -> Result<RqValue, FossilError> {
-        // Look up provider as a source in registry
-        if let Some(func_def) = self.registry.find_source(provider_name) {
-            return self.lower_registry_function(func_def, args);
-        }
+        match &func_def.impl_ {
+            crate::registry::OpImpl::Source { format } => {
+                let path = self.extract_path(args);
+                let params = self.extract_params(args, func_def);
+                let table = self.next_table(&format!("src_{format}"));
+                self.rq.transforms.push(Transform::Scan {
+                    output: table,
+                    source: ScanSource {
+                        format: format.to_string(),
+                        path,
+                        params,
+                    },
+                });
+                Ok(RqValue::Table(table))
+            }
 
-        // Fallback: generate a SQL scan from the provider name
-        let path = args
-            .first()
+            crate::registry::OpImpl::Output { .. } => self.lower_materialize(args),
+
+            crate::registry::OpImpl::Pipeline { .. } => Ok(RqValue::Unit),
+        }
+    }
+
+    fn extract_path(&mut self, args: &[crate::ir::Argument]) -> String {
+        args.first()
             .and_then(|a| {
                 let val = self.lower_expr(a.value()).ok()?;
                 match val {
@@ -433,92 +439,36 @@ impl<'a> RqLowering<'a> {
                     _ => None,
                 }
             })
-            .unwrap_or_default();
-
-        let table = self.next_table(provider_name);
-        let sql = format!(
-            "SELECT * FROM read_{provider_name}('{path}')"
-        );
-        self.rq.transforms.push(Transform::Scan {
-            output: table,
-            source: ScanSource::Sql(sql),
-        });
-        Ok(RqValue::Table(table))
+            .unwrap_or_default()
     }
 
-    fn lower_registry_function(
+    fn extract_params(
         &mut self,
-        func_def: &crate::registry::FunctionDef,
         args: &[crate::ir::Argument],
-    ) -> Result<RqValue, FossilError> {
-        match &func_def.impl_ {
-            crate::registry::OpImpl::SourceSql(template) => {
-                // Extract path from first arg
-                let path = args
-                    .first()
-                    .and_then(|a| {
-                        let val = self.lower_expr(a.value()).ok()?;
-                        match val {
-                            RqValue::Expr(RqExpr::Lit(RqLiteral::String(s))) => Some(s),
-                            _ => None,
-                        }
-                    })
-                    .unwrap_or_default();
-
-                let mut sql = template.replace("{path}", &path);
-                // Fill in optional params with defaults from FunctionDef
-                for param in func_def.params {
-                    if !param.default.is_empty() {
-                        sql = sql.replace(&format!("{{{}}}", param.name), param.default);
-                    }
+        func_def: &crate::registry::FunctionDef,
+    ) -> std::collections::HashMap<String, String> {
+        let mut params = std::collections::HashMap::new();
+        // Named args from the call
+        for arg in args {
+            if let crate::ir::Argument::Named { name, value } = arg {
+                if let Ok(RqValue::Expr(RqExpr::Lit(lit))) = self.lower_expr(*value) {
+                    let val = match lit {
+                        RqLiteral::String(s) => s,
+                        RqLiteral::Integer(i) => i.to_string(),
+                        RqLiteral::Boolean(b) => b.to_string(),
+                        RqLiteral::Null => "NULL".to_string(),
+                    };
+                    params.insert(name.text(self.db).to_string(), val);
                 }
-
-                let table = self.next_table(&format!("src_{}", func_def.name));
-                self.rq.transforms.push(Transform::Scan {
-                    output: table,
-                    source: ScanSource::Sql(sql),
-                });
-                Ok(RqValue::Table(table))
-            }
-
-            crate::registry::OpImpl::Preprocess { handler, .. } => {
-                let path = args
-                    .first()
-                    .and_then(|a| {
-                        let val = self.lower_expr(a.value()).ok()?;
-                        match val {
-                            RqValue::Expr(RqExpr::Lit(RqLiteral::String(s))) => Some(s),
-                            _ => None,
-                        }
-                    })
-                    .unwrap_or_default();
-
-                let table_name = format!("_preprocess_{}", func_def.name);
-                let table = self.next_table(&table_name);
-                self.rq.transforms.push(Transform::Scan {
-                    output: table,
-                    source: ScanSource::Preprocess {
-                        handler: handler.to_string(),
-                        source_path: path,
-                        output_table: table_name,
-                        schema: Vec::new(),
-                    },
-                });
-                Ok(RqValue::Table(table))
-            }
-
-            crate::registry::OpImpl::Output { format } => {
-                // Handle in lower_materialize
-                let _ = format;
-                self.lower_materialize(args)
-            }
-
-            crate::registry::OpImpl::Pipeline { handler } => {
-                let _ = handler;
-                // Pipeline steps are collected for the host
-                Ok(RqValue::Unit)
             }
         }
+        // Fill defaults from FunctionDef for missing params
+        for param in func_def.params {
+            if !param.default.is_empty() && !params.contains_key(param.name) {
+                params.insert(param.name.to_string(), param.default.to_string());
+            }
+        }
+        params
     }
 
     fn lower_materialize(

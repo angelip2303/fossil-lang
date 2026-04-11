@@ -3,6 +3,7 @@ pub mod builtins;
 pub mod common;
 pub mod db;
 pub mod def_map;
+pub mod dialect;
 pub mod error;
 pub mod ir;
 pub mod metadata;

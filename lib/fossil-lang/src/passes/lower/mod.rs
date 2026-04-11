@@ -488,8 +488,43 @@ impl<'a> Lowering<'a> {
                 ir_expr_id
             }
 
-            ast::ExprKind::ProviderInvocation { .. } => {
-                unreachable!("ProviderInvocation should be expanded before lowering")
+            ast::ExprKind::ProviderInvocation { provider, args } => {
+                // Lower provider invocation as Application(Identifier(provider), args).
+                let callee_id = self.ir.exprs.alloc(Expr {
+                    loc,
+                    kind: ExprKind::Identifier(provider.clone()),
+                });
+                if let Some(def_id) = self.resolve_value_path(&provider, loc, errors) {
+                    self.resolutions.expr_defs.insert(callee_id, def_id);
+                }
+                let ir_args: Vec<Argument> = args
+                    .into_iter()
+                    .map(|arg| match arg {
+                        crate::common::ProviderArgument::Positional(lit) => {
+                            Argument::Positional(self.ir.exprs.alloc(Expr {
+                                loc,
+                                kind: ExprKind::Literal(lit),
+                            }))
+                        }
+                        crate::common::ProviderArgument::Named { name, value } => {
+                            Argument::Named {
+                                name,
+                                value: self.ir.exprs.alloc(Expr {
+                                    loc,
+                                    kind: ExprKind::Literal(value),
+                                }),
+                            }
+                        }
+                    })
+                    .collect();
+                self.ir.exprs.alloc(Expr {
+                    loc,
+                    kind: ExprKind::Application {
+                        callee: callee_id,
+                        args: ir_args,
+                        type_args: vec![],
+                    },
+                })
             }
         }
     }

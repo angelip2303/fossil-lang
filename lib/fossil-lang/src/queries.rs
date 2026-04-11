@@ -20,17 +20,28 @@ use crate::metadata::extract_type_metadata;
 use crate::passes::parse::Parser;
 use crate::passes::typecheck::TypeChecker;
 use crate::passes::{InferResult, LowerResult};
-use crate::plan::FossilPlan;
-use crate::registry::{OpImpl, Registry};
-use crate::rq::emit_sql::rq_to_sql;
+use crate::registry::Registry;
 use crate::rq::lower::RqLowering;
 use crate::rq::RelationalQuery;
 
 // ── Static registry ─────────────────────────────────────────────────
 
+/// Initialize the global registry. Call once at startup.
+/// The `setup` closure registers host-specific sources (csv, parquet, etc.).
+/// Language builtins (outputs, attributes) are always registered.
+pub fn init_registry(setup: impl FnOnce(&mut Registry)) {
+    let _ = REGISTRY.set({
+        let mut r = Registry::new();
+        builtins::register(&mut r);
+        setup(&mut r);
+        r
+    });
+}
+
+static REGISTRY: OnceLock<Registry> = OnceLock::new();
+
 pub fn registry() -> &'static Registry {
-    static REG: OnceLock<Registry> = OnceLock::new();
-    REG.get_or_init(|| {
+    REGISTRY.get_or_init(|| {
         let mut r = Registry::new();
         builtins::register(&mut r);
         r
@@ -189,15 +200,8 @@ pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
     }
 }
 
-// ── plan ────────────────────────────────────────────────────────────
-
-/// Compile source to FossilPlan.
-#[salsa::tracked]
-pub fn plan(db: &dyn Db, file: SourceFile) -> FossilPlan {
-    let rq = rq(db, file);
-    let sql = rq_to_sql(&rq);
-    FossilPlan::from_rq(rq, sql)
-}
+// plan() removed — host generates plan from rq() using its SqlDialect.
+// See FossilPlan::from_rq(rq, dialect).
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -229,18 +233,15 @@ fn register_provider_schemas_from_ast(
             Some(f) => f,
             None => continue,
         };
-        let columns: Vec<(String, String)> = match &func.impl_ {
-            OpImpl::SourceSql(_) => match db.source_schema(&call.provider, &call.path) {
+        // Static schema (text, pdf, etc.) → use directly.
+        // Dynamic schema (csv, parquet, etc.) → ask host.
+        let columns: Vec<(String, String)> = match func.schema {
+            Some(schema) => schema.iter()
+                .map(|(n, t)| (n.to_string(), t.to_string())).collect(),
+            None => match db.source_schema(&call.provider, &call.path) {
                 Some(cols) => cols,
                 None => continue,
             },
-            OpImpl::Preprocess { schema, .. } => {
-                schema
-                    .iter()
-                    .map(|(n, t)| (n.to_string(), t.to_string()))
-                    .collect()
-            }
-            _ => continue,
         };
         let fields: Vec<(&str, BuiltInFieldType)> = columns
             .iter()
@@ -343,18 +344,13 @@ mod tests {
 
     #[test]
     fn plan_literal() {
+        use crate::dialect::DefaultDialect;
+        use crate::plan::FossilPlan;
         let db = FossilDb::default();
         let file = SourceFile::new(&db, "let x = 42".into(), "test".into());
-        let p = plan(&db, file);
+        let r = rq(&db, file);
+        let p = FossilPlan::from_rq(r, &DefaultDialect);
         assert!(p.sources.is_empty());
-    }
-
-    #[test]
-    fn registry_is_populated() {
-        let reg = registry();
-        assert!(reg.find_source("csv").is_some());
-        assert!(reg.find_source("parquet").is_some());
-        assert!(reg.find_source("excel").is_some());
     }
 
     #[test]
@@ -370,9 +366,8 @@ mod tests {
     fn salsa_memoization() {
         let db = FossilDb::default();
         let file = SourceFile::new(&db, "let x = 42".into(), "test".into());
-        // Call plan twice — second should use cached result
-        let p1 = plan(&db, file);
-        let p2 = plan(&db, file);
-        assert_eq!(p1.sql, p2.sql);
+        let r1 = rq(&db, file);
+        let r2 = rq(&db, file);
+        assert_eq!(r1, r2);
     }
 }

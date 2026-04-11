@@ -76,18 +76,13 @@ pub enum Transform {
     },
 }
 
-/// How data enters the pipeline.
+/// External data source in the RQ. Backend-agnostic.
+/// The `SqlDialect` decides how to execute it (direct SQL, preprocessing, etc.).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ScanSource {
-    /// SQL expression: e.g. "SELECT * FROM read_csv('path')"
-    Sql(String),
-    /// Host-side preprocessing (PDF, DOCX, IFC).
-    Preprocess {
-        handler: String,
-        source_path: String,
-        output_table: String,
-        schema: Vec<(String, String)>,
-    },
+pub struct ScanSource {
+    pub format: String,
+    pub path: String,
+    pub params: HashMap<String, String>,
 }
 
 /// Dialect-independent column expression.

@@ -1,52 +1,9 @@
-//! Built-in functions and attribute operations.
+//! Built-in language features: output functions and attribute operations.
 //!
-//! All builtins are const data — no traits, no dynamic dispatch.
-//! Each is individually testable and composable.
+//! Data sources are NOT registered here — the host registers them.
+//! Only language-level features (outputs, pipelines, attributes) live here.
 
 use crate::registry::*;
-
-// ── Source functions ─────────────────────────────────────────────────
-
-pub const CSV: FunctionDef = FunctionDef::source(
-    "csv",
-    "SELECT * FROM read_csv('{path}', delim='{delimiter}', header={header})",
-    &[
-        ParamDef::required("path"),
-        ParamDef::with_default("delimiter", ","),
-        ParamDef::with_default("header", "true"),
-    ],
-);
-
-pub const EXCEL: FunctionDef = FunctionDef::source(
-    "excel",
-    "SELECT * FROM st_read('{path}', layer='{sheet}')",
-    &[
-        ParamDef::required("path"),
-        ParamDef::with_default("sheet", "Sheet1"),
-    ],
-);
-
-pub const PARQUET: FunctionDef = FunctionDef::source(
-    "parquet",
-    "SELECT * FROM read_parquet('{path}')",
-    &[ParamDef::required("path")],
-);
-
-pub const PDF: FunctionDef = FunctionDef::preprocess(
-    "pdf",
-    "pdf_extract",
-    &[ParamDef::required("path")],
-    &[("text", "String"), ("page", "Int"), ("source", "String")],
-);
-
-pub const DOCX: FunctionDef = FunctionDef::preprocess(
-    "docx",
-    "docx_extract",
-    &[ParamDef::required("path")],
-    &[("text", "String"), ("source", "String")],
-);
-
-pub const SOURCES: &[FunctionDef] = &[CSV, EXCEL, PARQUET, PDF, DOCX];
 
 // ── Output functions ─────────────────────────────────────────────────
 
@@ -81,9 +38,8 @@ pub const ANON_OPS: &[AttributeOp] = &[
 
 // ── Register all ─────────────────────────────────────────────────────
 
-/// Register all built-in functions and attributes into a Registry.
+/// Register language-level builtins. Sources are registered by the host.
 pub fn register(r: &mut Registry) {
-    r.add_functions(SOURCES);
     r.add_function(RDF_MATERIALIZE);
     r.add_function(TEXT_EXTRACT);
     r.add_attributes(CLEAN_OPS);
@@ -93,15 +49,6 @@ pub fn register(r: &mut Registry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn registry_finds_csv() {
-        let mut r = Registry::new();
-        register(&mut r);
-        let csv = r.find_source("csv").expect("csv not found");
-        assert_eq!(csv.name, "csv");
-        assert!(matches!(csv.impl_, OpImpl::SourceSql(_)));
-    }
 
     #[test]
     fn registry_finds_trim() {

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::dialect::{ScanStrategy, SqlDialect};
 use crate::rq::RelationalQuery;
 
 /// The complete execution plan produced by the compiler.
@@ -83,29 +84,27 @@ pub struct OutputResult {
 }
 
 impl FossilPlan {
-    /// Create a plan from a RelationalQuery and its emitted SQL.
-    pub fn from_rq(rq: RelationalQuery, sql: String) -> Self {
+    /// Create a plan from a RelationalQuery and a SqlDialect.
+    /// The dialect decides which sources need preprocessing.
+    pub fn from_rq(rq: RelationalQuery, dialect: &dyn SqlDialect) -> Self {
+        use crate::rq::emit_sql::rq_to_sql;
+        let sql = rq_to_sql(&rq, dialect);
+
         let sources = rq
             .transforms
             .iter()
             .filter_map(|t| {
-                if let crate::rq::Transform::Scan {
-                    source: crate::rq::ScanSource::Preprocess {
-                        handler,
-                        source_path,
-                        output_table,
-                        schema,
-                    },
-                    ..
-                } = t
-                {
-                    Some(SourceDef {
-                        handler: handler.clone(),
-                        path: source_path.clone(),
-                        output_table: output_table.clone(),
-                        schema: schema.clone(),
-                        params: HashMap::new(),
-                    })
+                if let crate::rq::Transform::Scan { source, .. } = t {
+                    match dialect.scan_strategy(source) {
+                        ScanStrategy::Preprocess { handler, output_table } => Some(SourceDef {
+                            handler,
+                            path: source.path.clone(),
+                            output_table,
+                            schema: vec![],
+                            params: source.params.clone(),
+                        }),
+                        ScanStrategy::Sql(_) => None,
+                    }
                 } else {
                     None
                 }

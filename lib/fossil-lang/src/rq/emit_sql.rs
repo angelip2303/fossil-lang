@@ -6,14 +6,16 @@
 //!
 //! Reference: PRQL's rq_to_sql, Ibis's SQLGlot emission.
 
+use crate::dialect::{ScanStrategy, SqlDialect};
+
 use super::{
-    ColId, JoinKind, RelationalQuery, RqExpr, RqLiteral, ScanSource, Transform,
+    ColId, JoinKind, RelationalQuery, RqExpr, RqLiteral, Transform,
 };
 
 /// Convert a RelationalQuery to a SQL string with CTEs.
 ///
-/// Output is a single `WITH ... SELECT * FROM last_cte` query.
-pub fn rq_to_sql(rq: &RelationalQuery) -> String {
+/// The `dialect` maps each `ScanSource` to SQL or preprocessing instructions.
+pub fn rq_to_sql(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> String {
     if rq.transforms.is_empty() {
         return "SELECT 1".to_string();
     }
@@ -23,9 +25,9 @@ pub fn rq_to_sql(rq: &RelationalQuery) -> String {
     for transform in &rq.transforms {
         match transform {
             Transform::Scan { output, source } => {
-                let sql = match source {
-                    ScanSource::Sql(s) => s.clone(),
-                    ScanSource::Preprocess { output_table, .. } => {
+                let sql = match dialect.scan_strategy(source) {
+                    ScanStrategy::Sql(s) => s,
+                    ScanStrategy::Preprocess { output_table, .. } => {
                         format!("SELECT * FROM {output_table}")
                     }
                 };
@@ -220,7 +222,8 @@ impl RqExpr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rq::{TableId, ColId};
+    use crate::dialect::DefaultDialect;
+    use crate::rq::{ScanSource, TableId, ColId};
 
     fn test_rq_parts() -> (RelationalQuery, TableId, ColId, ColId, ColId) {
         let mut rq = RelationalQuery::new();
@@ -230,7 +233,11 @@ mod tests {
         let src = rq.alloc_table("src_1");
         rq.transforms.push(Transform::Scan {
             output: src,
-            source: ScanSource::Sql("SELECT * FROM read_csv('data.csv')".into()),
+            source: ScanSource {
+                format: "csv".into(),
+                path: "data.csv".into(),
+                params: Default::default(),
+            },
         });
         (rq, src, id_col, name_col, age_col)
     }
@@ -238,7 +245,7 @@ mod tests {
     #[test]
     fn single_scan() {
         let (rq, ..) = test_rq_parts();
-        let sql = rq_to_sql(&rq);
+        let sql = rq_to_sql(&rq, &DefaultDialect);
         assert!(sql.contains("src_1 AS ("));
         assert!(sql.contains("read_csv('data.csv')"));
         assert!(sql.contains("SELECT * FROM src_1"));
@@ -256,7 +263,7 @@ mod tests {
                 (age, RqExpr::col(age)),
             ],
         });
-        let sql = rq_to_sql(&rq);
+        let sql = rq_to_sql(&rq, &DefaultDialect);
         assert!(sql.contains("persons AS ("));
         assert!(sql.contains("SELECT name, age FROM src_1"));
         assert!(sql.contains("SELECT * FROM persons"));
@@ -269,7 +276,11 @@ mod tests {
         let lookup_id = rq.intern_col("lookup_id");
         rq.transforms.push(Transform::Scan {
             output: lookup,
-            source: ScanSource::Sql("SELECT * FROM read_csv('lookup.csv')".into()),
+            source: ScanSource {
+                format: "csv".into(),
+                path: "lookup.csv".into(),
+                params: Default::default(),
+            },
         });
         let joined = rq.alloc_table("joined_1");
         rq.transforms.push(Transform::Join {
@@ -280,7 +291,7 @@ mod tests {
             kind: JoinKind::Inner,
             suffix: None,
         });
-        let sql = rq_to_sql(&rq);
+        let sql = rq_to_sql(&rq, &DefaultDialect);
         assert!(sql.contains("INNER JOIN"));
         assert!(sql.contains("src_1.id = lookup_1.lookup_id"));
     }
