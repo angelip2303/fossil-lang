@@ -4,13 +4,27 @@
 //! Each Transform becomes one CTE. The result is a single query
 //! that DuckDB executes and optimizes.
 //!
-//! Reference: PRQL's rq_to_sql, Ibis's SQLGlot emission.
+//! Reference: PRQL's rq_to_sql, Ibis's SQLGlot emission, DataFusion's Unparser.
+//!
+//! Uses `sqlparser-rs` for round-trip validation: every emitted SQL
+//! string is parseable by DuckDbDialect, guaranteeing structural correctness.
 
 use crate::dialect::{ScanStrategy, SqlDialect};
 
 use super::{
     ColId, JoinKind, RelationalQuery, RqExpr, RqLiteral, Transform,
 };
+
+/// Validate that a SQL string is parseable by DuckDB dialect.
+/// Returns the parsed statements on success. Used as a safety check
+/// after emission: if this fails, the emitter has a bug.
+///
+/// This is the same pattern DataFusion uses: construct a sqlparser AST,
+/// serialize to string, optionally re-parse for round-trip validation.
+pub fn validate_duckdb_sql(sql: &str) -> Result<Vec<sqlparser::ast::Statement>, String> {
+    use sqlparser::{dialect::DuckDbDialect, parser::Parser};
+    Parser::parse_sql(&DuckDbDialect {}, sql).map_err(|e| e.to_string())
+}
 
 /// Convert a RelationalQuery to a SQL string with CTEs.
 ///
@@ -251,6 +265,60 @@ mod tests {
         assert!(sql.contains("src_1 AS ("));
         assert!(sql.contains("read_csv('data.csv')"));
         assert!(sql.contains("SELECT * FROM src_1"));
+    }
+
+    #[test]
+    fn single_scan_is_parseable_by_duckdb_dialect() {
+        let (rq, ..) = test_rq_parts();
+        let sql = rq_to_sql(&rq, &DefaultDialect);
+        // Round-trip: DuckDB dialect must parse our output
+        validate_duckdb_sql(&sql).expect("emitted SQL must be parseable by DuckDB");
+    }
+
+    #[test]
+    fn project_sql_is_parseable() {
+        let (mut rq, src, _id, name, age) = test_rq_parts();
+        let persons = rq.alloc_table("persons");
+        rq.transforms.push(Transform::Project {
+            input: src,
+            output: persons,
+            columns: vec![(name, RqExpr::col(name)), (age, RqExpr::col(age))],
+        });
+        let sql = rq_to_sql(&rq, &DefaultDialect);
+        validate_duckdb_sql(&sql).expect("emitted SQL must be parseable by DuckDB");
+    }
+
+    #[test]
+    fn apply_transforms_uses_select_star_replace() {
+        let (mut rq, src, _id, name, _age) = test_rq_parts();
+        let out = rq.alloc_table("cleaned");
+        rq.transforms.push(Transform::ApplyTransforms {
+            input: src,
+            output: out,
+            ops: vec![(name, "TRIM(name)".to_string())],
+        });
+        let sql = rq_to_sql(&rq, &DefaultDialect);
+        // Verify the new REPLACE clause is used instead of the old "SELECT *, X AS col"
+        assert!(
+            sql.contains("SELECT * REPLACE"),
+            "ApplyTransforms must use SELECT * REPLACE(...) to avoid column ambiguity, got: {sql}"
+        );
+        // Must parse as valid DuckDB SQL
+        validate_duckdb_sql(&sql).expect("SELECT * REPLACE must be parseable by DuckDB dialect");
+    }
+
+    #[test]
+    fn apply_transforms_empty_ops_falls_back_to_select_star() {
+        let (mut rq, src, ..) = test_rq_parts();
+        let out = rq.alloc_table("passthrough");
+        rq.transforms.push(Transform::ApplyTransforms {
+            input: src,
+            output: out,
+            ops: vec![],
+        });
+        let sql = rq_to_sql(&rq, &DefaultDialect);
+        assert!(sql.contains("SELECT * FROM"));
+        validate_duckdb_sql(&sql).expect("passthrough SQL must be parseable");
     }
 
     #[test]

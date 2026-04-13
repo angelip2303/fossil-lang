@@ -5,6 +5,7 @@ pub mod def_map;
 pub mod dialect;
 pub mod error;
 pub mod ir;
+pub mod item_tree;
 pub mod metadata;
 pub mod parser;
 pub mod passes;
