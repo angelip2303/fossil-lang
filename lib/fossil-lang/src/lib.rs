@@ -19,6 +19,7 @@ pub use base::db;
 pub use codegen::dialect;
 pub use codegen::plan;
 pub use codegen::rq;
+pub use def::body;
 pub use def::def_map;
 pub use def::item_tree;
 pub use def::registry;

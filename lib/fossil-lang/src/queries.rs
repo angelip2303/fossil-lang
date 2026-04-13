@@ -154,7 +154,7 @@ pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
 /// (e.g. `Rdf.materialize`) succeeds.
 /// Sources are NOT registered here — they are resolved directly by lowering
 /// (`ProviderInvocation` → `SourceCall` IR node) without going through DefMap.
-fn register_sinks_in_def_map(db: &dyn Db, def_map: &mut DefMap) {
+pub(crate) fn register_sinks_in_def_map(db: &dyn Db, def_map: &mut DefMap) {
     for sink in db.registry().sinks.iter() {
         let ns_sym = Symbol::new(db, &sink.namespace);
         let ns_def = def_map
@@ -165,7 +165,7 @@ fn register_sinks_in_def_map(db: &dyn Db, def_map: &mut DefMap) {
     }
 }
 
-fn register_provider_schemas_from_ast(
+pub(crate) fn register_provider_schemas_from_ast(
     db: &dyn Db,
     ast: &crate::ast::Ast,
     def_map: &mut DefMap,

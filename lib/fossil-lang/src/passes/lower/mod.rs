@@ -22,6 +22,51 @@ pub fn lower_with_metadata(
     Lowering::new(db, ast, def_map, registered_types, metadata).run()
 }
 
+/// Per-item body lowering entry point.
+///
+/// Lowers a SINGLE top-level statement (identified by its index in `ast.root`)
+/// into an isolated mini-IR. Uses a precomputed file-level `DefMap` that already
+/// contains all top-level let DefIds, type DefIds, sinks, and provider schemas —
+/// so name resolution against ambient top-level symbols works without re-running
+/// the full file pre-scan.
+///
+/// This is the foundation for per-item Salsa queries (`def::body::let_body` etc.).
+/// When a body edit doesn't change the ItemTree structure, only the affected
+/// item's body query re-runs; sibling bodies stay cached.
+///
+/// Returns `(ir, resolutions, root_stmt_id)` for the single lowered statement.
+/// The returned `Ir` contains only the arenas needed for that one body.
+pub fn lower_item_body(
+    db: &dyn Db,
+    ast: &ast::Ast,
+    stmt_index: usize,
+    def_map: DefMap,
+    registered_types: RegisteredTypes,
+    type_metadata: TypeMetadataMap,
+    pending_metadata: HashMap<Symbol, TypeMetadata>,
+    top_level_lets: &[(Symbol, DefId)],
+    top_level_types: &[(Symbol, DefId)],
+) -> Result<(Ir, Resolutions, StmtId), Vec<FossilError>> {
+    let stmt_id = ast.root[stmt_index];
+    let mut lowering = Lowering::new(db, ast.clone(), def_map, registered_types, pending_metadata);
+    lowering.type_metadata = type_metadata;
+    // Seed the body scope with all file-level top-level definitions, so the
+    // body lowerer can resolve references to sibling lets/types via the scope
+    // stack (the existing `resolve_*_path` path).
+    for &(name, def_id) in top_level_lets {
+        lowering.scopes.current_mut().values.insert(name, def_id);
+    }
+    for &(name, def_id) in top_level_types {
+        lowering.scopes.current_mut().types.insert(name, def_id);
+    }
+    let mut errors = Vec::new();
+    let root_stmt = lowering.fold_stmt(stmt_id, &mut errors);
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    Ok((lowering.ir, lowering.resolutions, root_stmt))
+}
+
 // ── Scope stack ────────────────────────────────────────────────
 
 #[derive(Default, Clone)]
