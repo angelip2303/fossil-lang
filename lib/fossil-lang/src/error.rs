@@ -337,6 +337,127 @@ impl FossilError {
             span: loc.into(),
         }
     }
+
+    /// "Did you mean" undefined source error with Levenshtein-based suggestions.
+    pub fn undefined_source(
+        name: impl Into<String>,
+        available: impl IntoIterator<Item = String>,
+        loc: Loc,
+    ) -> Self {
+        let name_str = name.into();
+        let suggestions = closest_matches(&name_str, available, 3);
+        let display = if suggestions.is_empty() {
+            name_str.clone()
+        } else {
+            format!("{} (did you mean: {}?)", name_str, suggestions.join(", "))
+        };
+        Self::Undefined {
+            kind: "source",
+            name: display,
+            span: loc.into(),
+        }
+    }
+
+    /// "Did you mean" undefined sink error with Levenshtein-based suggestions.
+    pub fn undefined_sink(
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        available: impl IntoIterator<Item = (String, String)>,
+        loc: Loc,
+    ) -> Self {
+        let ns_str = namespace.into();
+        let name_str = name.into();
+        let qualified = format!("{}.{}", ns_str, name_str);
+        let suggestions = closest_matches(
+            &qualified,
+            available.into_iter().map(|(ns, n)| format!("{}.{}", ns, n)),
+            3,
+        );
+        let display = if suggestions.is_empty() {
+            qualified
+        } else {
+            format!(
+                "{}.{} (did you mean: {}?)",
+                ns_str,
+                name_str,
+                suggestions.join(", ")
+            )
+        };
+        Self::Undefined {
+            kind: "sink",
+            name: display,
+            span: loc.into(),
+        }
+    }
+
+    /// Extract (offset, len) from the variant's miette span for Diagnostic accumulator.
+    pub fn span_info(&self) -> Option<(usize, usize)> {
+        let span = match self {
+            Self::Syntax { span, .. }
+            | Self::Undefined { span, .. }
+            | Self::AlreadyDefined { span, .. }
+            | Self::TypeMismatch { span, .. }
+            | Self::ArityMismatch { span, .. }
+            | Self::InfiniteType { span, .. }
+            | Self::FieldNotFound { span, .. }
+            | Self::RecordSizeMismatch { span, .. }
+            | Self::Evaluation { span, .. }
+            | Self::InvalidArgumentType { span, .. }
+            | Self::FileNotFound { span, .. }
+            | Self::NotAFile { span, .. }
+            | Self::InvalidExtension { span, .. }
+            | Self::ReadError { span, .. }
+            | Self::ParseError { span, .. }
+            | Self::DataError { span, .. }
+            | Self::ProviderKindMismatch { span, .. }
+            | Self::Internal { span, .. } => Some(span),
+            Self::Io(_) => None,
+        }?;
+        Some((span.offset(), span.len()))
+    }
+}
+
+/// Levenshtein-based "did you mean" suggestions.
+/// Returns top-N candidates within distance threshold.
+fn closest_matches(
+    input: &str,
+    candidates: impl IntoIterator<Item = String>,
+    max: usize,
+) -> Vec<String> {
+    let mut scored: Vec<(usize, String)> = candidates
+        .into_iter()
+        .map(|c| (levenshtein(input, &c), c))
+        .filter(|(d, _)| *d <= 3) // threshold
+        .collect();
+    scored.sort_by_key(|(d, _)| *d);
+    scored.into_iter().take(max).map(|(_, c)| c).collect()
+}
+
+/// Simple Levenshtein distance — small fn, no extra dep needed.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let m = a.len();
+    let n = b.len();
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
 }
 
 

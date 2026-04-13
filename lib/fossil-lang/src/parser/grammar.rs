@@ -6,7 +6,7 @@ use chumsky::prelude::*;
 
 use crate::ast::{
     Argument, Ast, Attribute, AttributeArg, ConstructorParam, Expr, ExprId, ExprKind, Literal,
-    Path, PrimitiveType, ProviderArgument, ProviderTypeEntry, RecordField, Stmt, StmtId, StmtKind,
+    Path, PrimitiveType, ProviderArgument, RecordField, Stmt, StmtId, StmtKind,
     Type, TypeId, TypeKind,
 };
 use crate::ast::Loc;
@@ -115,49 +115,8 @@ where
             ctx.alloc_type(TypeKind::Record(fields), ctx.to_loc(e.span()))
         });
 
-    // Provider entry: #[attrs] Name(params) — used in both single and multi-type
-    let provider_entry = parse_attribute(ctx)
-        .repeated()
-        .collect::<Vec<_>>()
-        .then(parse_symbol(ctx))
-        .then(ctor_params.clone())
-        .map(|((attrs, name), ctor_params)| ProviderTypeEntry { name, ctor_params, attrs });
-
-    // Head: Name(params) or { Entry, Entry, ... }
-    let single_head = provider_entry.clone().map(|e| vec![e]);
-    let multi_head = provider_entry
-        .separated_by(just(Token::Comma))
-        .allow_trailing()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .delimited_by(just(Token::LBrace), just(Token::RBrace));
-
-    // type (head) = provider!(args) → ProviderType
-    let provider_type_stmt = parse_attribute(ctx)
-        .repeated()
-        .collect::<Vec<_>>()
-        .then_ignore(just(Token::Type))
-        .then(multi_head.or(single_head))
-        .then_ignore(just(Token::Eq))
-        .then(parse_path(ctx))
-        .then_ignore(just(Token::Bang))
-        .then(
-            parse_provider_argument(ctx)
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect::<Vec<_>>()
-                .delimited_by(just(Token::LParen), just(Token::RParen)),
-        )
-        .map_with(|(((leading_attrs, mut entries), provider), args), e| {
-            if entries.len() == 1 && !leading_attrs.is_empty() {
-                entries[0].attrs = [leading_attrs, std::mem::take(&mut entries[0].attrs)].concat();
-            }
-            let loc = ctx.to_loc(e.span());
-            ctx.alloc_stmt(StmtKind::ProviderType { entries, provider, args, loc }, loc)
-        });
-
     // #[attrs] type Name(params) do...end → Type (manual record)
-    let record_type_stmt = parse_attribute(ctx)
+    let type_stmt = parse_attribute(ctx)
         .repeated()
         .collect::<Vec<_>>()
         .then_ignore(just(Token::Type))
@@ -167,8 +126,6 @@ where
         .map_with(|(((attrs, name), ctor_params), ty), e| {
             ctx.alloc_stmt(StmtKind::Type { name, ty, attrs, ctor_params }, ctx.to_loc(e.span()))
         });
-
-    let type_stmt = provider_type_stmt.or(record_type_stmt);
 
     let expr_stmt =
         expr.map_with(|expr, e| ctx.alloc_stmt(StmtKind::Expr(expr), ctx.to_loc(e.span())));

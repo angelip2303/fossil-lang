@@ -172,10 +172,6 @@ impl<'a> Lowering<'a> {
                 ast::StmtKind::Type { name, ty, attrs, ctor_params } => StmtSnapshot::Type {
                     name: *name, ty: *ty, attrs: attrs.clone(), ctor_params: ctor_params.clone(),
                 },
-                ast::StmtKind::ProviderType { .. } => {
-                    // Provider types handled by register_builtins in queries.rs
-                    return self.ir.stmts.alloc(Stmt { loc: stmt.loc, kind: StmtKind::Expr(self.ir.exprs.alloc(Expr { loc: stmt.loc, kind: ExprKind::Unit })) });
-                }
                 ast::StmtKind::Expr(e) => StmtSnapshot::Expr(*e),
             };
             (stmt.loc, snap)

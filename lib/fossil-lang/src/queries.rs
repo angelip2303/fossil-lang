@@ -8,45 +8,22 @@
 //!   parse → lower (registers builtins + provider schemas into DefMap)
 //!   lower → infer
 //!   infer → rq → plan
-
-use std::sync::OnceLock;
+//!
+//! The registry is now a field of `FossilDb` (no global state).
+//! Sinks are registered as DefMap entries during lower; sources are NOT in
+//! DefMap — they are resolved directly via `db.registry().sources` by the
+//! lowering and RQ phases.
 
 use crate::ast::Ast;
-use crate::builtins;
 use crate::common::PrimitiveType;
+use crate::db::{Db, DefKindTag, Diagnostic, HasRegistry, Severity, SourceFile, Symbol};
 use crate::def_map::{BuiltInFieldType, DefMap, RegisteredTypes};
-use crate::db::{Db, DefKindTag, Diagnostic, Severity, SourceFile, Symbol};
 use crate::metadata::extract_type_metadata;
 use crate::passes::parse::Parser;
 use crate::passes::typecheck::TypeChecker;
 use crate::passes::{InferResult, LowerResult};
-use crate::registry::Registry;
 use crate::rq::lower::RqLowering;
 use crate::rq::RelationalQuery;
-
-// ── Static registry ─────────────────────────────────────────────────
-
-/// Initialize the global registry. Call once at startup.
-/// The `setup` closure registers host-specific sources (csv, parquet, etc.).
-/// Language builtins (outputs, attributes) are always registered.
-pub fn init_registry(setup: impl FnOnce(&mut Registry)) {
-    let _ = REGISTRY.set({
-        let mut r = Registry::new();
-        builtins::register(&mut r);
-        setup(&mut r);
-        r
-    });
-}
-
-static REGISTRY: OnceLock<Registry> = OnceLock::new();
-
-pub fn registry() -> &'static Registry {
-    REGISTRY.get_or_init(|| {
-        let mut r = Registry::new();
-        builtins::register(&mut r);
-        r
-    })
-}
 
 // ── schema_needs (pre-compilation, cloud batch) ─────────────────────
 
@@ -74,13 +51,7 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> Ast {
         Ok(ast) => ast,
         Err(errors) => {
             for e in &errors {
-                Diagnostic {
-                    message: e.to_string(),
-                    offset: 0,
-                    len: 0,
-                    severity: Severity::Error,
-                }
-                .accumulate(db);
+                Diagnostic::from_error(e).accumulate(db);
             }
             Ast::default()
         }
@@ -89,18 +60,17 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> Ast {
 
 // ── lower ───────────────────────────────────────────────────────────
 
-/// Lower AST to IR. Registers builtins and resolves provider schemas.
+/// Lower AST to IR. Registers sinks into DefMap and resolves provider schemas.
 #[salsa::tracked]
 pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
     use salsa::Accumulator;
     let ast = parse(db, file);
-    let reg = registry();
 
     let mut def_map = DefMap::default();
     let mut registered_types = RegisteredTypes::new();
 
-    register_builtins(db, &mut def_map, reg);
-    register_provider_schemas_from_ast(db, &ast, &mut def_map, &mut registered_types, reg);
+    register_sinks_in_def_map(db, &mut def_map);
+    register_provider_schemas_from_ast(db, &ast, &mut def_map, &mut registered_types);
 
     let metadata = extract_type_metadata(&ast);
     match crate::passes::lower::lower_with_metadata(db, ast, def_map, registered_types, metadata) {
@@ -113,13 +83,7 @@ pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
         },
         Err(errors) => {
             for e in errors {
-                Diagnostic {
-                    message: e.to_string(),
-                    offset: 0,
-                    len: 0,
-                    severity: Severity::Error,
-                }
-                .accumulate(db);
+                Diagnostic::from_error(&e).accumulate(db);
             }
             LowerResult {
                 ir: Default::default(),
@@ -151,13 +115,7 @@ pub fn infer(db: &dyn Db, file: SourceFile) -> InferResult {
         Ok(result) => result,
         Err(errors) => {
             for e in errors {
-                Diagnostic {
-                    message: e.to_string(),
-                    offset: 0,
-                    len: 0,
-                    severity: Severity::Error,
-                }
-                .accumulate(db);
+                Diagnostic::from_error(&e).accumulate(db);
             }
             InferResult {
                 ir: Default::default(),
@@ -176,25 +134,10 @@ pub fn infer(db: &dyn Db, file: SourceFile) -> InferResult {
 pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
     use salsa::Accumulator;
     let program = infer(db, file);
-    let reg = registry();
-    match RqLowering::new(
-        db,
-        &program.ir,
-        &program.type_index,
-        &program.resolutions,
-        reg,
-    )
-    .lower()
-    {
+    match RqLowering::new(db, &program.ir, &program.type_index, &program.resolutions).lower() {
         Ok(rq) => rq,
         Err(e) => {
-            Diagnostic {
-                message: e.to_string(),
-                offset: 0,
-                len: 0,
-                severity: Severity::Error,
-            }
-            .accumulate(db);
+            Diagnostic::from_error(&e).accumulate(db);
             RelationalQuery::new()
         }
     }
@@ -205,19 +148,18 @@ pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-fn register_builtins(db: &dyn Db, def_map: &mut DefMap, reg: &Registry) {
-    for func in &reg.functions {
-        if func.namespace.is_empty() {
-            let sym = Symbol::new(db,func.name);
-            def_map.insert(db, None, sym, DefKindTag::Let);
-        } else {
-            let ns_sym = Symbol::new(db,func.namespace);
-            let ns_def = def_map
-                .get_by_symbol(ns_sym)
-                .unwrap_or_else(|| def_map.insert(db, None, ns_sym, DefKindTag::Mod));
-            let name_sym = Symbol::new(db,func.name);
-            def_map.insert(db, Some(ns_def), name_sym, DefKindTag::Let);
-        }
+/// Register sinks into the DefMap so qualified path resolution
+/// (e.g. `Rdf.materialize`) succeeds.
+/// Sources are NOT registered here — they are resolved directly by lowering
+/// (`ProviderInvocation` → `SourceCall` IR node) without going through DefMap.
+fn register_sinks_in_def_map(db: &dyn Db, def_map: &mut DefMap) {
+    for sink in db.registry().sinks.iter() {
+        let ns_sym = Symbol::new(db, &sink.namespace);
+        let ns_def = def_map
+            .get_by_symbol(ns_sym)
+            .unwrap_or_else(|| def_map.insert(db, None, ns_sym, DefKindTag::Mod));
+        let name_sym = Symbol::new(db, &sink.name);
+        def_map.insert(db, Some(ns_def), name_sym, DefKindTag::Let);
     }
 }
 
@@ -226,18 +168,15 @@ fn register_provider_schemas_from_ast(
     ast: &crate::ast::Ast,
     def_map: &mut DefMap,
     registered_types: &mut RegisteredTypes,
-    reg: &Registry,
 ) {
     for call in find_provider_calls_from_ast(db, ast) {
-        let func = match reg.find_source(&call.provider) {
-            Some(f) => f,
+        let src = match db.registry().sources.find(&call.provider) {
+            Some(s) => s,
             None => continue,
         };
-        // Static schema (text, pdf, etc.) → use directly.
-        // Dynamic schema (csv, parquet, etc.) → ask host.
-        let columns: Vec<(String, String)> = match func.schema {
-            Some(schema) => schema.iter()
-                .map(|(n, t)| (n.to_string(), t.to_string())).collect(),
+        // Static schema → use directly. Dynamic schema → ask host.
+        let columns: Vec<(String, String)> = match &src.schema {
+            Some(schema) => schema.clone(),
             None => match db.source_schema(&call.provider, &call.path) {
                 Some(cols) => cols,
                 None => continue,
@@ -254,10 +193,7 @@ fn register_provider_schemas_from_ast(
     }
 }
 
-fn find_provider_calls_from_ast(
-    db: &dyn Db,
-    ast: &crate::ast::Ast,
-) -> Vec<SchemaRequest> {
+fn find_provider_calls_from_ast(db: &dyn Db, ast: &crate::ast::Ast) -> Vec<SchemaRequest> {
     use crate::ast::{ExprKind, StmtKind};
     use crate::common::{Literal, ProviderArgument};
     let mut calls = Vec::new();
@@ -300,6 +236,19 @@ fn map_sql_type(sql_type: &str) -> PrimitiveType {
         PrimitiveType::Bool
     } else {
         PrimitiveType::String
+    }
+}
+
+impl Diagnostic {
+    /// Build a Diagnostic from a FossilError, preserving span info from miette.
+    pub(crate) fn from_error(err: &crate::error::FossilError) -> Self {
+        let (offset, len) = err.span_info().unwrap_or((0, 0));
+        Self {
+            message: err.to_string(),
+            offset,
+            len,
+            severity: Severity::Error,
+        }
     }
 }
 
@@ -369,5 +318,18 @@ mod tests {
         let r1 = rq(&db, file);
         let r2 = rq(&db, file);
         assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn default_db_has_rdf_materialize_sink() {
+        let db = FossilDb::default();
+        assert!(db.registry().sinks.find("Rdf", "materialize").is_some());
+    }
+
+    #[test]
+    fn default_db_has_clean_attributes() {
+        let db = FossilDb::default();
+        assert!(db.registry().attributes.find("clean", "trim").is_some());
+        assert!(db.registry().attributes.find("clean", "slug").is_some());
     }
 }

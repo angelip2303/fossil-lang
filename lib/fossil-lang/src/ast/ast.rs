@@ -28,13 +28,6 @@ pub struct ConstructorParam {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ProviderTypeEntry {
-    pub name: Symbol,
-    pub ctor_params: Vec<ConstructorParam>,
-    pub attrs: Vec<Attribute>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StmtKind {
     Let {
         name: Symbol,
@@ -45,12 +38,6 @@ pub enum StmtKind {
         ty: TypeId,
         attrs: Vec<Attribute>,
         ctor_params: Vec<ConstructorParam>,
-    },
-    ProviderType {
-        entries: Vec<ProviderTypeEntry>,
-        provider: Path,
-        args: Vec<ProviderArgument>,
-        loc: Loc,
     },
     Expr(ExprId),
 }

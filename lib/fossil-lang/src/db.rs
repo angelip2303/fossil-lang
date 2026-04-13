@@ -4,7 +4,11 @@
 //! are Salsa tracked queries on this database. The host (keasy) creates
 //! the database, sets inputs, and calls queries.
 //!
-//! Reference: Salsa Calc tutorial, rust-analyzer RootDatabase.
+//! Reference: Salsa Calc tutorial, rust-analyzer RootDatabase, DataFusion SessionState.
+
+use crate::registry::{
+    register_defaults, FossilRegistry, SinkDef, SourceDef,
+};
 
 /// Host capability: resolve source schemas at compile time.
 ///
@@ -18,29 +22,101 @@ pub trait HasSchemaResolver {
     fn source_schema(&self, provider: &str, path: &str) -> Option<Vec<(String, String)>>;
 }
 
+/// Host capability: provide the compiler registry (sources + sinks + attribute ops).
+///
+/// Same pattern as `HasSchemaResolver`. Mirror of DataFusion's `Session` trait
+/// (SessionState exposes function/catalog registries via methods).
+pub trait HasRegistry {
+    fn registry(&self) -> &FossilRegistry;
+}
+
 /// Compiler database trait. All tracked functions use `&dyn Db`.
 ///
-/// Combines Salsa's `Database` with host schema resolution.
+/// Combines Salsa's `Database` with host capabilities.
 /// Pattern: rust-analyzer `LogDatabase` = `HasLogger + Database`.
 #[salsa::db]
-pub trait Db: HasSchemaResolver + salsa::Database {}
+pub trait Db: HasSchemaResolver + HasRegistry + salsa::Database {}
 
 #[salsa::db]
-impl<T: HasSchemaResolver + salsa::Database> Db for T {}
+impl<T: HasSchemaResolver + HasRegistry + salsa::Database> Db for T {}
 
-/// Default compiler database (tests, pure compilation without I/O).
+/// Default compiler database. The registry is immutable post-build:
+/// changes require building a new `FossilDb` via `FossilDbBuilder`.
+/// This contract preserves Salsa incrementality (no silent stale caches).
 #[salsa::db]
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct FossilDb {
     storage: salsa::Storage<Self>,
+    registry: FossilRegistry,
 }
 
 #[salsa::db]
 impl salsa::Database for FossilDb {}
 
+impl FossilDb {
+    /// Construct via the builder pattern. Mirror of DataFusion `SessionContext::new()`.
+    pub fn builder() -> FossilDbBuilder {
+        FossilDbBuilder::default()
+    }
+}
+
+impl Default for FossilDb {
+    /// Default database with language defaults registered (Rdf.materialize sink,
+    /// clean/anon attribute ops). Match DataFusion `SessionContext::new()`.
+    /// For a truly empty database, use `FossilDbBuilder::new().build()`.
+    fn default() -> Self {
+        FossilDbBuilder::new().with_default_features().build()
+    }
+}
+
 impl HasSchemaResolver for FossilDb {
     fn source_schema(&self, _provider: &str, _path: &str) -> Option<Vec<(String, String)>> {
         None
+    }
+}
+
+impl HasRegistry for FossilDb {
+    fn registry(&self) -> &FossilRegistry {
+        &self.registry
+    }
+}
+
+/// Builder for `FossilDb`. Mirror of DataFusion `SessionStateBuilder`.
+#[derive(Default)]
+pub struct FossilDbBuilder {
+    registry: FossilRegistry,
+}
+
+impl FossilDbBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register language defaults: Rdf.materialize sink + clean/anon attribute ops.
+    /// Mirror of DataFusion `SessionStateBuilder::with_default_features()`.
+    pub fn with_default_features(mut self) -> Self {
+        register_defaults(&mut self.registry);
+        self
+    }
+
+    /// Register a data source (csv, parquet, etc.).
+    pub fn with_source(mut self, def: SourceDef) -> Self {
+        self.registry.sources.register(def);
+        self
+    }
+
+    /// Register an additional sink.
+    pub fn with_sink(mut self, def: SinkDef) -> Self {
+        self.registry.sinks.register(def);
+        self
+    }
+
+    /// Build the `FossilDb`. The registry is immutable from this point on.
+    pub fn build(self) -> FossilDb {
+        FossilDb {
+            storage: Default::default(),
+            registry: self.registry,
+        }
     }
 }
 

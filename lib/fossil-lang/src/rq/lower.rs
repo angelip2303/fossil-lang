@@ -8,11 +8,11 @@
 
 use std::collections::HashMap;
 
-use crate::db::{DefKindTag, Symbol};
 use crate::db::Db;
+use crate::db::{DefKindTag, HasRegistry, Symbol};
 use crate::error::FossilError;
 use crate::ir::{ExprId, ExprKind, Ir, Resolutions, TypeIndex};
-use crate::registry::Registry;
+use crate::registry::SourceDef;
 use crate::rq::{
     ColId, EmissionDecl, JoinKind, OutputDecl, RelationalQuery, RqExpr, RqLiteral, ScanSource,
     TableId, Transform,
@@ -69,7 +69,6 @@ pub struct RqLowering<'a> {
     ir: &'a Ir,
     type_index: &'a TypeIndex,
     resolutions: &'a Resolutions,
-    registry: &'a Registry,
     env: HashMap<Symbol, RqValue>,
     rq: RelationalQuery,
     table_counter: usize,
@@ -81,14 +80,12 @@ impl<'a> RqLowering<'a> {
         ir: &'a Ir,
         type_index: &'a TypeIndex,
         resolutions: &'a Resolutions,
-        registry: &'a Registry,
     ) -> Self {
         Self {
             db,
             ir,
             type_index,
             resolutions,
-            registry,
             env: HashMap::new(),
             rq: RelationalQuery::new(),
             table_counter: 0,
@@ -368,7 +365,7 @@ impl<'a> RqLowering<'a> {
                 args,
                 ..
             } => {
-                // Check if callee resolves to a known function
+                // Check if callee resolves to a known def (source or sink)
                 let callee_def_id = self.resolutions.expr_defs.get(callee).copied();
 
                 if let Some(def_id) = callee_def_id {
@@ -377,9 +374,23 @@ impl<'a> RqLowering<'a> {
                         .map(|ns| ns.text(self.db).to_string())
                         .unwrap_or_default();
 
-                    // Try Registry lookup
-                    if let Some(func_def) = self.registry.find_function(&namespace, &func_name) {
-                        return self.lower_registry_function(func_def, args);
+                    // Source lookup: simple identifier (no namespace) matches a registered source
+                    if namespace.is_empty() {
+                        if let Some(src) = self.db.registry().sources.find(&func_name).cloned() {
+                            return self.lower_source(&src, args);
+                        }
+                    }
+
+                    // Sink lookup: qualified path (namespace.name) matches a registered sink
+                    if !namespace.is_empty()
+                        && self
+                            .db
+                            .registry()
+                            .sinks
+                            .find(&namespace, &func_name)
+                            .is_some()
+                    {
+                        return self.lower_materialize(args);
                     }
                 }
 
@@ -403,31 +414,23 @@ impl<'a> RqLowering<'a> {
         }
     }
 
-    fn lower_registry_function(
+    fn lower_source(
         &mut self,
-        func_def: &crate::registry::FunctionDef,
+        src: &SourceDef,
         args: &[crate::ir::Argument],
     ) -> Result<RqValue, FossilError> {
-        match &func_def.impl_ {
-            crate::registry::OpImpl::Source { format } => {
-                let path = self.extract_path(args);
-                let params = self.extract_params(args, func_def);
-                let table = self.next_table(&format!("src_{format}"));
-                self.rq.transforms.push(Transform::Scan {
-                    output: table,
-                    source: ScanSource {
-                        format: format.to_string(),
-                        path,
-                        params,
-                    },
-                });
-                Ok(RqValue::Table(table))
-            }
-
-            crate::registry::OpImpl::Output { .. } => self.lower_materialize(args),
-
-            crate::registry::OpImpl::Pipeline { .. } => Ok(RqValue::Unit),
-        }
+        let path = self.extract_path(args);
+        let params = self.extract_params(args, src);
+        let table = self.next_table(&format!("src_{}", src.name));
+        self.rq.transforms.push(Transform::Scan {
+            output: table,
+            source: ScanSource {
+                format: src.name.clone(),
+                path,
+                params,
+            },
+        });
+        Ok(RqValue::Table(table))
     }
 
     fn extract_path(&mut self, args: &[crate::ir::Argument]) -> String {
@@ -445,7 +448,7 @@ impl<'a> RqLowering<'a> {
     fn extract_params(
         &mut self,
         args: &[crate::ir::Argument],
-        func_def: &crate::registry::FunctionDef,
+        src: &SourceDef,
     ) -> std::collections::HashMap<String, String> {
         let mut params = std::collections::HashMap::new();
         // Named args from the call
@@ -462,10 +465,10 @@ impl<'a> RqLowering<'a> {
                 }
             }
         }
-        // Fill defaults from FunctionDef for missing params
-        for param in func_def.params {
-            if !param.default.is_empty() && !params.contains_key(param.name) {
-                params.insert(param.name.to_string(), param.default.to_string());
+        // Fill defaults from SourceDef for missing params
+        for param in &src.params {
+            if !param.required && !params.contains_key(&param.name) {
+                params.insert(param.name.clone(), param.default.clone());
             }
         }
         params
