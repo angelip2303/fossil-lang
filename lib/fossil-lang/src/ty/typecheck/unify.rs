@@ -1,141 +1,128 @@
+//! Unification algorithm — operates on interned `Ty` values directly.
+
 use crate::ast::Loc;
 use crate::db::DefId;
 use crate::error::FossilError;
-use crate::ir::{RecordFields, TypeId, TypeKind, TypeVar};
+use crate::ty::types::{RecordFields, Ty, TyKind, TypeVar};
 
 use super::{typeutil::Subst, TypeChecker};
 
 impl TypeChecker<'_> {
-    pub fn resolve_named_type(&self, def_id: DefId) -> Option<TypeId> {
+    pub fn resolve_named_type(&self, def_id: DefId) -> Option<Ty> {
         self.lookup_type_info(def_id).map(|info| info.ty)
     }
 
-    pub fn unify(&mut self, ty1_id: TypeId, ty2_id: TypeId, loc: Loc) -> Result<Subst, FossilError> {
-        if ty1_id == ty2_id {
+    pub fn unify(&mut self, ty1: Ty, ty2: Ty, loc: Loc) -> Result<Subst, FossilError> {
+        if ty1 == ty2 {
             return Ok(Subst::default());
         }
 
-        if let Some(def_id) = self.named_def_id(ty1_id) {
+        if let Some(def_id) = self.named_def_id(ty1) {
             return if let Some(resolved_ty) = self.resolve_named_type(def_id) {
-                self.unify(resolved_ty, ty2_id, loc)
+                self.unify(resolved_ty, ty2, loc)
             } else {
                 Err(FossilError::type_mismatch(
                     format!(
                         "Cannot resolve named type `{}` to unify with `{}`",
-                        self.format_type(ty1_id),
-                        self.format_type(ty2_id),
+                        self.format_type(ty1),
+                        self.format_type(ty2),
                     ),
                     loc,
                 ))
             };
         }
 
-        if let Some(def_id) = self.named_def_id(ty2_id) {
+        if let Some(def_id) = self.named_def_id(ty2) {
             return if let Some(resolved_ty) = self.resolve_named_type(def_id) {
-                self.unify(ty1_id, resolved_ty, loc)
+                self.unify(ty1, resolved_ty, loc)
             } else {
                 Err(FossilError::type_mismatch(
                     format!(
                         "Cannot resolve named type `{}` to unify with `{}`",
-                        self.format_type(ty2_id),
-                        self.format_type(ty1_id),
+                        self.format_type(ty2),
+                        self.format_type(ty1),
                     ),
                     loc,
                 ))
             };
         }
 
-        let ty1 = &self.ir.types[ty1_id];
-        let ty2 = &self.ir.types[ty2_id];
+        let k1 = ty1.kind(self.db);
+        let k2 = ty2.kind(self.db);
 
-        match (&ty1.kind, &ty2.kind) {
-            (TypeKind::Var(v1), TypeKind::Var(v2)) if v1 == v2 => Ok(Subst::default()),
-            (TypeKind::Var(v), _) => self.bind_var(*v, ty2_id, loc),
-            (_, TypeKind::Var(v)) => self.bind_var(*v, ty1_id, loc),
+        match (k1, k2) {
+            (TyKind::Var(v1), TyKind::Var(v2)) if v1 == v2 => Ok(Subst::default()),
+            (TyKind::Var(v), _) => self.bind_var(v, ty2, loc),
+            (_, TyKind::Var(v)) => self.bind_var(v, ty1, loc),
 
-            (TypeKind::Unit, TypeKind::Unit) => Ok(Subst::default()),
-            (TypeKind::Primitive(p1), TypeKind::Primitive(p2)) if p1 == p2 => Ok(Subst::default()),
-            (TypeKind::Optional(inner1), TypeKind::Optional(inner2)) => {
-                let inner1 = *inner1;
-                let inner2 = *inner2;
+            (TyKind::Unit, TyKind::Unit) => Ok(Subst::default()),
+            (TyKind::Primitive(p1), TyKind::Primitive(p2)) if p1 == p2 => Ok(Subst::default()),
+            (TyKind::Optional(inner1), TyKind::Optional(inner2)) => {
                 self.unify(inner1, inner2, loc)
             }
 
-            // T? expected, T provided → widening (safe: non-optional coerces to optional)
-            (TypeKind::Optional(inner1), _) => {
-                let inner1 = *inner1;
-                self.unify(inner1, ty2_id, loc)
+            // T? expected, T provided → widening (safe coercion)
+            (TyKind::Optional(inner1), _) => self.unify(inner1, ty2, loc),
+
+            (TyKind::Record(fields1), TyKind::Record(fields2)) => {
+                self.unify_records(fields1, fields2, loc)
             }
 
-            (TypeKind::Record(fields1), TypeKind::Record(fields2)) => {
-                self.unify_records(fields1.clone(), fields2.clone(), loc)
-            }
-
-            (TypeKind::Function(params1, ret1), TypeKind::Function(params2, ret2)) => {
+            (TyKind::Function(params1, ret1), TyKind::Function(params2, ret2)) => {
                 if params1.len() != params2.len() {
                     return Err(FossilError::arity_mismatch(params1.len(), params2.len(), loc));
                 }
 
-                let params1 = params1.clone();
-                let params2 = params2.clone();
-                let ret1 = *ret1;
-                let ret2 = *ret2;
-
                 let mut subst = Subst::default();
                 for (p1, p2) in params1.iter().zip(params2.iter()) {
-                    let p1_applied = subst.apply(*p1, &mut self.ir);
-                    let p2_applied = subst.apply(*p2, &mut self.ir);
+                    let p1_applied = subst.apply(*p1, self.db);
+                    let p2_applied = subst.apply(*p2, self.db);
                     let s = self.unify(p1_applied, p2_applied, loc)?;
-                    subst = subst.compose(&s, &mut self.ir);
+                    subst = subst.compose(&s, self.db);
                 }
 
-                let r1 = subst.apply(ret1, &mut self.ir);
-                let r2 = subst.apply(ret2, &mut self.ir);
+                let r1 = subst.apply(ret1, self.db);
+                let r2 = subst.apply(ret2, self.db);
                 let s = self.unify(r1, r2, loc)?;
 
-                Ok(subst.compose(&s, &mut self.ir))
+                Ok(subst.compose(&s, self.db))
             }
 
-            _ => {
-                Err(FossilError::type_mismatch(
-                    format!(
-                        "Expected type `{}`, but found `{}`",
-                        self.format_type(ty1_id),
-                        self.format_type(ty2_id),
-                    ),
-                    loc,
-                ))
-            }
+            _ => Err(FossilError::type_mismatch(
+                format!(
+                    "Expected type `{}`, but found `{}`",
+                    self.format_type(ty1),
+                    self.format_type(ty2),
+                ),
+                loc,
+            )),
         }
     }
 
-    pub fn bind_var(&mut self, var: TypeVar, ty_id: TypeId, loc: Loc) -> Result<Subst, FossilError> {
-        let ty = &self.ir.types[ty_id];
-
-        if matches!(ty.kind, TypeKind::Var(v) if v == var) {
+    pub fn bind_var(&mut self, var: TypeVar, ty: Ty, loc: Loc) -> Result<Subst, FossilError> {
+        if matches!(ty.kind(self.db), TyKind::Var(v) if v == var) {
             return Ok(Subst::default());
         }
 
-        if self.occurs_in(var, ty_id) {
+        if self.occurs_in(var, ty) {
             let error_var = crate::error::TypeVar(var.0);
             return Err(FossilError::infinite_type(error_var, loc));
         }
 
         let mut subst = Subst::default();
-        subst.insert(var, ty_id);
+        subst.insert(var, ty);
         Ok(subst)
     }
 
-    pub fn occurs_in(&self, var: TypeVar, ty_id: TypeId) -> bool {
-        let ty = &self.ir.types[ty_id];
-        match &ty.kind {
-            TypeKind::Var(v) => *v == var,
-            TypeKind::Record(fields) => fields.fields.iter().any(|(_, ty)| self.occurs_in(var, *ty)),
-            TypeKind::Function(params, ret) => {
-                params.iter().any(|p| self.occurs_in(var, *p)) || self.occurs_in(var, *ret)
+    pub fn occurs_in(&self, var: TypeVar, ty: Ty) -> bool {
+        match ty.kind(self.db) {
+            TyKind::Var(v) => v == var,
+            TyKind::Record(fields) => fields.fields.iter().any(|(_, t)| self.occurs_in(var, *t)),
+            TyKind::Function(params, ret) => {
+                params.iter().any(|p| self.occurs_in(var, *p)) || self.occurs_in(var, ret)
             }
-            TypeKind::Optional(inner) => self.occurs_in(var, *inner),
-            TypeKind::Primitive(_) | TypeKind::Named(_) | TypeKind::Unit => false,
+            TyKind::Optional(inner) => self.occurs_in(var, inner),
+            TyKind::Primitive(_) | TyKind::Named(_) | TyKind::Unit | TyKind::Error => false,
         }
     }
 
@@ -146,16 +133,20 @@ impl TypeChecker<'_> {
         loc: Loc,
     ) -> Result<Subst, FossilError> {
         if fields1.len() != fields2.len() {
-            return Err(FossilError::record_size_mismatch(fields2.len(), fields1.len(), loc));
+            return Err(FossilError::record_size_mismatch(
+                fields2.len(),
+                fields1.len(),
+                loc,
+            ));
         }
 
         let mut subst = Subst::default();
         for (name1, ty1) in &fields1.fields {
             if let Some(ty2) = fields2.lookup(*name1) {
-                let ty1_applied = subst.apply(*ty1, &mut self.ir);
-                let ty2_applied = subst.apply(ty2, &mut self.ir);
+                let ty1_applied = subst.apply(*ty1, self.db);
+                let ty2_applied = subst.apply(ty2, self.db);
                 let s = self.unify(ty1_applied, ty2_applied, loc)?;
-                subst = subst.compose(&s, &mut self.ir);
+                subst = subst.compose(&s, self.db);
             } else {
                 let field_str = name1.text(self.db);
                 return Err(FossilError::field_not_found(field_str, loc));

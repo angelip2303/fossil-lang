@@ -1,5 +1,6 @@
 use crate::def_map::{DefMap, RegisteredTypes, TypeMetadataMap};
 use crate::ir;
+use crate::ty::typecheck::{TypeIndex, TypeckResults};
 
 pub mod lower;
 pub mod parse;
@@ -9,12 +10,16 @@ pub use crate::ty::typecheck;
 
 /// Result of type-checking: only the new artifacts produced by the checker.
 /// `def_map`, `registered_types`, `type_metadata` are read from earlier queries.
+///
+/// `type_index` and `typeck_results` speak in terms of the interned `Ty`
+/// (canonical identity, O(1) equality) rather than per-IR arena indices —
+/// see [`crate::ty::types`] for the rationale.
 #[derive(Clone, PartialEq)]
 pub struct InferResult {
     pub ir: ir::Ir,
-    pub type_index: ir::TypeIndex,
+    pub type_index: TypeIndex,
     pub resolutions: ir::Resolutions,
-    pub typeck_results: ir::TypeckResults,
+    pub typeck_results: TypeckResults,
 }
 
 /// Result of lowering AST → IR.

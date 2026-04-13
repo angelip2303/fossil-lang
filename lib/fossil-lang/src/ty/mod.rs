@@ -6,6 +6,8 @@
 
 pub mod metadata;
 pub mod typecheck;
+pub mod types;
 
 pub use metadata::{extract_type_metadata, AttributeData, FieldMetadata, TypeMetadata};
 pub use typecheck::TypeChecker;
+pub use types::{Polytype, RecordFields, Ty, TyKind, TypeVar};

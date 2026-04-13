@@ -15,7 +15,8 @@ use crate::db::Db;
 use crate::db::HasRegistry;
 use crate::db::{DefKindTag, Symbol};
 use crate::error::FossilError;
-use crate::ir::{ExprId, ExprKind, Ir, Resolutions, TypeIndex};
+use crate::ir::{ExprId, ExprKind, Ir, Resolutions};
+use crate::ty::typecheck::TypeIndex;
 use crate::registry::SourceDef;
 use crate::rq::{
     build, ColId, EmissionDecl, JoinKind, OutputDecl, RelationalQuery, ScanSource, TableId,
