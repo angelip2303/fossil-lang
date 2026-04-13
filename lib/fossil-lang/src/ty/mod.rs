@@ -1,10 +1,11 @@
 //! Layer 4: type system (type inference, type checker, metadata).
 //!
-//! Facade module mirroring rust-analyzer's `hir-ty` crate. Exposes the
-//! type checker and metadata extraction.
-//!
-//! Future refactor: physically move `passes/typecheck/` and `metadata.rs`
-//! into this module.
+//! Mirror of rust-analyzer's `hir-ty` crate. Owns the type checker and
+//! metadata extraction. Reads from `def/` (DefMap, ItemTree, RegisteredTypes)
+//! and is consumed by `codegen/` to lower typed IR to relational queries.
 
-pub use crate::metadata::{extract_type_metadata, AttributeData, FieldMetadata, TypeMetadata};
-pub use crate::passes::typecheck::TypeChecker;
+pub mod metadata;
+pub mod typecheck;
+
+pub use metadata::{extract_type_metadata, AttributeData, FieldMetadata, TypeMetadata};
+pub use typecheck::TypeChecker;

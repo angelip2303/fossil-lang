@@ -9,19 +9,21 @@ pub mod ty;
 pub mod ast;
 pub mod common;
 pub mod db;
-pub mod dialect;
 pub mod error;
 pub mod ir;
-pub mod metadata;
 pub mod parser;
 pub mod passes;
-pub mod plan;
+
+// Back-compat alias: `metadata` moved to `ty/metadata.rs`.
+pub use ty::metadata;
 pub mod queries;
 pub mod resolver;
-pub mod rq;
 
-// Back-compat aliases for files that moved into `def/`.
+// Back-compat aliases for files/directories that moved into layer directories.
 // Keeps existing imports working without a mass rename across the codebase.
+pub use codegen::dialect;
+pub use codegen::plan;
+pub use codegen::rq;
 pub use def::def_map;
 pub use def::item_tree;
 pub use def::registry;
