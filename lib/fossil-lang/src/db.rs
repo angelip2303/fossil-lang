@@ -58,6 +58,22 @@ impl FossilDb {
     pub fn builder() -> FossilDbBuilder {
         FossilDbBuilder::default()
     }
+
+    /// Construct a `FossilDb` from a pre-built registry.
+    /// Used by hosts that share a registry across multiple short-lived databases
+    /// (e.g., one DB per compilation thread to avoid sharing non-Send Salsa storage).
+    pub fn with_registry(registry: FossilRegistry) -> Self {
+        Self {
+            storage: Default::default(),
+            registry,
+        }
+    }
+
+    /// Get the registry. Useful for constructing other `FossilDb` instances
+    /// that share the same registry.
+    pub fn registry_clone(&self) -> FossilRegistry {
+        self.registry.clone()
+    }
 }
 
 impl Default for FossilDb {
