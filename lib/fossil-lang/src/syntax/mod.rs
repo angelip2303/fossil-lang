@@ -8,8 +8,10 @@
 //! structurally changed (whitespace, comments) downstream queries stay cached.
 
 pub mod ast;
+pub mod parse;
 pub mod parser;
 
+pub use parse::Parser;
 pub use ast::{
     Argument, Ast, Attribute, AttributeArg, ConstructorParam, Expr, ExprId, ExprKind, Literal,
     Loc, Path, PrimitiveType, ProviderArgument, RecordField, Span, Stmt, StmtId, StmtKind, Type,

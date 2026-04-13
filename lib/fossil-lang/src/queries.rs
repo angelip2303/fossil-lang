@@ -22,7 +22,7 @@ use crate::db::{Db, DefKindTag, Diagnostic, Severity, SourceFile, Symbol};
 use crate::error::emit_error;
 use crate::def_map::{BuiltInFieldType, DefMap, RegisteredTypes};
 use crate::metadata::extract_type_metadata;
-use crate::passes::parse::Parser;
+use crate::syntax::parse::Parser;
 use crate::passes::typecheck::TypeChecker;
 use crate::passes::{InferResult, LowerResult};
 use crate::rq::lower::RqLowering;

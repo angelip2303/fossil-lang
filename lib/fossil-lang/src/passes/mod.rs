@@ -3,7 +3,6 @@ use crate::ir;
 use crate::ty::typecheck::{TypeIndex, TypeckResults};
 
 pub mod lower;
-pub mod parse;
 // Back-compat alias: `passes::typecheck` → `ty::typecheck` after the migration
 // that moved the typecheck module into the `ty/` layer directory.
 pub use crate::ty::typecheck;
