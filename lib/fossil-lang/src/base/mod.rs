@@ -1,14 +1,14 @@
 //! Layer 1: database foundations + common types.
 //!
-//! Facade module mirroring rust-analyzer's `base-db` crate. Exposes the
-//! `Db` trait, `FossilDb`, `FossilDbBuilder`, `HasRegistry`, `HasSchemaResolver`,
+//! Mirror of rust-analyzer's `base-db` crate. Exposes the `Db` trait,
+//! `FossilDb`, `FossilDbBuilder`, `HasRegistry`, `HasSchemaResolver`,
 //! and primitive types (Symbol, DefId, Loc, SourceFile) used by all higher layers.
-//!
-//! Future refactor: physically move `db.rs` and primitives into this module
-//! (non-breaking if re-exports remain stable).
 
-pub use crate::common::{Literal, Path, PrimitiveType, ProviderArgument};
-pub use crate::db::{
+pub mod common;
+pub mod db;
+
+pub use common::{Literal, Path, PrimitiveType, ProviderArgument};
+pub use db::{
     Db, DefId, DefKindTag, Diagnostic, FossilDb, FossilDbBuilder, HasRegistry, HasSchemaResolver,
     InternedDef, InternedSymbol, Severity, SourceFile, Symbol,
 };
