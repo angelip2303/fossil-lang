@@ -183,12 +183,15 @@ pub fn expr_to_sql(expr: &RqExpr, rq: &RelationalQuery) -> String {
         }
 
         RqExpr::Cast(e, ty) => {
-            format!("CAST({} AS {ty})", expr_to_sql(e, rq))
+            // Backend-independent: translate LogicalType → DuckDB SQL type name here.
+            // Future: route through SqlDialect for per-backend type mapping.
+            format!("CAST({} AS {})", expr_to_sql(e, rq), ty.to_duckdb_type())
         }
 
         RqExpr::Func { name, args } => {
+            // Backend-independent: translate RqFn → SQL function name here.
             let arg_strs: Vec<String> = args.iter().map(|a| expr_to_sql(a, rq)).collect();
-            format!("{name}({})", arg_strs.join(", "))
+            format!("{}({})", name.to_sql_name(), arg_strs.join(", "))
         }
 
         RqExpr::IsNull(e, negated) => {
@@ -221,15 +224,30 @@ impl RqExpr {
         Self::Coalesce(Box::new(self), Box::new(other))
     }
 
-    /// Create CAST(self AS ty).
-    pub fn cast(self, ty: impl Into<String>) -> Self {
-        Self::Cast(Box::new(self), ty.into())
+    /// Create CAST(self AS logical_type).
+    /// Backend-independent: the SQL dialect maps `LogicalType` to its native SQL type.
+    pub fn cast(self, ty: crate::rq::LogicalType) -> Self {
+        Self::Cast(Box::new(self), ty)
     }
 
-    /// Create a function call.
-    pub fn func(name: impl Into<String>, args: Vec<Self>) -> Self {
+    /// Legacy helper: accept a SQL type string, parse to LogicalType.
+    /// Kept for backwards compatibility with existing callers.
+    pub fn cast_sql(self, ty: impl Into<String>) -> Self {
+        let s = ty.into();
+        Self::Cast(Box::new(self), crate::rq::LogicalType::from_sql_type(&s))
+    }
+
+    /// Create a function call using a typed `RqFn`.
+    pub fn func(name: crate::rq::RqFn, args: Vec<Self>) -> Self {
+        Self::Func { name, args }
+    }
+
+    /// Legacy helper: accept a SQL function name as string, parse to RqFn.
+    /// Kept for backwards compatibility with existing callers.
+    pub fn func_sql(name: impl Into<String>, args: Vec<Self>) -> Self {
+        let s = name.into();
         Self::Func {
-            name: name.into(),
+            name: crate::rq::RqFn::from_sql_name(&s),
             args,
         }
     }
@@ -383,7 +401,7 @@ mod tests {
         rq.intern_col("id");
         let expr = RqExpr::Concat(vec![
             RqExpr::str_lit("http://example.org/"),
-            RqExpr::col(ColId(1)).cast("VARCHAR"),
+            RqExpr::col(ColId(1)).cast(crate::rq::LogicalType::String),
         ]);
         assert_eq!(
             expr_to_sql(&expr, &rq),
@@ -395,10 +413,35 @@ mod tests {
     fn expr_function() {
         let mut rq = RelationalQuery::new();
         rq.intern_col("email");
-        let expr = RqExpr::func("SHA256", vec![RqExpr::col(ColId(0)).cast("VARCHAR")]);
+        let expr = RqExpr::func(
+            crate::rq::RqFn::Sha256,
+            vec![RqExpr::col(ColId(0)).cast(crate::rq::LogicalType::String)],
+        );
         assert_eq!(
             expr_to_sql(&expr, &rq),
             "SHA256(CAST(email AS VARCHAR))"
         );
+    }
+
+    #[test]
+    fn logical_type_roundtrip() {
+        use crate::rq::LogicalType;
+        // from_sql_type → to_duckdb_type is stable for known types
+        assert_eq!(LogicalType::from_sql_type("VARCHAR").to_duckdb_type(), "VARCHAR");
+        assert_eq!(LogicalType::from_sql_type("BIGINT").to_duckdb_type(), "BIGINT");
+        assert_eq!(LogicalType::from_sql_type("BOOLEAN").to_duckdb_type(), "BOOLEAN");
+        // Truly unknown types preserved via Custom
+        assert_eq!(LogicalType::from_sql_type("UUID").to_duckdb_type(), "UUID");
+        assert_eq!(LogicalType::from_sql_type("BLOB").to_duckdb_type(), "BLOB");
+    }
+
+    #[test]
+    fn rq_fn_roundtrip() {
+        use crate::rq::RqFn;
+        assert_eq!(RqFn::from_sql_name("SHA256").to_sql_name(), "SHA256");
+        assert_eq!(RqFn::from_sql_name("TRIM").to_sql_name(), "TRIM");
+        assert_eq!(RqFn::from_sql_name("LOWER").to_sql_name(), "LOWER");
+        // Unknown function names preserved via Custom
+        assert_eq!(RqFn::from_sql_name("MY_UDF").to_sql_name(), "MY_UDF");
     }
 }

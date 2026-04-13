@@ -190,7 +190,7 @@ impl<'a> RqLowering<'a> {
                     }
                     if i < exprs.len() {
                         let val = self.lower_expr(exprs[i])?.into_expr()?;
-                        concat_parts.push(RqExpr::Cast(Box::new(val), "VARCHAR".into()));
+                        concat_parts.push(RqExpr::Cast(Box::new(val), crate::rq::LogicalType::String));
                     }
                 }
                 Ok(RqValue::Expr(RqExpr::Concat(concat_parts)))
@@ -280,7 +280,7 @@ impl<'a> RqLowering<'a> {
                             "http://example.org/{}/",
                             spec.type_name
                         ))),
-                        RqExpr::Cast(Box::new(key_expr.clone()), "VARCHAR".into()),
+                        RqExpr::Cast(Box::new(key_expr.clone()), crate::rq::LogicalType::String),
                     ])
                 } else {
                     RqExpr::Lit(RqLiteral::Null)
