@@ -11,6 +11,7 @@ pub mod passes;
 pub mod plan;
 pub mod queries;
 pub mod registry;
+pub mod resolver;
 pub mod rq;
 
 // Public re-exports — primary API for hosts (keasy).
