@@ -170,6 +170,40 @@ pub fn item_count(db: &dyn Db, file: SourceFile) -> usize {
     tree.let_count() + tree.type_count() + if tree.has_pipeline() { 1 } else { 0 }
 }
 
+/// Per-item query: find a let binding by name, returning its stable `LetLoc`.
+///
+/// This is the primitive that enables IDE-like operations (go-to-definition,
+/// find-references) keyed by name. Depends only on the ItemTree structure,
+/// so it stays cached across body edits.
+///
+/// Returns `None` if no let with that name exists.
+#[salsa::tracked]
+pub fn find_let_by_name(
+    db: &dyn Db,
+    file: SourceFile,
+    name: crate::db::Symbol,
+) -> Option<LetLoc> {
+    let tree = file_item_tree(db, file);
+    tree.lets
+        .iter()
+        .position(|l| l.name == name)
+        .map(|idx| LetLoc { file, idx })
+}
+
+/// Per-item query: find a type declaration by name, returning its stable `TypeDeclLoc`.
+#[salsa::tracked]
+pub fn find_type_by_name(
+    db: &dyn Db,
+    file: SourceFile,
+    name: crate::db::Symbol,
+) -> Option<TypeDeclLoc> {
+    let tree = file_item_tree(db, file);
+    tree.types
+        .iter()
+        .position(|t| t.name == name)
+        .map(|idx| TypeDeclLoc { file, idx })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +331,43 @@ mod tests {
 
         assert_eq!(item_count(&db, file_a), 1);
         assert_eq!(item_count(&db, file_b), 2);
+    }
+
+    #[test]
+    fn find_let_by_name_returns_stable_loc() {
+        use crate::db::Symbol;
+        let db = FossilDb::default();
+        let file = SourceFile::new(
+            &db,
+            "let foo = 1\nlet bar = 2\nlet baz = 3".to_string(),
+            "test".into(),
+        );
+
+        let foo_sym = Symbol::new(&db, "foo");
+        let bar_sym = Symbol::new(&db, "bar");
+        let baz_sym = Symbol::new(&db, "baz");
+        let missing_sym = Symbol::new(&db, "nonexistent");
+
+        let foo_loc = find_let_by_name(&db, file, foo_sym).expect("foo exists");
+        let bar_loc = find_let_by_name(&db, file, bar_sym).expect("bar exists");
+        let baz_loc = find_let_by_name(&db, file, baz_sym).expect("baz exists");
+
+        assert_eq!(foo_loc.idx, 0);
+        assert_eq!(bar_loc.idx, 1);
+        assert_eq!(baz_loc.idx, 2);
+
+        // Missing name returns None
+        assert!(find_let_by_name(&db, file, missing_sym).is_none());
+    }
+
+    #[test]
+    fn find_let_by_name_is_salsa_memoized() {
+        use crate::db::Symbol;
+        let db = FossilDb::default();
+        let file = SourceFile::new(&db, "let x = 1".to_string(), "test".into());
+        let sym = Symbol::new(&db, "x");
+        let loc1 = find_let_by_name(&db, file, sym);
+        let loc2 = find_let_by_name(&db, file, sym);
+        assert_eq!(loc1, loc2);
     }
 }
