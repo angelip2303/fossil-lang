@@ -4,16 +4,18 @@
 //! Each Transform becomes one CTE. The result is a single query
 //! that DuckDB executes and optimizes.
 //!
-//! Reference: PRQL's rq_to_sql, Ibis's SQLGlot emission, DataFusion's Unparser.
+//! Column expressions are stored as `sqlparser::ast::Expr` and serialized
+//! via their `Display` impl — no manual SQL string building. This matches
+//! DataFusion's `Unparser` pattern: `datafusion/sql/src/unparser/expr.rs`.
 //!
 //! Uses `sqlparser-rs` for round-trip validation: every emitted SQL
 //! string is parseable by DuckDbDialect, guaranteeing structural correctness.
 
+use sqlparser::ast::Expr;
+
 use crate::dialect::{ScanStrategy, SqlDialect};
 
-use super::{
-    ColId, JoinKind, RelationalQuery, RqExpr, RqLiteral, Transform,
-};
+use super::{JoinKind, RelationalQuery, Transform};
 
 /// Validate that a SQL string is parseable by DuckDB dialect.
 /// Returns the parsed statements on success. Used as a safety check
@@ -24,6 +26,12 @@ use super::{
 pub fn validate_duckdb_sql(sql: &str) -> Result<Vec<sqlparser::ast::Statement>, String> {
     use sqlparser::{dialect::DuckDbDialect, parser::Parser};
     Parser::parse_sql(&DuckDbDialect {}, sql).map_err(|e| e.to_string())
+}
+
+/// Convert a sqlparser `Expr` to its SQL string form via `Display`.
+/// Thin wrapper so the rest of the codebase has one canonical name.
+pub fn expr_to_sql(expr: &Expr, _rq: &RelationalQuery) -> String {
+    expr.to_string()
 }
 
 /// Convert a RelationalQuery to a SQL string with CTEs.
@@ -56,7 +64,7 @@ pub fn rq_to_sql(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> String {
                 let items: Vec<String> = columns
                     .iter()
                     .map(|(col, expr)| {
-                        let sql = expr_to_sql(expr, rq);
+                        let sql = expr.to_string();
                         let name = rq.col_name(*col);
                         if sql == name {
                             name.to_string()
@@ -114,7 +122,7 @@ pub fn rq_to_sql(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> String {
                 let sql = format!(
                     "SELECT * FROM {} WHERE {}",
                     rq.table_name(*input),
-                    expr_to_sql(predicate, rq),
+                    predicate,
                 );
                 ctes.push((rq.table_name(*output).to_string(), sql));
             }
@@ -126,8 +134,6 @@ pub fn rq_to_sql(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> String {
             } => {
                 // Use DuckDB's `SELECT * REPLACE (expr AS col, ...)` clause to
                 // replace transformed columns in-place without duplication.
-                // Fixes the old `SELECT *, X AS col` ambiguity when `col`
-                // already exists in the input.
                 let sql = if ops.is_empty() {
                     format!("SELECT * FROM {}", rq.table_name(*input))
                 } else {
@@ -157,107 +163,11 @@ pub fn rq_to_sql(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> String {
     format!("WITH\n{}\nSELECT * FROM {last_name}", cte_defs.join(",\n"))
 }
 
-/// Convert an RqExpr to a SQL string.
-pub fn expr_to_sql(expr: &RqExpr, rq: &RelationalQuery) -> String {
-    match expr {
-        RqExpr::Col(id) => rq.col_name(*id).to_string(),
-
-        RqExpr::Lit(lit) => match lit {
-            RqLiteral::Integer(i) => i.to_string(),
-            RqLiteral::String(s) => format!("'{}'", s.replace('\'', "''")),
-            RqLiteral::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
-            RqLiteral::Null => "NULL".to_string(),
-        },
-
-        RqExpr::Coalesce(a, b) => {
-            format!(
-                "COALESCE({}, {})",
-                expr_to_sql(a, rq),
-                expr_to_sql(b, rq)
-            )
-        }
-
-        RqExpr::Concat(parts) => {
-            let args: Vec<String> = parts.iter().map(|p| expr_to_sql(p, rq)).collect();
-            format!("CONCAT({})", args.join(", "))
-        }
-
-        RqExpr::Cast(e, ty) => {
-            // Backend-independent: translate LogicalType → DuckDB SQL type name here.
-            // Future: route through SqlDialect for per-backend type mapping.
-            format!("CAST({} AS {})", expr_to_sql(e, rq), ty.to_duckdb_type())
-        }
-
-        RqExpr::Func { name, args } => {
-            // Backend-independent: translate RqFn → SQL function name here.
-            let arg_strs: Vec<String> = args.iter().map(|a| expr_to_sql(a, rq)).collect();
-            format!("{}({})", name.to_sql_name(), arg_strs.join(", "))
-        }
-
-        RqExpr::IsNull(e, negated) => {
-            let not = if *negated { "NOT " } else { "" };
-            format!("{} IS {not}NULL", expr_to_sql(e, rq))
-        }
-    }
-}
-
-// ── Table ID helper for expr_to_sql ──────────────────────────────────
-
-impl RqExpr {
-    /// Create a column reference.
-    pub fn col(id: ColId) -> Self {
-        Self::Col(id)
-    }
-
-    /// Create a string literal.
-    pub fn str_lit(s: impl Into<String>) -> Self {
-        Self::Lit(RqLiteral::String(s.into()))
-    }
-
-    /// Create an integer literal.
-    pub fn int_lit(i: i64) -> Self {
-        Self::Lit(RqLiteral::Integer(i))
-    }
-
-    /// Create COALESCE(self, other).
-    pub fn coalesce(self, other: Self) -> Self {
-        Self::Coalesce(Box::new(self), Box::new(other))
-    }
-
-    /// Create CAST(self AS logical_type).
-    /// Backend-independent: the SQL dialect maps `LogicalType` to its native SQL type.
-    pub fn cast(self, ty: crate::rq::LogicalType) -> Self {
-        Self::Cast(Box::new(self), ty)
-    }
-
-    /// Legacy helper: accept a SQL type string, parse to LogicalType.
-    /// Kept for backwards compatibility with existing callers.
-    pub fn cast_sql(self, ty: impl Into<String>) -> Self {
-        let s = ty.into();
-        Self::Cast(Box::new(self), crate::rq::LogicalType::from_sql_type(&s))
-    }
-
-    /// Create a function call using a typed `RqFn`.
-    pub fn func(name: crate::rq::RqFn, args: Vec<Self>) -> Self {
-        Self::Func { name, args }
-    }
-
-    /// Legacy helper: accept a SQL function name as string, parse to RqFn.
-    /// Kept for backwards compatibility with existing callers.
-    pub fn func_sql(name: impl Into<String>, args: Vec<Self>) -> Self {
-        let s = name.into();
-        Self::Func {
-            name: crate::rq::RqFn::from_sql_name(&s),
-            args,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dialect::DefaultDialect;
-    use crate::rq::{ScanSource, TableId, ColId};
+    use crate::rq::{build, ColId, ScanSource, TableId};
 
     fn test_rq_parts() -> (RelationalQuery, TableId, ColId, ColId, ColId) {
         let mut rq = RelationalQuery::new();
@@ -289,7 +199,6 @@ mod tests {
     fn single_scan_is_parseable_by_duckdb_dialect() {
         let (rq, ..) = test_rq_parts();
         let sql = rq_to_sql(&rq, &DefaultDialect);
-        // Round-trip: DuckDB dialect must parse our output
         validate_duckdb_sql(&sql).expect("emitted SQL must be parseable by DuckDB");
     }
 
@@ -300,7 +209,10 @@ mod tests {
         rq.transforms.push(Transform::Project {
             input: src,
             output: persons,
-            columns: vec![(name, RqExpr::col(name)), (age, RqExpr::col(age))],
+            columns: vec![
+                (name, build::col("name")),
+                (age, build::col("age")),
+            ],
         });
         let sql = rq_to_sql(&rq, &DefaultDialect);
         validate_duckdb_sql(&sql).expect("emitted SQL must be parseable by DuckDB");
@@ -316,12 +228,10 @@ mod tests {
             ops: vec![(name, "TRIM(name)".to_string())],
         });
         let sql = rq_to_sql(&rq, &DefaultDialect);
-        // Verify the new REPLACE clause is used instead of the old "SELECT *, X AS col"
         assert!(
             sql.contains("SELECT * REPLACE"),
             "ApplyTransforms must use SELECT * REPLACE(...) to avoid column ambiguity, got: {sql}"
         );
-        // Must parse as valid DuckDB SQL
         validate_duckdb_sql(&sql).expect("SELECT * REPLACE must be parseable by DuckDB dialect");
     }
 
@@ -347,8 +257,8 @@ mod tests {
             input: src,
             output: persons,
             columns: vec![
-                (name, RqExpr::col(name)),
-                (age, RqExpr::col(age)),
+                (name, build::col("name")),
+                (age, build::col("age")),
             ],
         });
         let sql = rq_to_sql(&rq, &DefaultDialect);
@@ -386,11 +296,9 @@ mod tests {
 
     #[test]
     fn expr_coalesce() {
-        let rq = RelationalQuery::new();
-        let expr = RqExpr::col(ColId(0)).coalesce(RqExpr::str_lit("default"));
-        // Need a column name for ColId(0)
-        let mut rq = rq;
+        let mut rq = RelationalQuery::new();
         rq.intern_col("x");
+        let expr = build::coalesce(build::col("x"), build::string_lit("default"));
         assert_eq!(expr_to_sql(&expr, &rq), "COALESCE(x, 'default')");
     }
 
@@ -399,9 +307,9 @@ mod tests {
         let mut rq = RelationalQuery::new();
         rq.intern_col("base");
         rq.intern_col("id");
-        let expr = RqExpr::Concat(vec![
-            RqExpr::str_lit("http://example.org/"),
-            RqExpr::col(ColId(1)).cast(crate::rq::LogicalType::String),
+        let expr = build::concat(vec![
+            build::string_lit("http://example.org/"),
+            build::cast_varchar(build::col("id")),
         ]);
         assert_eq!(
             expr_to_sql(&expr, &rq),
@@ -413,35 +321,41 @@ mod tests {
     fn expr_function() {
         let mut rq = RelationalQuery::new();
         rq.intern_col("email");
-        let expr = RqExpr::func(
-            crate::rq::RqFn::Sha256,
-            vec![RqExpr::col(ColId(0)).cast(crate::rq::LogicalType::String)],
+        let expr = build::func(
+            "SHA256",
+            vec![build::cast_varchar(build::col("email"))],
         );
-        assert_eq!(
-            expr_to_sql(&expr, &rq),
-            "SHA256(CAST(email AS VARCHAR))"
-        );
+        assert_eq!(expr_to_sql(&expr, &rq), "SHA256(CAST(email AS VARCHAR))");
     }
 
     #[test]
-    fn logical_type_roundtrip() {
-        use crate::rq::LogicalType;
-        // from_sql_type → to_duckdb_type is stable for known types
-        assert_eq!(LogicalType::from_sql_type("VARCHAR").to_duckdb_type(), "VARCHAR");
-        assert_eq!(LogicalType::from_sql_type("BIGINT").to_duckdb_type(), "BIGINT");
-        assert_eq!(LogicalType::from_sql_type("BOOLEAN").to_duckdb_type(), "BOOLEAN");
-        // Truly unknown types preserved via Custom
-        assert_eq!(LogicalType::from_sql_type("UUID").to_duckdb_type(), "UUID");
-        assert_eq!(LogicalType::from_sql_type("BLOB").to_duckdb_type(), "BLOB");
+    fn expr_round_trip_through_duckdb_dialect() {
+        // Build a non-trivial expression and verify sqlparser can re-parse
+        // its `Display` output. This is the key invariant of using sqlparser
+        // as the backbone: emit → parse → emit yields equivalent ASTs.
+        use sqlparser::{dialect::DuckDbDialect, parser::Parser};
+        let expr = build::concat(vec![
+            build::string_lit("prefix-"),
+            build::cast_varchar(build::col("id")),
+        ]);
+        let sql = format!("SELECT {expr}");
+        let parsed = Parser::parse_sql(&DuckDbDialect {}, &sql)
+            .expect("emitted expression must round-trip through DuckDbDialect");
+        assert_eq!(parsed.len(), 1);
     }
 
     #[test]
-    fn rq_fn_roundtrip() {
-        use crate::rq::RqFn;
-        assert_eq!(RqFn::from_sql_name("SHA256").to_sql_name(), "SHA256");
-        assert_eq!(RqFn::from_sql_name("TRIM").to_sql_name(), "TRIM");
-        assert_eq!(RqFn::from_sql_name("LOWER").to_sql_name(), "LOWER");
-        // Unknown function names preserved via Custom
-        assert_eq!(RqFn::from_sql_name("MY_UDF").to_sql_name(), "MY_UDF");
+    fn null_literal() {
+        let rq = RelationalQuery::new();
+        let expr = build::null_lit();
+        assert_eq!(expr_to_sql(&expr, &rq), "NULL");
+    }
+
+    #[test]
+    fn is_null_negated() {
+        let mut rq = RelationalQuery::new();
+        rq.intern_col("v");
+        let expr = build::is_null(build::col("v"), true);
+        assert_eq!(expr_to_sql(&expr, &rq), "v IS NOT NULL");
     }
 }

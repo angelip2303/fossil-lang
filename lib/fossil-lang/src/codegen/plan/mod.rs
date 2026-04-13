@@ -14,8 +14,11 @@ use crate::rq::RelationalQuery;
 
 /// The complete execution plan produced by the compiler.
 ///
-/// Serializable as JSON. The host (keasy) deserializes and executes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Serializable as JSON (the `rq` field is skipped because
+/// `sqlparser::ast::Expr` is not `Serialize`). Hosts that need the raw
+/// relational query for introspection should hold the `RelationalQuery`
+/// alongside the plan rather than inside it.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct FossilPlan {
     /// Phase 1: load external data into DuckDB (before SQL).
     pub sources: Vec<SourceDef>,
@@ -24,6 +27,8 @@ pub struct FossilPlan {
     /// Phase 3: write results to external formats (after SQL).
     pub outputs: Vec<OutputDef>,
     /// The relational query for introspection (DCAT, debugging).
+    /// Skipped during (de)serialization — see struct doc.
+    #[serde(skip)]
     pub rq: RelationalQuery,
 }
 
@@ -121,10 +126,7 @@ impl FossilPlan {
                     .filter_map(|&idx| rq.emissions.get(idx))
                     .map(|e| EntityProjection {
                         type_name: e.type_name.clone(),
-                        subject_template: crate::rq::emit_sql::expr_to_sql(
-                            &e.subject_template,
-                            &rq,
-                        ),
+                        subject_template: e.subject_template.to_string(),
                         fields: e
                             .fields
                             .iter()

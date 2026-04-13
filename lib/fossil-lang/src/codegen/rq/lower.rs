@@ -8,6 +8,8 @@
 
 use std::collections::HashMap;
 
+use sqlparser::ast::Expr;
+
 use crate::db::Db;
 #[allow(unused_imports)] // trait must be in scope for method resolution
 use crate::db::HasRegistry;
@@ -16,34 +18,34 @@ use crate::error::FossilError;
 use crate::ir::{ExprId, ExprKind, Ir, Resolutions, TypeIndex};
 use crate::registry::SourceDef;
 use crate::rq::{
-    ColId, EmissionDecl, JoinKind, OutputDecl, RelationalQuery, RqExpr, RqLiteral, ScanSource,
-    TableId, Transform,
+    build, ColId, EmissionDecl, JoinKind, OutputDecl, RelationalQuery, ScanSource, TableId,
+    Transform,
 };
 
 /// Internal value during lowering — NOT part of the final RQ.
 #[derive(Clone, Debug)]
 enum RqValue {
     Unit,
-    Expr(RqExpr),
+    Expr(Expr),
     Table(TableId),
     Emission {
         table: TableId,
         specs: Vec<EmissionSpec>,
     },
     Reference {
-        keys: Vec<RqExpr>,
+        keys: Vec<Expr>,
     },
 }
 
 #[derive(Clone, Debug)]
 struct EmissionSpec {
     type_name: String,
-    select_items: Vec<(String, RqExpr)>,
-    identity_exprs: Vec<(String, RqExpr)>,
+    select_items: Vec<(String, Expr)>,
+    identity_exprs: Vec<(String, Expr)>,
 }
 
 impl RqValue {
-    fn into_expr(self) -> Result<RqExpr, FossilError> {
+    fn into_expr(self) -> Result<Expr, FossilError> {
         match self {
             RqValue::Expr(e) => Ok(e),
             other => Err(FossilError::evaluation(
@@ -137,11 +139,9 @@ impl<'a> RqLowering<'a> {
             ExprKind::Literal(lit) => {
                 use crate::ir::Literal;
                 Ok(RqValue::Expr(match lit {
-                    Literal::Integer(i) => RqExpr::Lit(RqLiteral::Integer(*i)),
-                    Literal::String(s) => {
-                        RqExpr::Lit(RqLiteral::String(s.text(self.db).to_string()))
-                    }
-                    Literal::Boolean(b) => RqExpr::Lit(RqLiteral::Boolean(*b)),
+                    Literal::Integer(i) => build::int_lit(*i),
+                    Literal::String(s) => build::string_lit(s.text(self.db).to_string()),
+                    Literal::Boolean(b) => build::bool_lit(*b),
                 }))
             }
 
@@ -171,14 +171,14 @@ impl<'a> RqLowering<'a> {
 
             ExprKind::FieldAccess { field, .. } => {
                 let field_name = field.text(self.db).to_string();
-                let col = self.rq.intern_col(&field_name);
-                Ok(RqValue::Expr(RqExpr::Col(col)))
+                self.rq.intern_col(&field_name);
+                Ok(RqValue::Expr(build::col(field_name)))
             }
 
             ExprKind::Coalesce { value, default } => {
                 let v = self.lower_expr(*value)?.into_expr()?;
                 let d = self.lower_expr(*default)?.into_expr()?;
-                Ok(RqValue::Expr(RqExpr::Coalesce(Box::new(v), Box::new(d))))
+                Ok(RqValue::Expr(build::coalesce(v, d)))
             }
 
             ExprKind::StringInterpolation { parts, exprs } => {
@@ -186,14 +186,14 @@ impl<'a> RqLowering<'a> {
                 for (i, part) in parts.iter().enumerate() {
                     let s = part.text(self.db).to_string();
                     if !s.is_empty() {
-                        concat_parts.push(RqExpr::Lit(RqLiteral::String(s)));
+                        concat_parts.push(build::string_lit(s));
                     }
                     if i < exprs.len() {
                         let val = self.lower_expr(exprs[i])?.into_expr()?;
-                        concat_parts.push(RqExpr::Cast(Box::new(val), crate::rq::LogicalType::String));
+                        concat_parts.push(build::cast_varchar(val));
                     }
                 }
-                Ok(RqValue::Expr(RqExpr::Concat(concat_parts)))
+                Ok(RqValue::Expr(build::concat(concat_parts)))
             }
 
             ExprKind::Join {
@@ -254,7 +254,7 @@ impl<'a> RqLowering<'a> {
                 let spec = &all_specs[0]; // primary entity
                 let output = self.next_table(&spec.type_name.to_lowercase());
 
-                let columns: Vec<(ColId, RqExpr)> = spec
+                let columns: Vec<(ColId, Expr)> = spec
                     .select_items
                     .iter()
                     .map(|(name, expr)| (self.rq.intern_col(name), expr.clone()))
@@ -274,16 +274,13 @@ impl<'a> RqLowering<'a> {
                     .collect();
 
                 let subject_template = if let Some((_, key_expr)) = spec.identity_exprs.first() {
-                    // Build subject IRI: CONCAT(base, '/', key)
-                    RqExpr::Concat(vec![
-                        RqExpr::Lit(RqLiteral::String(format!(
-                            "http://example.org/{}/",
-                            spec.type_name
-                        ))),
-                        RqExpr::Cast(Box::new(key_expr.clone()), crate::rq::LogicalType::String),
+                    // Build subject IRI: CONCAT(base, CAST(key AS VARCHAR))
+                    build::concat(vec![
+                        build::string_lit(format!("http://example.org/{}/", spec.type_name)),
+                        build::cast_varchar(key_expr.clone()),
                     ])
                 } else {
-                    RqExpr::Lit(RqLiteral::Null)
+                    build::null_lit()
                 };
 
                 let fields: Vec<(String, ColId)> = spec
@@ -343,11 +340,9 @@ impl<'a> RqLowering<'a> {
                         RqValue::Expr(e) => e,
                         RqValue::Reference { keys, .. } => {
                             // Reference to another entity — use its key as the field value
-                            keys.into_iter()
-                                .next()
-                                .unwrap_or(RqExpr::Lit(RqLiteral::Null))
+                            keys.into_iter().next().unwrap_or_else(build::null_lit)
                         }
-                        _ => RqExpr::Lit(RqLiteral::Null),
+                        _ => build::null_lit(),
                     };
                     select_items.push((name, rq_expr));
                 }
@@ -405,7 +400,7 @@ impl<'a> RqLowering<'a> {
             }
 
             ExprKind::Ref { args, .. } => {
-                let keys: Vec<RqExpr> = args
+                let keys: Vec<Expr> = args
                     .iter()
                     .map(|&a| self.lower_expr(a).and_then(|v| v.into_expr()))
                     .collect::<Result<_, _>>()?;
@@ -440,7 +435,7 @@ impl<'a> RqLowering<'a> {
             .and_then(|a| {
                 let val = self.lower_expr(a.value()).ok()?;
                 match val {
-                    RqValue::Expr(RqExpr::Lit(RqLiteral::String(s))) => Some(s),
+                    RqValue::Expr(e) => build::expr_string_lit(&e).map(|s| s.to_string()),
                     _ => None,
                 }
             })
@@ -456,14 +451,10 @@ impl<'a> RqLowering<'a> {
         // Named args from the call
         for arg in args {
             if let crate::ir::Argument::Named { name, value } = arg {
-                if let Ok(RqValue::Expr(RqExpr::Lit(lit))) = self.lower_expr(*value) {
-                    let val = match lit {
-                        RqLiteral::String(s) => s,
-                        RqLiteral::Integer(i) => i.to_string(),
-                        RqLiteral::Boolean(b) => b.to_string(),
-                        RqLiteral::Null => "NULL".to_string(),
-                    };
-                    params.insert(name.text(self.db).to_string(), val);
+                if let Ok(RqValue::Expr(e)) = self.lower_expr(*value) {
+                    if let Some(val) = build::expr_to_param_string(&e) {
+                        params.insert(name.text(self.db).to_string(), val);
+                    }
                 }
             }
         }
@@ -487,7 +478,7 @@ impl<'a> RqLowering<'a> {
             .and_then(|a| {
                 let val = self.lower_expr(a.value()).ok()?;
                 match val {
-                    RqValue::Expr(RqExpr::Lit(RqLiteral::String(s))) => Some(s),
+                    RqValue::Expr(e) => build::expr_string_lit(&e).map(|s| s.to_string()),
                     _ => None,
                 }
             })
