@@ -110,20 +110,22 @@ pub fn rq_to_sql(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> String {
                 output,
                 ops,
             } => {
-                let items: Vec<String> = ops
-                    .iter()
-                    .map(|(col, sql_expr)| {
-                        format!("{sql_expr} AS {}", rq.col_name(*col))
-                    })
-                    .collect();
-                // Select transformed columns + all others via *
-                // TODO: proper column tracking to avoid SELECT * ambiguity
-                let sql = if items.is_empty() {
+                // Use DuckDB's `SELECT * REPLACE (expr AS col, ...)` clause to
+                // replace transformed columns in-place without duplication.
+                // Fixes the old `SELECT *, X AS col` ambiguity when `col`
+                // already exists in the input.
+                let sql = if ops.is_empty() {
                     format!("SELECT * FROM {}", rq.table_name(*input))
                 } else {
+                    let replace_items: Vec<String> = ops
+                        .iter()
+                        .map(|(col, sql_expr)| {
+                            format!("{sql_expr} AS {}", rq.col_name(*col))
+                        })
+                        .collect();
                     format!(
-                        "SELECT *, {} FROM {}",
-                        items.join(", "),
+                        "SELECT * REPLACE ({}) FROM {}",
+                        replace_items.join(", "),
                         rq.table_name(*input)
                     )
                 };
