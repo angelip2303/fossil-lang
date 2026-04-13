@@ -9,7 +9,9 @@
 use std::collections::HashMap;
 
 use crate::db::Db;
-use crate::db::{DefKindTag, HasRegistry, Symbol};
+#[allow(unused_imports)] // trait must be in scope for method resolution
+use crate::db::HasRegistry;
+use crate::db::{DefKindTag, Symbol};
 use crate::error::FossilError;
 use crate::ir::{ExprId, ExprKind, Ir, Resolutions, TypeIndex};
 use crate::registry::SourceDef;

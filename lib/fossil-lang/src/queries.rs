@@ -16,7 +16,9 @@
 
 use crate::ast::Ast;
 use crate::common::PrimitiveType;
-use crate::db::{Db, DefKindTag, Diagnostic, HasRegistry, Severity, SourceFile, Symbol};
+#[allow(unused_imports)] // trait must be in scope for method resolution
+use crate::db::HasRegistry;
+use crate::db::{Db, DefKindTag, Diagnostic, Severity, SourceFile, Symbol};
 use crate::def_map::{BuiltInFieldType, DefMap, RegisteredTypes};
 use crate::metadata::extract_type_metadata;
 use crate::passes::parse::Parser;
