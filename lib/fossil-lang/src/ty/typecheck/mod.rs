@@ -234,24 +234,33 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    pub fn check(self) -> Result<InferResult, Vec<FossilError>> {
-        let (result, errors) = self.check_tolerant();
-        if errors.is_empty() {
-            Ok(result)
-        } else {
-            Err(errors)
-        }
+    /// Type-check the program. Diagnostics for any failure are emitted into
+    /// the Salsa accumulator via [`crate::error::emit_error`], and failed
+    /// `let` bindings are tainted with `Ty::Error` so downstream uses
+    /// propagate without re-yelling. The returned `InferResult` is always
+    /// populated (best-effort) — there is no separate "error" path; callers
+    /// observe failure by reading accumulated diagnostics.
+    pub fn check(self) -> InferResult {
+        self.check_tolerant()
     }
 
     /// Type-check and always return partial results, even when there are
     /// errors. Used by the LSP to keep snapshots up-to-date for completions.
-    pub fn check_tolerant(mut self) -> (InferResult, Vec<FossilError>) {
+    pub fn check_tolerant(mut self) -> InferResult {
         let root_ids = self.ir.root.clone();
-        let mut errors = Vec::new();
 
         for stmt_id in root_ids {
             if let Err(e) = self.check_stmt(stmt_id) {
-                errors.push(e);
+                // Emit the diagnostic and obtain proof of emission. Taint the
+                // failed Let binding with `Ty::Error` so downstream statements
+                // that reference this name unify against `Error`, which
+                // absorbs silently — the user sees the root cause once rather
+                // than an avalanche of follow-on mismatches.
+                let guarantee = crate::error::emit_error(self.db, e);
+                if let Some(&def_id) = self.resolutions.stmt_defs.get(&stmt_id) {
+                    let err_ty = Ty::mk_error(self.db, guarantee);
+                    self.env.insert(def_id, Polytype::mono(err_ty));
+                }
             }
         }
 
@@ -276,13 +285,12 @@ impl<'a> TypeChecker<'a> {
             }
         }
 
-        let result = InferResult {
+        InferResult {
             ir: self.ir,
             type_index: self.type_index,
             resolutions: self.resolutions,
             typeck_results: self.typeck_results,
-        };
-        (result, errors)
+        }
     }
 
     fn check_stmt(&mut self, stmt_id: StmtId) -> Result<(), FossilError> {

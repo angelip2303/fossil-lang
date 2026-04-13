@@ -19,6 +19,7 @@ use crate::common::PrimitiveType;
 #[allow(unused_imports)] // trait must be in scope for method resolution
 use crate::db::HasRegistry;
 use crate::db::{Db, DefKindTag, Diagnostic, Severity, SourceFile, Symbol};
+use crate::error::emit_error;
 use crate::def_map::{BuiltInFieldType, DefMap, RegisteredTypes};
 use crate::metadata::extract_type_metadata;
 use crate::passes::parse::Parser;
@@ -48,12 +49,11 @@ pub fn schema_needs(db: &dyn Db, file: SourceFile) -> Vec<SchemaRequest> {
 /// Parse source text into AST.
 #[salsa::tracked]
 pub fn parse(db: &dyn Db, file: SourceFile) -> Ast {
-    use salsa::Accumulator;
     match Parser::parse(db, file.text(db), 0) {
         Ok(ast) => ast,
         Err(errors) => {
-            for e in &errors {
-                Diagnostic::from_error(e).accumulate(db);
+            for e in errors {
+                let _ = emit_error(db, e);
             }
             Ast::default()
         }
@@ -65,7 +65,6 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> Ast {
 /// Lower AST to IR. Registers sinks into DefMap and resolves provider schemas.
 #[salsa::tracked]
 pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
-    use salsa::Accumulator;
     let ast = parse(db, file);
 
     let mut def_map = DefMap::default();
@@ -85,7 +84,7 @@ pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
         },
         Err(errors) => {
             for e in errors {
-                Diagnostic::from_error(&e).accumulate(db);
+                let _ = emit_error(db, e);
             }
             LowerResult {
                 ir: Default::default(),
@@ -103,9 +102,11 @@ pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
 /// Type-check the IR. Returns only the new artifacts from type-checking.
 #[salsa::tracked]
 pub fn infer(db: &dyn Db, file: SourceFile) -> InferResult {
-    use salsa::Accumulator;
     let lowered = lower(db, file);
-    match TypeChecker::new(
+    // The type checker emits its own diagnostics into the accumulator and
+    // taints failed bindings with `Ty::Error`, so we always get a populated
+    // (best-effort) `InferResult` back.
+    TypeChecker::new(
         db,
         lowered.ir,
         lowered.def_map,
@@ -113,20 +114,6 @@ pub fn infer(db: &dyn Db, file: SourceFile) -> InferResult {
         lowered.resolutions,
     )
     .check()
-    {
-        Ok(result) => result,
-        Err(errors) => {
-            for e in errors {
-                Diagnostic::from_error(&e).accumulate(db);
-            }
-            InferResult {
-                ir: Default::default(),
-                type_index: Default::default(),
-                resolutions: Default::default(),
-                typeck_results: Default::default(),
-            }
-        }
-    }
 }
 
 // ── rq ──────────────────────────────────────────────────────────────
@@ -134,12 +121,11 @@ pub fn infer(db: &dyn Db, file: SourceFile) -> InferResult {
 /// Lower typed IR to RelationalQuery.
 #[salsa::tracked]
 pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
-    use salsa::Accumulator;
     let program = infer(db, file);
     match RqLowering::new(db, &program.ir, &program.type_index, &program.resolutions).lower() {
         Ok(rq) => rq,
         Err(e) => {
-            Diagnostic::from_error(&e).accumulate(db);
+            let _ = emit_error(db, e);
             RelationalQuery::new()
         }
     }
@@ -311,6 +297,55 @@ mod tests {
         assert_eq!(map_sql_type("DOUBLE"), PrimitiveType::Float);
         assert_eq!(map_sql_type("VARCHAR"), PrimitiveType::String);
         assert_eq!(map_sql_type("BOOLEAN"), PrimitiveType::Bool);
+    }
+
+    #[test]
+    fn tainted_compilation_does_not_re_yell() {
+        // First let fails (undefined variable). The second let references
+        // the failed binding. With ErrorGuaranteed taint propagation, the
+        // second let should NOT add a new diagnostic — it should silently
+        // unify against `Ty::Error`. Net: exactly one accumulated
+        // diagnostic for the whole file.
+        let db = FossilDb::default();
+        let file = SourceFile::new(
+            &db,
+            "let x = does_not_exist\nlet y = x".into(),
+            "test".into(),
+        );
+        let _ = infer(&db, file);
+        let diags = infer::accumulated::<Diagnostic>(&db, file);
+        assert!(
+            !diags.is_empty(),
+            "expected at least one diagnostic for the bad first let"
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "downstream use of tainted binding must not re-yell — got {} diagnostics: {:?}",
+            diags.len(),
+            diags
+        );
+    }
+
+    #[test]
+    fn tainted_compilation_two_failing_lets_two_diagnostics() {
+        // Two independent failing lets, each referenced downstream. With
+        // ErrorGuaranteed taint propagation, we expect EXACTLY two
+        // diagnostics — one per root cause — and zero re-yelled follow-ups.
+        let db = FossilDb::default();
+        let file = SourceFile::new(
+            &db,
+            "let a = nope_a\nlet b = nope_b\nlet c = a\nlet d = b".into(),
+            "test".into(),
+        );
+        let _ = infer(&db, file);
+        let diags = infer::accumulated::<Diagnostic>(&db, file);
+        assert_eq!(
+            diags.len(),
+            2,
+            "two failing lets must produce exactly two diagnostics, got: {:?}",
+            diags
+        );
     }
 
     #[test]

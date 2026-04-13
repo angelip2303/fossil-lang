@@ -20,6 +20,7 @@
 
 use crate::common::PrimitiveType;
 use crate::db::{Db, DefId, Symbol};
+use crate::error::ErrorGuaranteed;
 
 // ── TypeVar (unification variables) ────────────────────────────────
 
@@ -89,9 +90,10 @@ pub enum TyKind {
     Record(RecordFields),
     /// Function signature `(P1, P2, ...) -> R`.
     Function(Vec<Ty>, Ty),
-    /// Type-error placeholder. Propagates without re-raising downstream
-    /// errors (rustc `ErrorGuaranteed` precursor).
-    Error,
+    /// Type-error placeholder, tagged with proof that a diagnostic was
+    /// already emitted. Unifies with anything without producing further
+    /// errors (rustc `TyKind::Error(ErrorGuaranteed)` pattern).
+    Error(ErrorGuaranteed),
 }
 
 // ── InternedTy + lifetime-free wrapper ────────────────────────────
@@ -162,8 +164,11 @@ impl Ty {
         Self::new(db, TyKind::Unit)
     }
 
-    pub fn mk_error(db: &dyn Db) -> Self {
-        Self::new(db, TyKind::Error)
+    /// Build the error type. Takes an [`ErrorGuaranteed`] by value to enforce
+    /// the invariant: you can only construct `TyKind::Error` if you have
+    /// already emitted a diagnostic via [`crate::error::emit_error`].
+    pub fn mk_error(db: &dyn Db, guarantee: ErrorGuaranteed) -> Self {
+        Self::new(db, TyKind::Error(guarantee))
     }
 
     pub fn mk_optional(db: &dyn Db, inner: Ty) -> Self {

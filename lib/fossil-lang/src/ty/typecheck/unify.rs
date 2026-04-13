@@ -51,6 +51,12 @@ impl TypeChecker<'_> {
         let k2 = ty2.kind(self.db);
 
         match (k1, k2) {
+            // Tainted compilation: an `Error` type unifies with anything
+            // without producing a new diagnostic. The original error has
+            // already been emitted (proven by the `ErrorGuaranteed` payload),
+            // so re-yelling here would just spam the user.
+            (TyKind::Error(_), _) | (_, TyKind::Error(_)) => Ok(Subst::default()),
+
             (TyKind::Var(v1), TyKind::Var(v2)) if v1 == v2 => Ok(Subst::default()),
             (TyKind::Var(v), _) => self.bind_var(v, ty2, loc),
             (_, TyKind::Var(v)) => self.bind_var(v, ty1, loc),
@@ -122,7 +128,10 @@ impl TypeChecker<'_> {
                 params.iter().any(|p| self.occurs_in(var, *p)) || self.occurs_in(var, ret)
             }
             TyKind::Optional(inner) => self.occurs_in(var, inner),
-            TyKind::Primitive(_) | TyKind::Named(_) | TyKind::Unit | TyKind::Error => false,
+            TyKind::Primitive(_)
+            | TyKind::Named(_)
+            | TyKind::Unit
+            | TyKind::Error(_) => false,
         }
     }
 

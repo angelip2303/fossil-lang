@@ -2,6 +2,32 @@ use miette::{Diagnostic, SourceSpan};
 use thiserror::Error;
 
 use crate::ast::Loc;
+use crate::db::Db;
+
+/// Proof that a compilation error has been emitted to the diagnostic
+/// accumulator. Zero-sized; deliberately impossible to construct without
+/// going through [`emit_error`]. Modeled on rustc's `ErrorGuaranteed`
+/// (see `compiler/rustc_errors/src/diagnostic.rs`).
+///
+/// Holding an `ErrorGuaranteed` is a static guarantee that the user will
+/// see at least one diagnostic, which lets downstream code propagate
+/// "tainted" results (e.g. `TyKind::Error(ErrorGuaranteed)`) without having
+/// to re-yell the same problem at every layer.
+///
+/// The inner `()` field is private to this module — outside `error.rs` the
+/// only way to obtain a value is to call [`emit_error`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ErrorGuaranteed(());
+
+/// Emit a `FossilError` into the Salsa diagnostic accumulator and return
+/// proof that it was reported. This is the single public constructor for
+/// [`ErrorGuaranteed`]; every site that wants to taint a downstream value
+/// (for example, build a `Ty::mk_error`) must go through here.
+pub fn emit_error(db: &dyn Db, err: FossilError) -> ErrorGuaranteed {
+    use salsa::Accumulator;
+    crate::db::Diagnostic::from_error(&err).accumulate(db);
+    ErrorGuaranteed(())
+}
 
 impl From<Loc> for SourceSpan {
     fn from(loc: Loc) -> Self {

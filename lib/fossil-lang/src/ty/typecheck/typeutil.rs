@@ -69,7 +69,10 @@ pub fn free_vars_type(ty: Ty, db: &dyn Db) -> HashSet<TypeVar> {
             vars
         }
         TyKind::Optional(inner) => free_vars_type(inner, db),
-        TyKind::Primitive(_) | TyKind::Named(_) | TyKind::Unit | TyKind::Error => HashSet::new(),
+        TyKind::Primitive(_)
+        | TyKind::Named(_)
+        | TyKind::Unit
+        | TyKind::Error(_) => HashSet::new(),
     }
 }
 
@@ -126,7 +129,10 @@ impl Subst {
                 let new_inner = self.apply_with_cache(inner, db, cache);
                 Ty::mk_optional(db, new_inner)
             }
-            TyKind::Primitive(_) | TyKind::Named(_) | TyKind::Unit | TyKind::Error => ty,
+            TyKind::Primitive(_)
+            | TyKind::Named(_)
+            | TyKind::Unit
+            | TyKind::Error(_) => ty,
         };
 
         cache.insert(ty, result);
@@ -170,7 +176,7 @@ impl TypeChecker<'_> {
             TyKind::Primitive(p) => format!("{:?}", p),
             TyKind::Var(v) => format!("'{}", v.0),
             TyKind::Unit => "()".to_string(),
-            TyKind::Error => "<error>".to_string(),
+            TyKind::Error(_) => "<error>".to_string(),
             TyKind::Named(def_id) => {
                 let name = def_id.name(self.db).text(self.db);
                 if let Some(ns) = def_id.namespace(self.db) {

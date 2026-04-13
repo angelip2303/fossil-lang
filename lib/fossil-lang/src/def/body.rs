@@ -215,7 +215,6 @@ fn lower_one(
     stmt_index: usize,
     scaffold: &FileDefMapForBody,
 ) -> HirBody {
-    use salsa::Accumulator;
     match lower_item_body(
         db,
         ast,
@@ -234,7 +233,7 @@ fn lower_one(
         },
         Err(errors) => {
             for e in errors {
-                crate::db::Diagnostic::from_error(&e).accumulate(db);
+                let _ = crate::error::emit_error(db, e);
             }
             let ir = Ir::default();
             // Allocate a placeholder Unit stmt so root_stmt is valid.
