@@ -12,8 +12,8 @@ pub mod registry;
 
 pub use def_map::{BuiltInFieldType, DefMap, RegisteredTypes, TypeMetadataMap};
 pub use item_tree::{
-    file_item_tree, ItemRef, ItemTree, LetItem, LetLoc, PipelineItem, PipelineLoc, TypeDeclLoc,
-    TypeItem,
+    file_item_tree, item_count, let_names, ItemRef, ItemTree, LetItem, LetLoc, PipelineItem,
+    PipelineLoc, TypeDeclLoc, TypeItem,
 };
 pub use registry::{
     AnonOp, AttributeOp, AttributeOpKind, AttributeRegistry, CleanOp, FossilRegistry, ParamDef,
