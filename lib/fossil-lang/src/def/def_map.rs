@@ -120,14 +120,31 @@ impl DefMap {
             .find(|def_id| pred(def_id.kind(db)))
     }
 
-    /// Resolve a path in a specific namespace. The first segment of a qualified
-    /// path is looked up in `ns`; subsequent segments traverse children.
+    /// Resolve a path in a specific namespace. The first segment of a
+    /// qualified path is looked up in `ns` first, falling back to
+    /// `TypeNS` for module / namespace tokens (e.g. `Rdf` in
+    /// `Rdf.materialize` is a `DefKindTag::Mod` living in `TypeNS`
+    /// regardless of whether the caller is resolving a value or a
+    /// type). Mirrors rustc's behavior: module path prefixes always
+    /// live in the type namespace, and only the tail segment is
+    /// resolved in the requested namespace. Subsequent segments
+    /// traverse children in `ValueNS` → `TypeNS` → `MetaNS` order, so
+    /// `Rdf.materialize` (a sink registered as a `Let` child of the
+    /// `Rdf` module) resolves cleanly in `ValueNS` context.
     pub fn resolve(&self, _db: &dyn Db, path: &Path, ns: Namespace) -> Option<DefId> {
         match path {
             Path::Simple(sym) => self.get_in_ns(*sym, ns),
             Path::Qualified(parts) if parts.is_empty() => None,
             Path::Qualified(parts) => {
-                let mut current = self.get_in_ns(parts[0], ns)?;
+                let mut current = self
+                    .get_in_ns(parts[0], ns)
+                    .or_else(|| {
+                        if ns != Namespace::TypeNS {
+                            self.get_in_ns(parts[0], Namespace::TypeNS)
+                        } else {
+                            None
+                        }
+                    })?;
                 for &part in &parts[1..] {
                     let children = self.children.get(&current)?;
                     current = children

@@ -1071,6 +1071,62 @@ mod tests {
     }
 
     #[test]
+    fn queries_rq_resolves_rdf_materialize_via_qualified_path() {
+        // Regression for the `def_map.resolve` fallback that lets a
+        // qualified path's first segment fall back to `TypeNS` for
+        // module prefixes like `Rdf`. Before the fix,
+        // `|> Rdf.materialize(...)` failed resolution because `Rdf` is
+        // registered as `DefKindTag::Mod` in `TypeNS` only, and the
+        // value-context resolve only looked in `ValueNS`. The script
+        // below exercises csv source + `Rdf.materialize` at the pipeline
+        // tail — with the fix, both produce entries in the compiled
+        // `RelationalQuery`.
+        //
+        // Note: the `|> each u -> User(...)` projection inside the same
+        // pipeline does NOT yet emit in the per-item path (pipeline-
+        // body projection → record-instance emission has a separate
+        // gap that this test explicitly documents as not-yet-fixed).
+        // The test asserts only the parts that work end-to-end.
+        use crate::registry::{FossilRegistry, ParamDef, SourceDef, SourceRegistry};
+        let mut sources = SourceRegistry::new();
+        sources.register(SourceDef::new("csv", vec![ParamDef::required("path")]));
+        let mut registry = FossilRegistry {
+            sources,
+            ..Default::default()
+        };
+        crate::registry::register_defaults(&mut registry);
+        let db = FossilDb::with_registry(registry);
+
+        let source = r#"#[rdf(base = "https://kanzo.dev/")]
+type User(id: int) do id: int, name: string end
+
+let users = csv!(path: "users.csv")
+
+users
+|> each u -> User(u.id) { name = u.name }
+|> Rdf.materialize("out/")
+"#;
+        let file = SourceFile::new(&db, source.into(), "test".into());
+        let rq = crate::queries::rq(&db, file);
+
+        // csv source registered in the manifest.
+        assert_eq!(rq.sources.len(), 1);
+        assert_eq!(rq.sources[0].format, "csv");
+        assert_eq!(rq.sources[0].path, "users.csv");
+
+        // `Rdf.materialize(...)` resolved successfully — sink lookup
+        // traversed `TypeNS[Rdf] → ValueNS[materialize]` thanks to the
+        // qualified-path fallback. Previously this failed silently and
+        // no output was registered.
+        assert!(
+            !rq.outputs.is_empty(),
+            "Rdf.materialize qualified-path resolution must register an output",
+        );
+        assert_eq!(rq.outputs[0].format, "graphar");
+        assert_eq!(rq.outputs[0].path, "out/");
+    }
+
+    #[test]
     fn queries_rq_uses_per_item_fan_out_for_literal_only_file() {
         // End-to-end sanity: queries::rq goes through the per-item
         // fan-out path for a file that only contains primitive-typed
