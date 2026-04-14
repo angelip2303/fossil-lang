@@ -559,13 +559,13 @@ impl<'a> Lowering<'a> {
                 let ir_args: Vec<Argument> = args
                     .into_iter()
                     .map(|arg| match arg {
-                        crate::common::MetaArg::Positional(lit) => {
+                        crate::base::common::MetaArg::Positional(lit) => {
                             Argument::Positional(self.ir.exprs.alloc(Expr {
                                 loc,
                                 kind: ExprKind::Literal(lit),
                             }))
                         }
-                        crate::common::MetaArg::Named { name, value } => {
+                        crate::base::common::MetaArg::Named { name, value } => {
                             Argument::Named {
                                 name,
                                 value: self.ir.exprs.alloc(Expr {

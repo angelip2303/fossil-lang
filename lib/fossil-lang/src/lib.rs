@@ -13,14 +13,13 @@ pub mod queries;
 
 // Back-compat aliases for modules physically migrated into layer directories.
 // Keeps existing `use crate::X::*` imports working without a mass rename.
-pub use base::common;
+// Kept only for paths still used internally (ast, parser, metadata, def_map)
+// or externally by keasy (db, dialect, plan, rq, registry).
 pub use base::db;
 pub use codegen::dialect;
 pub use codegen::plan;
 pub use codegen::rq;
-pub use def::body;
 pub use def::def_map;
-pub use def::item_tree;
 pub use def::registry;
 pub use syntax::ast;
 pub use syntax::parser;

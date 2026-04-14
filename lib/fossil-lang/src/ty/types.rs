@@ -18,7 +18,7 @@
 //! Functionally equivalent to rustc's `Ty<'tcx>` (canonical interning, O(1)
 //! comparison) without forcing every caller to carry the database lifetime.
 
-use crate::common::PrimitiveType;
+use crate::base::common::PrimitiveType;
 use crate::db::{Db, DefId, Symbol};
 use crate::error::ErrorGuaranteed;
 

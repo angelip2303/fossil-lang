@@ -1,6 +1,6 @@
 use crate::ast::Loc;
 use crate::ast::Attribute;
-pub use crate::common::{Literal, Path, PrimitiveType};
+pub use crate::base::common::{Literal, Path, PrimitiveType};
 use crate::db::{DefId, Symbol};
 use la_arena::{Arena, Idx as NodeId};
 

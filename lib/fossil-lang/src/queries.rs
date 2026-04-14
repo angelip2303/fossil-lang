@@ -14,7 +14,7 @@
 //! lookup is uniform with other name resolution paths.
 
 use crate::ast::Ast;
-use crate::common::PrimitiveType;
+use crate::base::common::PrimitiveType;
 #[allow(unused_imports)] // trait must be in scope for method resolution
 use crate::db::HasRegistry;
 use crate::db::{CatalogOrigin, Db, DefId, DefKindTag, Diagnostic, Severity, SourceFile, Symbol};
@@ -232,7 +232,7 @@ pub(crate) fn register_meta_call_schemas(
 
 fn find_meta_calls_from_ast(db: &dyn Db, ast: &crate::ast::Ast) -> Vec<SchemaRequest> {
     use crate::ast::{ExprKind, StmtKind};
-    use crate::common::{Literal, MetaArg};
+    use crate::base::common::{Literal, MetaArg};
     let mut calls = Vec::new();
     for &stmt_id in &ast.root {
         let stmt = &ast.stmts[stmt_id];

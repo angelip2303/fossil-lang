@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::common::{Path, PrimitiveType};
+use crate::base::common::{Path, PrimitiveType};
 use crate::db::{Db, DefId, DefKindTag, Symbol};
 use crate::metadata::TypeMetadata;
 
