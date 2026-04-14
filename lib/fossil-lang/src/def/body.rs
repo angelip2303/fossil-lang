@@ -39,7 +39,11 @@ use std::collections::HashMap;
 
 use crate::ast::Ast;
 use crate::db::{Db, DefId, DefKindTag, Symbol, SourceFile};
-use crate::def::item_tree::{file_item_tree, LetLoc, PipelineLoc, TypeDeclLoc};
+use crate::def::item_tree::{
+    file_item_tree,
+    interned::{InternedLetLoc, InternedPipelineLoc, InternedTypeDeclLoc},
+    LetLoc, PipelineLoc, TypeDeclLoc,
+};
 use crate::def_map::{DefMap, RegisteredTypes, TypeMetadataMap};
 use crate::ir::{Ir, Resolutions, StmtId};
 use crate::metadata::{extract_type_metadata, TypeMetadata};
@@ -141,15 +145,13 @@ pub fn file_def_map_for_body(db: &dyn Db, file: SourceFile) -> FileDefMapForBody
     }
 }
 
-/// Salsa query: lower a single `let` body in isolation. Cached on `(file, idx)`
-/// — sibling lets, the ItemTree, and `file_def_map_for_body` stay cached
-/// across body-only edits.
-//
-// Future refactor: promote `LetLoc` to `#[salsa::interned]` via the
-// lifetime-free wrapper pattern (`Ty(salsa::Id)` precedent) and let this
-// query take `LetLoc` directly instead of destructuring its fields.
+/// Salsa query: lower a single `let` body in isolation, keyed on a
+/// Salsa-interned [`InternedLetLoc`]. Sibling lets, the ItemTree, and
+/// `file_def_map_for_body` stay cached across body-only edits.
 #[salsa::tracked(returns(ref))]
-pub fn let_body_query(db: &dyn Db, file: SourceFile, idx: usize) -> HirBody {
+pub fn let_body_query<'db>(db: &'db dyn Db, loc: InternedLetLoc<'db>) -> HirBody {
+    let file = loc.file(db);
+    let idx = loc.idx(db);
     let ast = parse(db, file);
     let tree = file_item_tree(db, file);
     let scaffold = file_def_map_for_body(db, file);
@@ -157,14 +159,19 @@ pub fn let_body_query(db: &dyn Db, file: SourceFile, idx: usize) -> HirBody {
     lower_one(db, &ast, stmt_index, scaffold)
 }
 
-/// Convenience wrapper for [`let_body_query`] that accepts a [`LetLoc`].
+/// Convenience wrapper for [`let_body_query`] that accepts a lifetime-free [`LetLoc`].
 pub fn let_body<'db>(db: &'db dyn Db, loc: LetLoc) -> &'db HirBody {
-    let_body_query(db, loc.file, loc.idx)
+    let_body_query(db, loc.to_interned(db))
 }
 
 /// Salsa query: lower a single `type` declaration body in isolation.
 #[salsa::tracked(returns(ref))]
-pub fn type_decl_body_query(db: &dyn Db, file: SourceFile, idx: usize) -> HirBody {
+pub fn type_decl_body_query<'db>(
+    db: &'db dyn Db,
+    loc: InternedTypeDeclLoc<'db>,
+) -> HirBody {
+    let file = loc.file(db);
+    let idx = loc.idx(db);
     let ast = parse(db, file);
     let tree = file_item_tree(db, file);
     let scaffold = file_def_map_for_body(db, file);
@@ -174,7 +181,7 @@ pub fn type_decl_body_query(db: &dyn Db, file: SourceFile, idx: usize) -> HirBod
 
 /// Convenience wrapper for [`type_decl_body_query`].
 pub fn type_decl_body<'db>(db: &'db dyn Db, loc: TypeDeclLoc) -> &'db HirBody {
-    type_decl_body_query(db, loc.file, loc.idx)
+    type_decl_body_query(db, loc.to_interned(db))
 }
 
 /// Salsa query: lower the (single) pipeline expression body in isolation.
@@ -183,7 +190,11 @@ pub fn type_decl_body<'db>(db: &'db dyn Db, loc: TypeDeclLoc) -> &'db HirBody {
 /// statement). The Option wrapper is necessary because a `PipelineLoc` only
 /// identifies the file, not whether a pipeline exists.
 #[salsa::tracked(returns(ref))]
-pub fn pipeline_body_query(db: &dyn Db, file: SourceFile) -> Option<HirBody> {
+pub fn pipeline_body_query<'db>(
+    db: &'db dyn Db,
+    loc: InternedPipelineLoc<'db>,
+) -> Option<HirBody> {
+    let file = loc.file(db);
     let ast = parse(db, file);
     let tree = file_item_tree(db, file);
     let pipeline = tree.pipeline.as_ref()?;
@@ -193,7 +204,7 @@ pub fn pipeline_body_query(db: &dyn Db, file: SourceFile) -> Option<HirBody> {
 
 /// Convenience wrapper for [`pipeline_body_query`].
 pub fn pipeline_body<'db>(db: &'db dyn Db, loc: PipelineLoc) -> &'db Option<HirBody> {
-    pipeline_body_query(db, loc.file)
+    pipeline_body_query(db, loc.to_interned(db))
 }
 
 /// Internal helper: drive `lower_item_body` with the file scaffold and
@@ -314,7 +325,7 @@ mod tests {
     fn pipeline_body_returns_none_when_absent() {
         let db = FossilDb::default();
         let file = SourceFile::new(&db, "let x = 1".into(), "test".into());
-        let body = pipeline_body(&db, PipelineLoc { file });
+        let body = pipeline_body(&db, PipelineLoc::new(&db, file));
         assert!(body.is_none());
     }
 
@@ -322,7 +333,7 @@ mod tests {
     fn pipeline_body_returns_some_when_present() {
         let db = FossilDb::default();
         let file = SourceFile::new(&db, "let x = 1\nx".into(), "test".into());
-        let body = pipeline_body(&db, PipelineLoc { file });
+        let body = pipeline_body(&db, PipelineLoc::new(&db, file));
         assert!(body.is_some(), "pipeline statement should produce a body");
     }
 

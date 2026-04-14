@@ -57,24 +57,116 @@ pub struct PipelineItem {
     pub ast_stmt_index: usize,
 }
 
-/// Stable location of a `let` item: file + index in the ItemTree arena.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LetLoc {
-    pub file: SourceFile,
-    pub idx: usize,
+// ── Item locations: salsa-interned + lifetime-free wrappers ───────────
+//
+// The `interned` submodule holds the actual `#[salsa::interned]` types,
+// which carry a `'db` lifetime and serve as the canonical Salsa identity.
+// The public `LetLoc` / `TypeDeclLoc` / `PipelineLoc` wrappers below store
+// a bare `salsa::Id` so they can flow through non-`'db` contexts (mirror
+// of the `Ty(salsa::Id)` pattern in `ty/types.rs`).
+
+pub(crate) mod interned {
+    use super::SourceFile;
+
+    #[salsa::interned]
+    pub struct InternedLetLoc<'db> {
+        pub file: SourceFile,
+        pub idx: usize,
+    }
+
+    #[salsa::interned]
+    pub struct InternedTypeDeclLoc<'db> {
+        pub file: SourceFile,
+        pub idx: usize,
+    }
+
+    #[salsa::interned]
+    pub struct InternedPipelineLoc<'db> {
+        pub file: SourceFile,
+    }
+}
+
+/// Stable location of a `let` item. O(1) equality via Salsa interning.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LetLoc(salsa::Id);
+
+impl std::fmt::Debug for LetLoc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LetLoc({:?})", self.0)
+    }
+}
+
+impl LetLoc {
+    pub fn new(db: &dyn Db, file: SourceFile, idx: usize) -> Self {
+        let interned = interned::InternedLetLoc::new(db, file, idx);
+        Self(salsa::plumbing::AsId::as_id(&interned))
+    }
+
+    pub(crate) fn to_interned<'db>(self, _db: &'db dyn Db) -> interned::InternedLetLoc<'db> {
+        <interned::InternedLetLoc<'db> as salsa::plumbing::FromId>::from_id(self.0)
+    }
+
+    pub fn file(self, db: &dyn Db) -> SourceFile {
+        self.to_interned(db).file(db)
+    }
+
+    pub fn idx(self, db: &dyn Db) -> usize {
+        self.to_interned(db).idx(db)
+    }
 }
 
 /// Stable location of a type declaration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TypeDeclLoc {
-    pub file: SourceFile,
-    pub idx: usize,
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeDeclLoc(salsa::Id);
+
+impl std::fmt::Debug for TypeDeclLoc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TypeDeclLoc({:?})", self.0)
+    }
+}
+
+impl TypeDeclLoc {
+    pub fn new(db: &dyn Db, file: SourceFile, idx: usize) -> Self {
+        let interned = interned::InternedTypeDeclLoc::new(db, file, idx);
+        Self(salsa::plumbing::AsId::as_id(&interned))
+    }
+
+    pub(crate) fn to_interned<'db>(self, _db: &'db dyn Db) -> interned::InternedTypeDeclLoc<'db> {
+        <interned::InternedTypeDeclLoc<'db> as salsa::plumbing::FromId>::from_id(self.0)
+    }
+
+    pub fn file(self, db: &dyn Db) -> SourceFile {
+        self.to_interned(db).file(db)
+    }
+
+    pub fn idx(self, db: &dyn Db) -> usize {
+        self.to_interned(db).idx(db)
+    }
 }
 
 /// Stable location of the pipeline (at most one per file).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PipelineLoc {
-    pub file: SourceFile,
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PipelineLoc(salsa::Id);
+
+impl std::fmt::Debug for PipelineLoc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PipelineLoc({:?})", self.0)
+    }
+}
+
+impl PipelineLoc {
+    pub fn new(db: &dyn Db, file: SourceFile) -> Self {
+        let interned = interned::InternedPipelineLoc::new(db, file);
+        Self(salsa::plumbing::AsId::as_id(&interned))
+    }
+
+    pub(crate) fn to_interned<'db>(self, _db: &'db dyn Db) -> interned::InternedPipelineLoc<'db> {
+        <interned::InternedPipelineLoc<'db> as salsa::plumbing::FromId>::from_id(self.0)
+    }
+
+    pub fn file(self, db: &dyn Db) -> SourceFile {
+        self.to_interned(db).file(db)
+    }
 }
 
 impl ItemTree {
@@ -186,7 +278,7 @@ pub fn find_let_by_name(
     tree.lets
         .iter()
         .position(|l| l.name == name)
-        .map(|idx| LetLoc { file, idx })
+        .map(|idx| LetLoc::new(db, file, idx))
 }
 
 /// Per-item query: find a type declaration by name, returning its stable `TypeDeclLoc`.
@@ -200,7 +292,7 @@ pub fn find_type_by_name(
     tree.types
         .iter()
         .position(|t| t.name == name)
-        .map(|idx| TypeDeclLoc { file, idx })
+        .map(|idx| TypeDeclLoc::new(db, file, idx))
 }
 
 #[cfg(test)]
@@ -261,12 +353,12 @@ mod tests {
         let tree = file_item_tree(&db, file);
 
         // Construct a LetLoc for `foo` — should be idx 0
-        let foo_loc = LetLoc { file, idx: 0 };
-        assert_eq!(tree.lets[foo_loc.idx].name.text(&db), "foo");
+        let foo_loc = LetLoc::new(&db, file, 0);
+        assert_eq!(tree.lets[foo_loc.idx(&db)].name.text(&db), "foo");
 
         // Construct a LetLoc for `bar` — should be idx 1
-        let bar_loc = LetLoc { file, idx: 1 };
-        assert_eq!(tree.lets[bar_loc.idx].name.text(&db), "bar");
+        let bar_loc = LetLoc::new(&db, file, 1);
+        assert_eq!(tree.lets[bar_loc.idx(&db)].name.text(&db), "bar");
     }
 
     #[test]
@@ -351,9 +443,9 @@ mod tests {
         let bar_loc = find_let_by_name(&db, file, bar_sym).expect("bar exists");
         let baz_loc = find_let_by_name(&db, file, baz_sym).expect("baz exists");
 
-        assert_eq!(foo_loc.idx, 0);
-        assert_eq!(bar_loc.idx, 1);
-        assert_eq!(baz_loc.idx, 2);
+        assert_eq!(foo_loc.idx(&db), 0);
+        assert_eq!(bar_loc.idx(&db), 1);
+        assert_eq!(baz_loc.idx(&db), 2);
 
         // Missing name returns None
         assert!(find_let_by_name(&db, file, missing_sym).is_none());
