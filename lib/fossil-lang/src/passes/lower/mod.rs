@@ -670,7 +670,7 @@ impl<'a> Lowering<'a> {
         loc: Loc,
         ns: crate::def_map::Namespace,
         scope_lookup: impl Fn(&ScopeStack, Symbol) -> Option<DefId>,
-        make_error: impl Fn(String, Loc) -> FossilError,
+        make_error: impl Fn(String, Vec<String>, Loc) -> FossilError,
         errors: &mut Vec<FossilError>,
     ) -> Option<DefId> {
         match path {
@@ -681,18 +681,43 @@ impl<'a> Lowering<'a> {
                 if let Some(def_id) = self.def_map.resolve(self.db, &Path::Simple(*name), ns) {
                     return Some(def_id);
                 }
-                errors.push(make_error(name.text(self.db).to_string(), loc));
+                errors.push(make_error(
+                    name.text(self.db).to_string(),
+                    self.candidates_in_ns(ns),
+                    loc,
+                ));
                 None
             }
             Path::Qualified(parts) => {
                 let ast_path = Path::Qualified(parts.clone());
                 self.def_map.resolve(self.db, &ast_path, ns).or_else(|| {
                     let path_str = ast_path.display(self.db);
-                    errors.push(make_error(path_str, loc));
+                    errors.push(make_error(path_str, self.candidates_in_ns(ns), loc));
                     None
                 })
             }
         }
+    }
+
+    /// All symbol names visible in `ns` (scope ribs + def_map) — used as the
+    /// candidate pool for "did you mean" Levenshtein suggestions.
+    fn candidates_in_ns(&self, ns: crate::def_map::Namespace) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .def_map
+            .all_symbols_in_ns(ns)
+            .map(|s| s.text(self.db).to_string())
+            .collect();
+        for scope in &self.scopes.scopes {
+            let bucket = match ns {
+                crate::def_map::Namespace::ValueNS => &scope.values,
+                crate::def_map::Namespace::TypeNS => &scope.types,
+                crate::def_map::Namespace::MetaNS => continue,
+            };
+            for sym in bucket.keys() {
+                out.push(sym.text(self.db).to_string());
+            }
+        }
+        out
     }
 
     fn resolve_value_path(
@@ -706,7 +731,7 @@ impl<'a> Lowering<'a> {
             loc,
             crate::def_map::Namespace::ValueNS,
             ScopeStack::lookup_value,
-            FossilError::undefined_variable,
+            FossilError::undefined_variable_with_suggestions,
             errors,
         )
     }
@@ -722,7 +747,7 @@ impl<'a> Lowering<'a> {
             loc,
             crate::def_map::Namespace::TypeNS,
             ScopeStack::lookup_type,
-            FossilError::undefined_type,
+            FossilError::undefined_type_with_suggestions,
             errors,
         )
     }

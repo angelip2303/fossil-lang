@@ -408,6 +408,29 @@ mod tests {
     }
 
     #[test]
+    fn undefined_variable_emits_did_you_mean_suggestion() {
+        // `mappies` is a typo of `mappys`; the resolver should suggest the
+        // closest in-scope name via Levenshtein.
+        let db = FossilDb::default();
+        let file = SourceFile::new(
+            &db,
+            "let mappys = 1\nlet x = mappies".into(),
+            "test".into(),
+        );
+        let _ = lower(&db, file);
+        let diags = lower::accumulated::<Diagnostic>(&db, file);
+        let undef = diags
+            .iter()
+            .find(|d| d.message.contains("mappies"))
+            .expect("expected an undefined-variable diagnostic for `mappies`");
+        assert!(
+            undef.message.contains("did you mean") && undef.message.contains("mappys"),
+            "expected suggestion for `mappys`, got: {:?}",
+            undef.message
+        );
+    }
+
+    #[test]
     fn provider_invocation_resolves_via_meta_ns_no_undefined_variable() {
         // Regression test for the "Undefined variable 'csv'" bug:
         // a registered source must resolve via MetaNS during lowering,
