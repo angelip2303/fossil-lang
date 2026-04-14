@@ -525,6 +525,33 @@ pub fn file_binding_types(
     out
 }
 
+/// File-level salsa query: every top-level type declaration's
+/// inference result, keyed by its `DefId`. Fan-out over per-item
+/// `type_decl_infer`. Mirrors `file_binding_types` for the type side.
+///
+/// Primary consumer: IDE completion of user-defined record fields, and
+/// downstream queries (including `let_infer`) that need to resolve
+/// arbitrary Type DefIds without running the monolithic pipeline.
+#[salsa::tracked(returns(ref))]
+pub fn file_type_decls(
+    db: &dyn Db,
+    file: SourceFile,
+) -> std::collections::HashMap<DefId, TypeDeclInferResult> {
+    let tree = file_item_tree(db, file);
+    let scaffold = file_def_map_for_body(db, file);
+    let mut out = std::collections::HashMap::with_capacity(tree.types.len());
+    for (idx, _) in tree.types.iter().enumerate() {
+        let Some((_, def_id)) = scaffold.top_level_types.get(idx) else {
+            continue;
+        };
+        let loc = TypeDeclLoc::new(db, file, idx);
+        if let Some(result) = type_decl_infer(db, loc) {
+            out.insert(*def_id, result);
+        }
+    }
+    out
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -721,6 +748,28 @@ mod tests {
         assert!(matches!(a_ty.kind(&db), TyKind::Primitive(PrimitiveType::Int)));
         assert!(matches!(b_ty.kind(&db), TyKind::Primitive(PrimitiveType::Int)));
         assert!(matches!(c_ty.kind(&db), TyKind::Primitive(PrimitiveType::String)));
+    }
+
+    #[test]
+    fn file_type_decls_aggregates_all_types() {
+        let db = FossilDb::default();
+        let file = SourceFile::new(
+            &db,
+            "type Point(x: int, y: int) do x: int, y: int end\n\
+             type User(id: string) do id: string, name: string end"
+                .into(),
+            "test".into(),
+        );
+        let type_decls = file_type_decls(&db, file);
+        assert_eq!(type_decls.len(), 2, "got: {type_decls:?}");
+
+        // Both types should have ctor_fn_ty populated (they declare records).
+        for (_, result) in type_decls.iter() {
+            assert!(
+                result.ctor_fn_ty.is_some(),
+                "record types must have a constructor fn type",
+            );
+        }
     }
 
     #[test]
