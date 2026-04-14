@@ -97,6 +97,34 @@ impl<'a> RqLowering<'a> {
         }
     }
 
+    /// Find the named String value of an attribute argument on the type whose
+    /// name matches `type_name`. Walks IR `Stmt::Type` nodes and inspects each
+    /// attached `Attribute`. Returns the first match across all attributes —
+    /// the compiler doesn't care which attribute supplied it (e.g. `#[rdf]`,
+    /// `#[graph]`, etc.); only the key lookup matters.
+    fn lookup_type_attr_string(&self, type_name: &str, key: &str) -> Option<String> {
+        let key_sym = Symbol::new(self.db, key);
+        for stmt in self.ir.stmts.iter() {
+            if let crate::ir::StmtKind::Type { name, attrs, .. } = &stmt.1.kind {
+                if name.text(self.db) != type_name {
+                    continue;
+                }
+                for attr in attrs {
+                    for arg in &attr.args {
+                        if let crate::ast::AttributeArg::Named { key, value } = arg {
+                            if *key == key_sym {
+                                if let crate::ast::Literal::String(s) = value {
+                                    return Some(s.text(self.db).to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Lower the entire program to a RelationalQuery.
     pub fn lower(mut self) -> Result<RelationalQuery, FossilError> {
         let root: Vec<_> = self.ir.root.iter().copied().collect();
@@ -275,9 +303,17 @@ impl<'a> RqLowering<'a> {
                     .collect();
 
                 let subject_template = if let Some((_, key_expr)) = spec.identity_exprs.first() {
-                    let iri_base = &self.db.registry().iri_base;
+                    // The base IRI is metadata: it lives on the type's own
+                    // attributes (e.g. `#[rdf(base = "https://…/")] type User …`).
+                    // fossil-lang doesn't know what "rdf" means — it just reads
+                    // the named-arg `base` from any attribute on the type and
+                    // uses its String literal verbatim. Falls back to a
+                    // placeholder when no attribute provides one.
+                    let base = self
+                        .lookup_type_attr_string(&spec.type_name, "base")
+                        .unwrap_or_else(|| "http://example.org/".to_string());
                     build::concat(vec![
-                        build::string_lit(format!("{}{}/", iri_base, spec.type_name)),
+                        build::string_lit(format!("{}{}/", base, spec.type_name)),
                         build::cast_varchar(key_expr.clone()),
                     ])
                 } else {

@@ -87,8 +87,8 @@ impl FossilPlan {
     /// Create a plan from a RelationalQuery and a SqlDialect.
     /// The dialect decides which sources need preprocessing.
     pub fn from_rq(rq: RelationalQuery, dialect: &dyn SqlDialect) -> Self {
-        use crate::rq::emit_sql::rq_to_sql;
-        let sql = rq_to_sql(&rq, dialect);
+        use crate::rq::to_ast::rq_to_query;
+        let sql = rq_to_query(&rq, dialect).to_string();
 
         let sources = rq
             .transforms

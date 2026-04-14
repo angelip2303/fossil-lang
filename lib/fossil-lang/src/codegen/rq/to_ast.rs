@@ -24,14 +24,11 @@ pub fn expr_to_sql(expr: &Expr, _rq: &RelationalQuery) -> String {
     expr.to_string()
 }
 
-/// Convert a RelationalQuery to SQL: build `ast::Query` then `.to_string()`.
-pub fn rq_to_sql(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> String {
-    rq_to_query(rq, dialect).to_string()
-}
-
 /// Build a `sqlparser::ast::Query` from a RelationalQuery + dialect.
 /// Each `Transform` becomes one `Cte`; the outer query selects from the last CTE.
-fn rq_to_query(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> Query {
+/// Callers obtain the SQL string via `.to_string()` — there's no separate
+/// `rq_to_sql` wrapper because that would just duplicate Display.
+pub fn rq_to_query(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> Query {
     if rq.transforms.is_empty() {
         return placeholder_select_one();
     }
@@ -328,7 +325,7 @@ mod tests {
     #[test]
     fn single_scan_round_trips() {
         let (rq, ..) = test_rq_parts();
-        let sql = rq_to_sql(&rq, &DefaultDialect);
+        let sql = rq_to_query(&rq, &DefaultDialect).to_string();
         validate_duckdb_sql(&sql).expect("emitted SQL must parse round-trip");
         assert!(sql.contains("read_csv"));
     }
@@ -342,7 +339,7 @@ mod tests {
             output: persons,
             columns: vec![(name, build::col("name")), (age, build::col("age"))],
         });
-        let sql = rq_to_sql(&rq, &DefaultDialect);
+        let sql = rq_to_query(&rq, &DefaultDialect).to_string();
         validate_duckdb_sql(&sql).expect("project SQL must round-trip");
     }
 
@@ -355,7 +352,7 @@ mod tests {
             output: out,
             ops: vec![(name, "TRIM(name)".to_string())],
         });
-        let sql = rq_to_sql(&rq, &DefaultDialect);
+        let sql = rq_to_query(&rq, &DefaultDialect).to_string();
         assert!(
             sql.contains("REPLACE"),
             "ApplyTransforms must use SELECT * REPLACE(...), got: {sql}"
@@ -372,7 +369,7 @@ mod tests {
             output: out,
             ops: vec![],
         });
-        let sql = rq_to_sql(&rq, &DefaultDialect);
+        let sql = rq_to_query(&rq, &DefaultDialect).to_string();
         validate_duckdb_sql(&sql).expect("passthrough SQL must round-trip");
     }
 
@@ -398,7 +395,7 @@ mod tests {
             kind: JoinKind::Inner,
             suffix: None,
         });
-        let sql = rq_to_sql(&rq, &DefaultDialect);
+        let sql = rq_to_query(&rq, &DefaultDialect).to_string();
         assert!(sql.contains("INNER JOIN") || sql.contains("JOIN"));
         validate_duckdb_sql(&sql).expect("join SQL must round-trip");
     }
@@ -458,7 +455,7 @@ mod tests {
             output: persons,
             columns: vec![(name, build::col("name")), (age, build::col("age"))],
         });
-        let sql = rq_to_sql(&rq, &DefaultDialect);
+        let sql = rq_to_query(&rq, &DefaultDialect).to_string();
         validate_duckdb_sql(&sql).expect("round-trip");
         assert!(sql.contains("persons"), "got: {sql}");
     }
@@ -479,7 +476,7 @@ mod tests {
     #[test]
     fn single_scan_is_parseable_by_duckdb_dialect() {
         let (rq, ..) = test_rq_parts();
-        let sql = rq_to_sql(&rq, &DefaultDialect);
+        let sql = rq_to_query(&rq, &DefaultDialect).to_string();
         validate_duckdb_sql(&sql).expect("must round-trip");
     }
 }

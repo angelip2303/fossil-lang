@@ -14,7 +14,7 @@
 //! `datafusion/sql/src/unparser/expr.rs`.
 
 pub mod build;
-pub mod emit_sql;
+pub mod to_ast;
 pub mod lower;
 
 use std::collections::HashMap;

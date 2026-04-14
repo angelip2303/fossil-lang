@@ -127,13 +127,6 @@ impl FossilDbBuilder {
         self
     }
 
-    /// Override the base IRI used for RDF subject template generation.
-    /// Defaults to `http://example.org/` when not set.
-    pub fn with_iri_base(mut self, base: impl Into<String>) -> Self {
-        self.registry.iri_base = base.into();
-        self
-    }
-
     /// Build the `FossilDb`. The registry is immutable from this point on.
     pub fn build(self) -> FossilDb {
         FossilDb {
