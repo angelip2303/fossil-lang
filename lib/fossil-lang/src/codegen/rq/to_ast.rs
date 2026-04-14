@@ -7,8 +7,7 @@
 use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::{
     self, BinaryOperator, Cte, Expr, Ident, Join, JoinConstraint, JoinOperator, Query,
-    ReplaceSelectElement, ReplaceSelectItem, Select, SelectItem, SetExpr, TableAlias, TableFactor,
-    TableWithJoins, With,
+    Select, SelectItem, SetExpr, TableAlias, TableFactor, TableWithJoins, With,
 };
 
 use crate::dialect::{ScanStrategy, SqlDialect, table_ref};
@@ -110,32 +109,6 @@ pub fn rq_to_query(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> Query {
                         Some(predicate.clone()),
                     ),
                 )
-            }
-            Transform::ApplyTransforms {
-                input,
-                output,
-                ops,
-            } => {
-                let from = vec![twj(table_ref(rq.table_name(*input)))];
-                let projection = if ops.is_empty() {
-                    vec![SelectItem::Wildcard(wildcard_default())]
-                } else {
-                    let items: Vec<Box<ReplaceSelectElement>> = ops
-                        .iter()
-                        .map(|(col, sql_expr)| {
-                            Box::new(ReplaceSelectElement {
-                                expr: *parse_sql_expr(sql_expr),
-                                column_name: ident(rq.col_name(*col)),
-                                as_keyword: true,
-                            })
-                        })
-                        .collect();
-                    vec![SelectItem::Wildcard(ast::WildcardAdditionalOptions {
-                        opt_replace: Some(ReplaceSelectItem { items }),
-                        ..Default::default()
-                    })]
-                };
-                (ident(rq.table_name(*output)), select(projection, from, None))
             }
         };
         last_alias = Some(alias.clone());
@@ -277,26 +250,8 @@ fn qualified_col(table: &str, col: &str) -> Expr {
     Expr::CompoundIdentifier(vec![ident(table), ident(col)])
 }
 
-/// Parse a column-expression SQL fragment back into `ast::Expr`.
-/// Used only by the legacy `ApplyTransforms.ops: Vec<(ColId, String)>` path,
-/// which carries SQL strings as a holdover from the pre-AST era. Removed when
-/// RQ as a whole is replaced (commit 11 of the consolidation refactor).
-fn parse_sql_expr(sql: &str) -> Box<Expr> {
-    use sqlparser::dialect::DuckDbDialect;
-    use sqlparser::parser::Parser;
-    Parser::new(&DuckDbDialect {})
-        .try_with_sql(sql)
-        .and_then(|mut p| p.parse_expr())
-        .map(Box::new)
-        .unwrap_or_else(|_| {
-            Box::new(Expr::Value(
-                ast::Value::SingleQuotedString(sql.to_string()).into(),
-            ))
-        })
-}
-
-// Tests below stay as-is; they only check that emitted SQL parses round-trip
-// through DuckDbDialect — that invariant is now guaranteed by construction
+// Tests below only check that emitted SQL parses round-trip through
+// DuckDbDialect — that invariant is now guaranteed by construction
 // (we build via sqlparser AST nodes), but the tests still run as a safety net.
 
 #[cfg(test)]
@@ -341,36 +296,6 @@ mod tests {
         });
         let sql = rq_to_query(&rq, &DefaultDialect).to_string();
         validate_duckdb_sql(&sql).expect("project SQL must round-trip");
-    }
-
-    #[test]
-    fn apply_transforms_uses_select_star_replace() {
-        let (mut rq, src, _id, name, _age) = test_rq_parts();
-        let out = rq.alloc_table("cleaned");
-        rq.transforms.push(Transform::ApplyTransforms {
-            input: src,
-            output: out,
-            ops: vec![(name, "TRIM(name)".to_string())],
-        });
-        let sql = rq_to_query(&rq, &DefaultDialect).to_string();
-        assert!(
-            sql.contains("REPLACE"),
-            "ApplyTransforms must use SELECT * REPLACE(...), got: {sql}"
-        );
-        validate_duckdb_sql(&sql).expect("REPLACE SQL must round-trip");
-    }
-
-    #[test]
-    fn apply_transforms_empty_passthrough_round_trips() {
-        let (mut rq, src, ..) = test_rq_parts();
-        let out = rq.alloc_table("passthrough");
-        rq.transforms.push(Transform::ApplyTransforms {
-            input: src,
-            output: out,
-            ops: vec![],
-        });
-        let sql = rq_to_query(&rq, &DefaultDialect).to_string();
-        validate_duckdb_sql(&sql).expect("passthrough SQL must round-trip");
     }
 
     #[test]

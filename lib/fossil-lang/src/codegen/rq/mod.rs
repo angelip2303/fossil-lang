@@ -82,12 +82,6 @@ pub enum Transform {
         output: TableId,
         predicate: Expr,
     },
-    /// Apply attribute transforms (#[clean], #[anon]).
-    ApplyTransforms {
-        input: TableId,
-        output: TableId,
-        ops: Vec<(ColId, String)>, // (column, sql_expression)
-    },
 }
 
 /// External data source in the RQ. Backend-agnostic.
