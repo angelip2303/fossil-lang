@@ -70,10 +70,6 @@ pub enum Token<'a> {
     HashBracket,
     #[token("]")]
     RBracket,
-    #[token("<")]
-    LAngle,
-    #[token(">")]
-    RAngle,
 
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice(), priority = 2)]
     Identifier(&'a str),

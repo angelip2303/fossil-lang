@@ -62,8 +62,6 @@ pub enum ExprKind {
     Application {
         callee: ExprId,
         args: Vec<Argument>,
-        /// Type arguments for generic function calls: `f<Type1, Type2>(args)`
-        type_args: Vec<TypeId>,
     },
     Projection {
         source: ExprId,

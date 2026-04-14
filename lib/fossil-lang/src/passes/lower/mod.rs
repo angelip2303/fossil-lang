@@ -389,31 +389,14 @@ impl<'a> Lowering<'a> {
                 ir_expr_id
             }
 
-            ast::ExprKind::Application { callee, args, type_args } => {
+            ast::ExprKind::Application { callee, args } => {
                 let ir_callee = self.fold_expr(callee, errors);
                 let ir_args = self.fold_args(&args, errors);
-                // Resolve type arguments from AST TypeIds to DefIds
-                let resolved_type_args: Vec<crate::db::DefId> = type_args
-                    .iter()
-                    .filter_map(|ast_type_id| {
-                        let ast_type = &self.ast.types[*ast_type_id];
-                        if let crate::ast::TypeKind::Named(path) = &ast_type.kind {
-                            self.resolve_type_path(path, ast_type.loc, errors)
-                        } else {
-                            errors.push(FossilError::data_error(
-                                "type argument must be a named type",
-                                ast_type.loc,
-                            ));
-                            None
-                        }
-                    })
-                    .collect();
                 self.ir.exprs.alloc(Expr {
                     loc,
                     kind: ExprKind::Application {
                         callee: ir_callee,
                         args: ir_args,
-                        type_args: resolved_type_args,
                     },
                 })
             }
@@ -581,7 +564,6 @@ impl<'a> Lowering<'a> {
                     kind: ExprKind::Application {
                         callee: callee_id,
                         args: ir_args,
-                        type_args: vec![],
                     },
                 })
             }
