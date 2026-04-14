@@ -141,10 +141,11 @@ pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
 /// Sources are NOT registered here — they are resolved directly by lowering
 /// (`ProviderInvocation` → `SourceCall` IR node) without going through DefMap.
 pub(crate) fn register_sinks_in_def_map(db: &dyn Db, def_map: &mut DefMap) {
+    use crate::def_map::Namespace;
     for sink in db.registry().sinks.iter() {
         let ns_sym = Symbol::new(db, &sink.namespace);
         let ns_def = def_map
-            .get_by_symbol(ns_sym)
+            .get_in_ns(ns_sym, Namespace::TypeNS)
             .unwrap_or_else(|| def_map.insert(db, None, ns_sym, DefKindTag::Mod));
         let name_sym = Symbol::new(db, &sink.name);
         def_map.insert(db, Some(ns_def), name_sym, DefKindTag::Let);

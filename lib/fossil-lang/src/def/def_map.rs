@@ -10,24 +10,67 @@ pub enum BuiltInFieldType {
     Optional(PrimitiveType),
 }
 
-/// Map of DefId → field types for provider/user-defined record types.
 pub type RegisteredTypes = HashMap<DefId, Vec<(Symbol, BuiltInFieldType)>>;
-
-/// Map of DefId → type metadata (attributes extracted from AST).
 pub type TypeMetadataMap = HashMap<DefId, TypeMetadata>;
 
-/// Auxiliary index: tracks DefIds by symbol and parent→child relationships.
-///
-/// DefId creation goes through `DefMap::insert(db, ...)` which calls
-/// `DefId::new(db, ...)` (Salsa interning) and updates the local indices.
+/// Three-namespace separation following rustc's `Namespace` enum
+/// (`compiler/rustc_hir/src/def.rs`). `MetaNS` hosts catalog entries
+/// (sources/sinks) so that a user `let csv = 1` and a catalog `csv!(…)`
+/// can coexist without collision.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Namespace {
+    TypeNS,
+    ValueNS,
+    MetaNS,
+}
+
+/// Per-namespace container, mirroring rustc's `PerNS<T>`
+/// (`compiler/rustc_resolve/src/lib.rs`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PerNS<T> {
+    pub type_ns: T,
+    pub value_ns: T,
+    pub meta_ns: T,
+}
+
+impl<T> PerNS<T> {
+    pub fn get(&self, ns: Namespace) -> &T {
+        match ns {
+            Namespace::TypeNS => &self.type_ns,
+            Namespace::ValueNS => &self.value_ns,
+            Namespace::MetaNS => &self.meta_ns,
+        }
+    }
+
+    pub fn get_mut(&mut self, ns: Namespace) -> &mut T {
+        match ns {
+            Namespace::TypeNS => &mut self.type_ns,
+            Namespace::ValueNS => &mut self.value_ns,
+            Namespace::MetaNS => &mut self.meta_ns,
+        }
+    }
+}
+
+impl DefKindTag {
+    /// Natural namespace for this definition kind. Inserts use this so callers
+    /// don't have to thread the namespace through every `def_map.insert(...)`.
+    pub fn namespace(self) -> Namespace {
+        match self {
+            DefKindTag::Type => Namespace::TypeNS,
+            DefKindTag::Let | DefKindTag::RecordConstructor => Namespace::ValueNS,
+            DefKindTag::Mod => Namespace::TypeNS,
+        }
+    }
+}
+
 #[derive(Default, Clone, PartialEq)]
 pub struct DefMap {
-    by_symbol: HashMap<Symbol, Vec<DefId>>,
-    children: HashMap<DefId, HashMap<Symbol, DefId>>,
+    by_symbol: PerNS<HashMap<Symbol, Vec<DefId>>>,
+    children: HashMap<DefId, PerNS<HashMap<Symbol, DefId>>>,
 }
 
 impl DefMap {
-    /// Create or look up a definition, updating the auxiliary indices.
+    /// Insert a definition into its natural namespace (derived from `kind`).
     pub fn insert(
         &mut self,
         db: &dyn Db,
@@ -35,46 +78,76 @@ impl DefMap {
         name: Symbol,
         kind: DefKindTag,
     ) -> DefId {
-        let namespace = parent.and_then(|p| Some(p.name(db)));
+        let ns = kind.namespace();
+        let namespace = parent.map(|p| p.name(db));
         let def_id = DefId::new(db, namespace, name, kind);
-        self.by_symbol.entry(name).or_default().push(def_id);
+        self.by_symbol
+            .get_mut(ns)
+            .entry(name)
+            .or_default()
+            .push(def_id);
         if let Some(parent_id) = parent {
-            self.children.entry(parent_id).or_default().insert(name, def_id);
+            self.children
+                .entry(parent_id)
+                .or_default()
+                .get_mut(ns)
+                .insert(name, def_id);
         }
         def_id
     }
 
-    pub fn get_by_symbol(&self, name: Symbol) -> Option<DefId> {
+    /// Look up a symbol in a specific namespace. Returns the first matching DefId.
+    pub fn get_in_ns(&self, name: Symbol, ns: Namespace) -> Option<DefId> {
         self.by_symbol
+            .get(ns)
             .get(&name)
             .and_then(|ids| ids.first())
             .copied()
     }
 
-    pub fn find_by_symbol(&self, name: Symbol, db: &dyn Db, pred: impl Fn(DefKindTag) -> bool) -> Option<DefId> {
+    /// Find a symbol in a specific namespace matching a predicate over its kind.
+    pub fn find_in_ns(
+        &self,
+        name: Symbol,
+        ns: Namespace,
+        db: &dyn Db,
+        pred: impl Fn(DefKindTag) -> bool,
+    ) -> Option<DefId> {
         self.by_symbol
+            .get(ns)
             .get(&name)?
             .iter()
             .copied()
             .find(|def_id| pred(def_id.kind(db)))
     }
 
-    pub fn resolve(&self, _db: &dyn Db, path: &Path) -> Option<DefId> {
+    /// Resolve a path in a specific namespace. The first segment of a qualified
+    /// path is looked up in `ns`; subsequent segments traverse children.
+    pub fn resolve(&self, _db: &dyn Db, path: &Path, ns: Namespace) -> Option<DefId> {
         match path {
-            Path::Simple(sym) => self.get_by_symbol(*sym),
+            Path::Simple(sym) => self.get_in_ns(*sym, ns),
             Path::Qualified(parts) if parts.is_empty() => None,
             Path::Qualified(parts) => {
-                let current_id = self.get_by_symbol(parts[0])?;
-                let mut current = current_id;
+                let mut current = self.get_in_ns(parts[0], ns)?;
                 for &part in &parts[1..] {
-                    current = *self.children.get(&current)?.get(&part)?;
+                    let children = self.children.get(&current)?;
+                    current = children
+                        .get(Namespace::ValueNS)
+                        .get(&part)
+                        .or_else(|| children.get(Namespace::TypeNS).get(&part))
+                        .or_else(|| children.get(Namespace::MetaNS).get(&part))
+                        .copied()?;
                 }
                 Some(current)
             }
         }
     }
 
-    /// Register a record type with field types, returning its DefId.
+    /// All symbols across all namespaces — used for "did you mean" suggestion lists.
+    pub fn all_symbols_in_ns(&self, ns: Namespace) -> impl Iterator<Item = Symbol> + '_ {
+        self.by_symbol.get(ns).keys().copied()
+    }
+
     pub fn register_record_type(
         &mut self,
         db: &dyn Db,
@@ -82,11 +155,11 @@ impl DefMap {
         name: &str,
         fields: Vec<(&str, BuiltInFieldType)>,
     ) -> DefId {
-        let symbol = Symbol::new(db,name);
+        let symbol = Symbol::new(db, name);
         let def_id = self.insert(db, None, symbol, DefKindTag::Type);
         let interned_fields: Vec<_> = fields
             .into_iter()
-            .map(|(fname, ftype)| (Symbol::new(db,fname), ftype))
+            .map(|(fname, ftype)| (Symbol::new(db, fname), ftype))
             .collect();
         registered_types.insert(def_id, interned_fields);
         def_id

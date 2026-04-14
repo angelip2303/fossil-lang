@@ -313,7 +313,7 @@ impl<'a> Lowering<'a> {
                     }
                     Path::Qualified(parts) => {
                         let ast_path = Path::Qualified(parts.clone());
-                        if let Some(def_id) = self.def_map.resolve(self.db,&ast_path) {
+                        if let Some(def_id) = self.def_map.resolve(self.db, &ast_path, crate::def_map::Namespace::ValueNS) {
                             self.resolutions.expr_defs.insert(ir_expr_id, def_id);
                         } else if parts.len() >= 2
                             && self.scopes.lookup_value(parts[0]).is_some()
@@ -650,6 +650,7 @@ impl<'a> Lowering<'a> {
         &self,
         path: &Path,
         loc: Loc,
+        ns: crate::def_map::Namespace,
         scope_lookup: impl Fn(&ScopeStack, Symbol) -> Option<DefId>,
         make_error: impl Fn(String, Loc) -> FossilError,
         errors: &mut Vec<FossilError>,
@@ -659,7 +660,7 @@ impl<'a> Lowering<'a> {
                 if let Some(def_id) = scope_lookup(&self.scopes, *name) {
                     return Some(def_id);
                 }
-                if let Some(def_id) = self.def_map.resolve(self.db,&Path::Simple(*name)) {
+                if let Some(def_id) = self.def_map.resolve(self.db, &Path::Simple(*name), ns) {
                     return Some(def_id);
                 }
                 errors.push(make_error(name.text(self.db).to_string(), loc));
@@ -667,7 +668,7 @@ impl<'a> Lowering<'a> {
             }
             Path::Qualified(parts) => {
                 let ast_path = Path::Qualified(parts.clone());
-                self.def_map.resolve(self.db,&ast_path).or_else(|| {
+                self.def_map.resolve(self.db, &ast_path, ns).or_else(|| {
                     let path_str = ast_path.display(self.db);
                     errors.push(make_error(path_str, loc));
                     None
@@ -685,6 +686,7 @@ impl<'a> Lowering<'a> {
         self.resolve_path(
             path,
             loc,
+            crate::def_map::Namespace::ValueNS,
             ScopeStack::lookup_value,
             FossilError::undefined_variable,
             errors,
@@ -700,6 +702,7 @@ impl<'a> Lowering<'a> {
         self.resolve_path(
             path,
             loc,
+            crate::def_map::Namespace::TypeNS,
             ScopeStack::lookup_type,
             FossilError::undefined_type,
             errors,

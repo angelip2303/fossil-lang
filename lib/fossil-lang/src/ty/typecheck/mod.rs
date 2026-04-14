@@ -181,9 +181,12 @@ impl<'a> TypeChecker<'a> {
             .keys()
             .filter_map(|&type_def_id| {
                 let type_name = type_def_id.name(self.db);
-                let ctor_def_id = self.def_map.find_by_symbol(type_name, self.db, |k| {
-                    matches!(k, DefKindTag::RecordConstructor)
-                })?;
+                let ctor_def_id = self.def_map.find_in_ns(
+                    type_name,
+                    crate::def_map::Namespace::ValueNS,
+                    self.db,
+                    |k| matches!(k, DefKindTag::RecordConstructor),
+                )?;
                 Some((type_def_id, ctor_def_id))
             })
             .collect();
