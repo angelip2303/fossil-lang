@@ -10,7 +10,6 @@ pub mod error;
 pub mod ir;
 pub mod passes;
 pub mod queries;
-pub mod resolver;
 
 // Back-compat aliases for modules physically migrated into layer directories.
 // Keeps existing `use crate::X::*` imports working without a mass rename.
