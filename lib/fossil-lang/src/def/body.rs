@@ -106,6 +106,11 @@ pub fn file_def_map_for_body(db: &dyn Db, file: SourceFile) -> FileDefMapForBody
     let mut def_map = DefMap::default();
     let mut registered_types = RegisteredTypes::new();
 
+    // Catalog must come first so MetaCall resolution (`csv!`, `parquet!`,
+    // etc.) finds the source/sink DefIds in MetaNS when body lowering
+    // walks a let that references them. The monolithic `lower(file)`
+    // does the same thing in `queries.rs::lower`.
+    crate::queries::register_catalog_in_def_map(db, &mut def_map);
     crate::queries::register_sinks_in_def_map(db, &mut def_map);
     crate::queries::register_meta_call_schemas(
         db,
@@ -792,7 +797,7 @@ pub fn pipeline_rq(db: &dyn Db, loc: PipelineLoc) -> Option<PipelineRqContributi
 mod tests {
     use super::*;
     use crate::db::FossilDb;
-    use crate::def::item_tree::{find_let_by_name, file_item_tree};
+    use crate::def::item_tree::find_let_by_name;
 
     #[test]
     fn let_body_lowers_simple_literal() {
@@ -983,6 +988,46 @@ mod tests {
         assert!(matches!(a_ty.kind(&db), TyKind::Primitive(PrimitiveType::Int)));
         assert!(matches!(b_ty.kind(&db), TyKind::Primitive(PrimitiveType::Int)));
         assert!(matches!(c_ty.kind(&db), TyKind::Primitive(PrimitiveType::String)));
+    }
+
+    #[test]
+    fn let_rq_csv_source_registers_manifest_entry() {
+        // `let users = csv!("users.csv")` should lower to a
+        // `LetRqContribution` carrying one `SourceRef` in the manifest
+        // and an `env_value` pointing at the generated alias.
+        //
+        // Uses a FossilDb pre-registered with the default "csv" source
+        // — this comes from `register_defaults` in the registry builder,
+        // which the default `FossilDb` doesn't invoke. Build a registry
+        // manually.
+        use crate::registry::{FossilRegistry, ParamDef, SourceDef, SourceRegistry};
+
+        let mut sources = SourceRegistry::new();
+        sources.register(SourceDef::new("csv", vec![ParamDef::required("path")]));
+        let registry = FossilRegistry {
+            sources,
+            ..Default::default()
+        };
+        let db = FossilDb::with_registry(registry);
+        let file = SourceFile::new(
+            &db,
+            "let users = csv!(path: \"users.csv\")".into(),
+            "test".into(),
+        );
+        let sym = Symbol::new(&db, "users");
+        let loc = find_let_by_name(&db, file, sym).expect("let exists");
+        let contrib = let_rq(&db, loc).expect("csv let_rq must succeed (per-item path)");
+        assert_eq!(
+            contrib.sources.len(),
+            1,
+            "expected one source in the manifest",
+        );
+        assert_eq!(contrib.sources[0].format, "csv");
+        assert_eq!(contrib.sources[0].path, "users.csv");
+        assert!(
+            contrib.env_value.is_some(),
+            "source let must expose an env value so siblings can reference it",
+        );
     }
 
     #[test]
