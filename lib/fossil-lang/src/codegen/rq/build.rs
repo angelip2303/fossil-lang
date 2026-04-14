@@ -1,12 +1,17 @@
-//! Constructors for `sqlparser::ast::Expr` nodes used by RQ lowering.
+//! Constructors for `sqlparser::ast` nodes used by RQ lowering and SQL
+//! assembly. Every field required by sqlparser 0.58 is populated explicitly
+//! in one place so downstream passes read like relational algebra instead
+//! of struct literals.
 //!
-//! Mirrors DataFusion's `unparser` helpers: small, focused builders that keep
-//! the lowering pass readable and free of `sqlparser::ast::*` boilerplate.
-//! Reference: `datafusion/sql/src/unparser/expr.rs`.
+//! Mirrors DataFusion's `unparser` helpers: small, focused builders.
+//! Reference: `datafusion/sql/src/unparser/expr.rs`,
+//! `datafusion/sql/src/unparser/plan.rs`.
 
+use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::{
-    CastKind, DataType, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
-    FunctionArguments, Ident, ObjectName, ObjectNamePart, Value, ValueWithSpan,
+    self, CastKind, Cte, DataType, Expr, Function, FunctionArg, FunctionArgExpr,
+    FunctionArgumentList, FunctionArguments, Ident, ObjectName, ObjectNamePart, Query, Select,
+    SelectItem, SetExpr, TableAlias, TableFactor, TableWithJoins, Value, ValueWithSpan,
 };
 
 /// Column reference: `col_name`.
@@ -110,5 +115,109 @@ pub fn expr_to_param_string(expr: &Expr) -> Option<String> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+// ── statement-level AST builders ──────────────────────────────────────
+
+pub fn cte(alias: Ident, query: Query) -> Cte {
+    Cte {
+        alias: TableAlias {
+            name: alias,
+            columns: vec![],
+        },
+        query: Box::new(query),
+        from: None,
+        materialized: None,
+        closing_paren_token: AttachedToken::empty(),
+    }
+}
+
+pub fn select_query(
+    projection: Vec<SelectItem>,
+    from: Vec<TableWithJoins>,
+    selection: Option<Expr>,
+) -> Query {
+    query_from_body(SetExpr::Select(Box::new(select_node(
+        projection, from, selection,
+    ))))
+}
+
+pub fn query_from_body(body: SetExpr) -> Query {
+    Query {
+        with: None,
+        body: Box::new(body),
+        order_by: None,
+        limit_clause: None,
+        fetch: None,
+        locks: vec![],
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+        pipe_operators: vec![],
+    }
+}
+
+pub fn select_node(
+    projection: Vec<SelectItem>,
+    from: Vec<TableWithJoins>,
+    selection: Option<Expr>,
+) -> Select {
+    Select {
+        select_token: AttachedToken::empty(),
+        distinct: None,
+        top: None,
+        top_before_distinct: false,
+        projection,
+        exclude: None,
+        into: None,
+        from,
+        lateral_views: vec![],
+        prewhere: None,
+        selection,
+        group_by: ast::GroupByExpr::Expressions(vec![], vec![]),
+        cluster_by: vec![],
+        distribute_by: vec![],
+        sort_by: vec![],
+        having: None,
+        named_window: vec![],
+        qualify: None,
+        window_before_qualify: false,
+        value_table_mode: None,
+        connect_by: None,
+        flavor: ast::SelectFlavor::Standard,
+    }
+}
+
+pub fn twj(relation: TableFactor) -> TableWithJoins {
+    TableWithJoins {
+        relation,
+        joins: vec![],
+    }
+}
+
+pub fn wildcard_default() -> ast::WildcardAdditionalOptions {
+    ast::WildcardAdditionalOptions::default()
+}
+
+pub fn wildcard_item() -> SelectItem {
+    SelectItem::Wildcard(wildcard_default())
+}
+
+/// `FROM <name>` — a plain catalog-resolved table name. Whether `name`
+/// points at a host-registered view, a preprocessed temp table, or an
+/// upstream CTE is none of fossil-lang's concern.
+pub fn table_ref(name: &Ident) -> TableFactor {
+    TableFactor::Table {
+        name: ObjectName(vec![ObjectNamePart::Identifier(name.clone())]),
+        alias: None,
+        args: None,
+        with_hints: vec![],
+        version: None,
+        with_ordinality: false,
+        partitions: vec![],
+        json_path: None,
+        sample: None,
+        index_hints: vec![],
     }
 }

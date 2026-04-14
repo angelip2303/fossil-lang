@@ -28,12 +28,14 @@
 //! where to write the graph). These have no sqlparser equivalent.
 
 pub mod build;
-pub mod to_ast;
 pub mod lower;
 
 use std::collections::HashMap;
 
-use sqlparser::ast::{Cte, Expr, Ident};
+use sqlparser::ast::helpers::attached_token::AttachedToken;
+use sqlparser::ast::{Cte, Expr, Ident, Query, SelectItem, SetExpr, With};
+
+use build::{query_from_body, select_node, table_ref, twj, wildcard_item};
 
 /// A complete relational query produced by lowering the Fossil IR.
 ///
@@ -90,5 +92,120 @@ pub struct OutputDecl {
 impl RelationalQuery {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Assemble the final `sqlparser::ast::Query`. Emits
+    /// `WITH <ctes> SELECT * FROM <last_cte>` when the RQ has any CTE,
+    /// or `SELECT 1` as a non-zero placeholder when it is empty.
+    /// Callers obtain the SQL string via `.to_string()`.
+    pub fn to_query(&self) -> Query {
+        let Some(last) = self.ctes.last() else {
+            return placeholder_select_one();
+        };
+        let outer = select_node(
+            vec![wildcard_item()],
+            vec![twj(table_ref(&last.alias.name))],
+            None,
+        );
+        let mut q = query_from_body(SetExpr::Select(Box::new(outer)));
+        q.with = Some(With {
+            with_token: AttachedToken::empty(),
+            recursive: false,
+            cte_tables: self.ctes.clone(),
+        });
+        q
+    }
+}
+
+/// Back-compat free function: forwards to [`RelationalQuery::to_query`].
+pub fn rq_to_query(rq: &RelationalQuery) -> Query {
+    rq.to_query()
+}
+
+pub fn validate_duckdb_sql(sql: &str) -> Result<Vec<sqlparser::ast::Statement>, String> {
+    use sqlparser::{dialect::DuckDbDialect, parser::Parser};
+    Parser::parse_sql(&DuckDbDialect {}, sql).map_err(|e| e.to_string())
+}
+
+pub fn expr_to_sql(expr: &Expr) -> String {
+    expr.to_string()
+}
+
+fn placeholder_select_one() -> Query {
+    query_from_body(SetExpr::Select(Box::new(select_node(
+        vec![SelectItem::UnnamedExpr(Expr::Value(
+            sqlparser::ast::Value::Number("1".into(), false).into(),
+        ))],
+        vec![],
+        None,
+    ))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rq::build;
+
+    #[test]
+    fn empty_rq_is_placeholder() {
+        let rq = RelationalQuery::new();
+        let sql = rq.to_query().to_string();
+        validate_duckdb_sql(&sql).expect("placeholder SQL must round-trip");
+    }
+
+    #[test]
+    fn sql_references_sources_by_name_only() {
+        // Simulate a lowering that registered a source and emitted one CTE
+        // whose body references it by alias.
+        let mut rq = RelationalQuery::new();
+        rq.sources.push(SourceRef {
+            alias: Ident::new("src_csv_1"),
+            format: "csv".into(),
+            path: "data.csv".into(),
+            params: Default::default(),
+        });
+        let body = select_node(
+            vec![wildcard_item()],
+            vec![twj(table_ref(&Ident::new("src_csv_1")))],
+            None,
+        );
+        let cte_query = query_from_body(SetExpr::Select(Box::new(body)));
+        rq.ctes.push(build::cte(Ident::new("persons_1"), cte_query));
+        let sql = rq.to_query().to_string();
+        validate_duckdb_sql(&sql).expect("emitted SQL must round-trip");
+        assert!(sql.contains("src_csv_1"));
+        assert!(sql.contains("persons_1"));
+        // No `read_csv`: source resolution is host-side.
+        assert!(!sql.contains("read_csv"));
+    }
+
+    #[test]
+    fn expr_helpers_emit_expected_sql() {
+        assert_eq!(
+            expr_to_sql(&build::coalesce(
+                build::col("x"),
+                build::string_lit("default"),
+            )),
+            "COALESCE(x, 'default')",
+        );
+        assert_eq!(
+            expr_to_sql(&build::concat(vec![
+                build::string_lit("http://example.org/"),
+                build::cast_varchar(build::col("id")),
+            ])),
+            "CONCAT('http://example.org/', CAST(id AS VARCHAR))",
+        );
+        assert_eq!(
+            expr_to_sql(&build::func(
+                "SHA256",
+                vec![build::cast_varchar(build::col("email"))],
+            )),
+            "SHA256(CAST(email AS VARCHAR))",
+        );
+        assert_eq!(expr_to_sql(&build::null_lit()), "NULL");
+        assert_eq!(
+            expr_to_sql(&build::is_null(build::col("v"), true)),
+            "v IS NOT NULL",
+        );
     }
 }

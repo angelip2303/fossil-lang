@@ -104,8 +104,7 @@ impl FossilPlan {
     /// from the lowered RQ; the SQL is emitted by stringifying the
     /// sqlparser AST.
     pub fn from_rq(rq: RelationalQuery) -> Self {
-        use crate::rq::to_ast::rq_to_query;
-        let sql = rq_to_query(&rq).to_string();
+        let sql = rq.to_query().to_string();
 
         let sources = rq
             .sources

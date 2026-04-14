@@ -3,7 +3,7 @@
 //! Owns:
 //! - `RelationalQuery` — lowered CTEs (sqlparser AST) + source manifest.
 //! - `FossilPlan` — the serializable host-facing compiled artifact.
-//! - `rq::to_ast::rq_to_query` — assembles the final `sqlparser::ast::Query`;
+//! - `RelationalQuery::to_query` — assembles the final `sqlparser::ast::Query`;
 //!   callers stringify via `.to_string()`.
 //! - `validate_duckdb_sql` — round-trip safety net.
 //!
@@ -15,5 +15,5 @@ pub mod plan;
 pub mod rq;
 
 pub use plan::{EntityProjection, FieldMapping, FossilPlan, OutputDef, OutputResult, SourceDef};
-pub use rq::to_ast::{expr_to_sql, rq_to_query, validate_duckdb_sql};
+pub use rq::{expr_to_sql, rq_to_query, validate_duckdb_sql};
 pub use rq::{build, EmissionDecl, OutputDecl, RelationalQuery, SourceRef};

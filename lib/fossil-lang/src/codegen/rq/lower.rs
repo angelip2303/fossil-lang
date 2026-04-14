@@ -11,10 +11,9 @@
 
 use std::collections::HashMap;
 
-use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::{
-    self, BinaryOperator, Cte, Expr, Ident, Join, JoinConstraint, JoinOperator, Query, Select,
-    SelectItem, SetExpr, TableAlias, TableFactor, TableWithJoins,
+    self, BinaryOperator, Expr, Ident, Join, JoinConstraint, JoinOperator, SelectItem,
+    TableWithJoins,
 };
 
 use crate::db::Db;
@@ -25,7 +24,10 @@ use crate::error::FossilError;
 use crate::ir::{ExprId, ExprKind, Ir, Resolutions};
 use crate::ty::typecheck::TypeIndex;
 use crate::registry::SourceDef;
-use crate::rq::{build, EmissionDecl, OutputDecl, RelationalQuery, SourceRef};
+use crate::rq::{
+    build::{self, cte, select_query, table_ref, twj, wildcard_item},
+    EmissionDecl, OutputDecl, RelationalQuery, SourceRef,
+};
 
 /// Internal value during lowering — NOT part of the final RQ.
 #[derive(Clone, Debug)]
@@ -259,11 +261,7 @@ impl<'a> RqLowering<'a> {
                         join_operator: JoinOperator::Inner(JoinConstraint::On(on_expr)),
                     }],
                 }];
-                let query = select_query(
-                    vec![SelectItem::Wildcard(wildcard_default())],
-                    from,
-                    None,
-                );
+                let query = select_query(vec![wildcard_item()], from, None);
                 self.rq.ctes.push(cte(output.clone(), query));
                 Ok(RqValue::Table(output))
             }
@@ -553,107 +551,6 @@ impl<'a> RqLowering<'a> {
     fn next_table(&mut self, prefix: &str) -> Ident {
         self.table_counter += 1;
         Ident::new(format!("{}_{}", prefix, self.table_counter))
-    }
-}
-
-// ── sqlparser AST builders ─────────────────────────────────────────────
-//
-// Small constructors that assemble the sqlparser node trees. Every field
-// required by sqlparser 0.58 has to be populated explicitly — these
-// helpers centralise the boilerplate so the lowering above reads like
-// relational algebra rather than struct literals.
-
-fn cte(alias: Ident, query: Query) -> Cte {
-    Cte {
-        alias: TableAlias {
-            name: alias,
-            columns: vec![],
-        },
-        query: Box::new(query),
-        from: None,
-        materialized: None,
-        closing_paren_token: AttachedToken::empty(),
-    }
-}
-
-fn select_query(
-    projection: Vec<SelectItem>,
-    from: Vec<TableWithJoins>,
-    selection: Option<Expr>,
-) -> Query {
-    Query {
-        with: None,
-        body: Box::new(SetExpr::Select(Box::new(select_node(
-            projection, from, selection,
-        )))),
-        order_by: None,
-        limit_clause: None,
-        fetch: None,
-        locks: vec![],
-        for_clause: None,
-        settings: None,
-        format_clause: None,
-        pipe_operators: vec![],
-    }
-}
-
-fn select_node(
-    projection: Vec<SelectItem>,
-    from: Vec<TableWithJoins>,
-    selection: Option<Expr>,
-) -> Select {
-    Select {
-        select_token: AttachedToken::empty(),
-        distinct: None,
-        top: None,
-        top_before_distinct: false,
-        projection,
-        exclude: None,
-        into: None,
-        from,
-        lateral_views: vec![],
-        prewhere: None,
-        selection,
-        group_by: ast::GroupByExpr::Expressions(vec![], vec![]),
-        cluster_by: vec![],
-        distribute_by: vec![],
-        sort_by: vec![],
-        having: None,
-        named_window: vec![],
-        qualify: None,
-        window_before_qualify: false,
-        value_table_mode: None,
-        connect_by: None,
-        flavor: ast::SelectFlavor::Standard,
-    }
-}
-
-fn twj(relation: TableFactor) -> TableWithJoins {
-    TableWithJoins {
-        relation,
-        joins: vec![],
-    }
-}
-
-fn wildcard_default() -> ast::WildcardAdditionalOptions {
-    ast::WildcardAdditionalOptions::default()
-}
-
-/// Build a `FROM <name>` table reference (a plain catalog-resolved name,
-/// whether it points at a host-registered view, a preprocessed temp table,
-/// or an upstream CTE is none of fossil-lang's concern).
-fn table_ref(name: &Ident) -> TableFactor {
-    TableFactor::Table {
-        name: ast::ObjectName(vec![ast::ObjectNamePart::Identifier(name.clone())]),
-        alias: None,
-        args: None,
-        with_hints: vec![],
-        version: None,
-        with_ordinality: false,
-        partitions: vec![],
-        json_path: None,
-        sample: None,
-        index_hints: vec![],
     }
 }
 
