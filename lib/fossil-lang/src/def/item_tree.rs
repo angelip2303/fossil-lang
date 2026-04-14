@@ -5,10 +5,9 @@
 //! When editing inside a body, the ItemTree of the file is unchanged,
 //! so downstream queries keyed by ItemLoc remain cached.
 //!
-//! Today the ItemTree is built alongside the existing lowering pass.
-//! A future refactor can route per-item queries (let_body, typeck_let,
-//! rq_of_let) through ItemLoc-interned IDs for full per-item granularity
-//! (see plan: smooth-strolling-mccarthy.md issues #15-#17).
+//! Per-item bodies already route through `def/body.rs::let_body` etc.
+//! Typecheck and RQ lowering still operate per-file today — unifying them
+//! around `let_body(loc)` is the remaining integration step.
 
 use crate::ast::{Ast, StmtKind};
 use crate::db::{Db, SourceFile, Symbol};

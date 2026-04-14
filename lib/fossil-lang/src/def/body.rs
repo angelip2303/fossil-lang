@@ -16,7 +16,7 @@
 //!         │
 //!         ▼
 //!     file_def_map_for_body(file) ← pre-builds DefMap with ALL top-level
-//!         │                          symbols + provider schemas + sinks
+//!         │                          symbols + meta-call schemas + sinks
 //!         │
 //!         ├──▶ let_body(LetLoc)         ┐
 //!         ├──▶ type_decl_body(TypeDeclLoc) ├── per-item, isolated, cacheable
@@ -63,7 +63,7 @@ pub struct HirBody {
 /// File-level scaffolding consumed by every per-item body query.
 ///
 /// Built once per file by [`file_def_map_for_body`]. Contains every top-level
-/// definition (lets, types, sinks, provider-resolved record types) so that
+/// definition (lets, types, sinks, meta-call resolved record types) so that
 /// individual body queries don't need to re-run the file pre-scan.
 #[derive(Clone, PartialEq)]
 pub struct FileDefMapForBody {
@@ -141,19 +141,13 @@ pub fn file_def_map_for_body(db: &dyn Db, file: SourceFile) -> FileDefMapForBody
     }
 }
 
-/// Salsa query: lower a single `let` body in isolation.
-///
-/// Cached on `(file, idx)` — the structural fields of a `LetLoc`. A body-only
-/// edit to one let invalidates only this query for that one `(file, idx)`
-/// pair; sibling lets, the ItemTree, and the `file_def_map_for_body` query
-/// stay cached.
-///
-/// Salsa query parameters must be `salsa::Update` types (currently `SourceFile`,
-/// `Symbol`, `usize`, etc.), so we use the structural fields directly rather
-/// than wrapping `LetLoc` in `#[salsa::interned]` — that would introduce a
-/// `'db` lifetime through the public API of `def/item_tree.rs`. The
-/// [`let_body_at`] convenience wrapper accepts a `LetLoc` for callers that
-/// already have one.
+/// Salsa query: lower a single `let` body in isolation. Cached on `(file, idx)`
+/// — sibling lets, the ItemTree, and `file_def_map_for_body` stay cached
+/// across body-only edits.
+//
+// Future refactor: promote `LetLoc` to `#[salsa::interned]` via the
+// lifetime-free wrapper pattern (`Ty(salsa::Id)` precedent) and let this
+// query take `LetLoc` directly instead of destructuring its fields.
 #[salsa::tracked(returns(ref))]
 pub fn let_body_query(db: &dyn Db, file: SourceFile, idx: usize) -> HirBody {
     let ast = parse(db, file);
