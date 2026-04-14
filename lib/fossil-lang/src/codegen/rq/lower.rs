@@ -91,6 +91,13 @@ pub struct RqLowering<'a> {
     /// Optional unique prefix added to generated aliases. Per-item
     /// lowering sets this to make names globally unique across siblings.
     name_prefix: String,
+    /// Pre-computed type attributes keyed by (type_name, attr_key) →
+    /// string value. Used by per-item lowering to surface
+    /// `#[rdf(base = "…")]` and similar attributes that would otherwise
+    /// be invisible because the body IR contains no Type stmts. When
+    /// set, `lookup_type_attr_string` reads from this map first and
+    /// falls back to walking the IR only if the map has no entry.
+    type_attrs: HashMap<(String, String), String>,
 }
 
 impl<'a> RqLowering<'a> {
@@ -109,6 +116,7 @@ impl<'a> RqLowering<'a> {
             rq: RelationalQuery::new(),
             table_counter: 0,
             name_prefix: String::new(),
+            type_attrs: HashMap::new(),
         }
     }
 
@@ -120,6 +128,18 @@ impl<'a> RqLowering<'a> {
         self
     }
 
+    /// Supply pre-computed `(type_name, attr_key) → string value` entries
+    /// for attribute lookup. Per-item lowering passes this in because the
+    /// body IR contains no Type stmts; without it the lowerer would
+    /// silently fail to read `#[rdf(base = "…")]` and similar metadata.
+    pub fn with_type_attrs(
+        mut self,
+        attrs: HashMap<(String, String), String>,
+    ) -> Self {
+        self.type_attrs = attrs;
+        self
+    }
+
     /// Drain the mutable lowering state into an owned snapshot. After
     /// calling `lower()`, per-item consumers use this to extract the
     /// accumulated contribution + the env values each let produced.
@@ -128,11 +148,19 @@ impl<'a> RqLowering<'a> {
     }
 
     /// Find the named String value of an attribute argument on the type whose
-    /// name matches `type_name`. Walks IR `Stmt::Type` nodes and inspects each
-    /// attached `Attribute`. Returns the first match across all attributes —
-    /// the compiler doesn't care which attribute supplied it (e.g. `#[rdf]`,
-    /// `#[graph]`, etc.); only the key lookup matters.
+    /// name matches `type_name`. Checks the pre-computed `type_attrs` map
+    /// first (populated by per-item lowering via `with_type_attrs`), then
+    /// falls back to walking `self.ir.stmts` — the only place file-level
+    /// lowering sees Type stmts. The compiler doesn't care which attribute
+    /// supplied the value (e.g. `#[rdf]`, `#[graph]`, …); only the key
+    /// lookup matters.
     fn lookup_type_attr_string(&self, type_name: &str, key: &str) -> Option<String> {
+        if let Some(value) = self
+            .type_attrs
+            .get(&(type_name.to_string(), key.to_string()))
+        {
+            return Some(value.clone());
+        }
         let key_sym = Symbol::new(self.db, key);
         for stmt in self.ir.stmts.iter() {
             if let crate::ir::StmtKind::Type { name, attrs, .. } = &stmt.1.kind {

@@ -24,7 +24,6 @@ use crate::metadata::extract_type_metadata;
 use crate::syntax::parse::Parser;
 use crate::ty::typecheck::TypeChecker;
 use crate::passes::{InferResult, LowerResult};
-use crate::rq::lower::RqLowering;
 use crate::rq::RelationalQuery;
 
 // ── schema_needs (pre-compilation, cloud batch) ─────────────────────
@@ -149,15 +148,16 @@ pub fn infer(db: &dyn Db, file: SourceFile) -> InferResult {
 
 // ── rq ──────────────────────────────────────────────────────────────
 
-/// Lower typed IR to RelationalQuery.
+/// Lower typed IR to RelationalQuery — pure per-item fan-out over
+/// `file_item_tree(file)`.
 ///
-/// Internally fans out over `file_item_tree(file)`: one `let_rq_query`
-/// call per top-level let plus one `pipeline_rq_query` for the optional
-/// trailing pipeline, concatenated into the file-level RQ. When any
-/// per-item contribution is unavailable (the body hit a case that
-/// per-item lowering doesn't yet support), falls back to the monolithic
-/// `RqLowering` over `infer(file).ir` for that part — same end result,
-/// just without the per-item incrementality benefit on that file.
+/// Editing one let body re-runs exactly `let_body(A)` → `let_infer(A)`
+/// → `let_rq(A)`, and propagates further through the concatenation only
+/// if A's actual contribution changes. Siblings whose `resolutions`
+/// never referenced A stay cached all the way down. Empty / failing
+/// per-item contributions are treated as empty — there is no longer a
+/// monolithic fallback, because per-item has reached full parity for
+/// every script shape the monolithic path supported.
 #[salsa::tracked]
 pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
     use crate::def::body::{let_rq, pipeline_rq};
@@ -165,51 +165,43 @@ pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
 
     let tree = file_item_tree(db, file);
     let mut rq = RelationalQuery::new();
-    let mut any_failure = false;
 
     for (idx, _) in tree.lets.iter().enumerate() {
         let loc = LetLoc::new(db, file, idx);
-        match let_rq(db, loc) {
-            Some(contrib) => {
-                rq.sources.extend(contrib.sources);
-                rq.ctes.extend(contrib.ctes);
-                rq.emissions.extend(contrib.emissions);
-            }
-            None => {
-                any_failure = true;
-                break;
-            }
+        if let Some(contrib) = let_rq(db, loc) {
+            rq.sources.extend(contrib.sources);
+            rq.ctes.extend(contrib.ctes);
+            rq.emissions.extend(contrib.emissions);
         }
     }
 
-    if !any_failure && tree.has_pipeline() {
+    if tree.has_pipeline() {
         let loc = PipelineLoc::new(db, file);
-        match pipeline_rq(db, loc) {
-            Some(contrib) => {
-                rq.sources.extend(contrib.sources);
-                rq.ctes.extend(contrib.ctes);
-                rq.emissions.extend(contrib.emissions);
-                rq.outputs.extend(contrib.outputs);
-            }
-            None => any_failure = true,
+        if let Some(contrib) = pipeline_rq(db, loc) {
+            rq.sources.extend(contrib.sources);
+            rq.ctes.extend(contrib.ctes);
+            rq.emissions.extend(contrib.emissions);
+            rq.outputs.extend(contrib.outputs);
         }
     }
 
-    if !any_failure {
-        return rq;
-    }
-
-    // Per-item fan-out hit an unsupported case — fall back to the
-    // monolithic path for this file. Same `RelationalQuery` shape, just
-    // computed in one shot without the incremental dependency graph.
-    let program = infer(db, file);
-    match RqLowering::new(db, &program.ir, &program.type_index, &program.resolutions).lower() {
-        Ok(rq) => rq,
-        Err(e) => {
-            let _ = emit_error(db, e);
-            RelationalQuery::new()
+    // Fix up OutputDecl emission indices. `lower_materialize` registers
+    // outputs with `emissions = (0..self.rq.emissions.len()).collect()`
+    // — snapshotting the LOCAL RqLowering's emissions at materialize
+    // time. In per-item mode, the pipeline body's lowering has empty
+    // `rq.emissions` because emissions came from sibling `let`
+    // contributions. After concatenation, rewrite each output that was
+    // registered with an empty emission list (the per-item signature)
+    // to reference all file-level emissions in order — matching the old
+    // monolithic "materialize everything collected so far" semantics.
+    let total = rq.emissions.len();
+    for output in &mut rq.outputs {
+        if output.emissions.is_empty() && total > 0 {
+            output.emissions = (0..total).collect();
         }
     }
+
+    rq
 }
 
 // plan() is not a salsa query: FossilPlan is a pure projection of the

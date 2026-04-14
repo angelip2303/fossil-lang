@@ -604,9 +604,11 @@ fn build_per_item_rq_ctx(
 ) -> Option<(
     HashMap<Symbol, RqValue>,
     crate::ty::typecheck::TypeIndex,
+    HashMap<(String, String), String>,
 )> {
     let mut env: HashMap<Symbol, RqValue> = HashMap::new();
     let mut type_index = crate::ty::typecheck::TypeIndex::default();
+    let mut type_attrs: HashMap<(String, String), String> = HashMap::new();
 
     let referenced: std::collections::HashSet<DefId> =
         body.resolutions.expr_defs.values().copied().collect();
@@ -645,6 +647,7 @@ fn build_per_item_rq_ctx(
                     return None;
                 };
                 type_index.insert(def_id, result.info);
+                collect_type_attrs(db, scaffold, def_id, &mut type_attrs);
             }
             DefKindTag::RecordConstructor => {
                 let ctor_name = def_id.name(db);
@@ -668,12 +671,40 @@ fn build_per_item_rq_ctx(
                     return None;
                 };
                 type_index.insert(type_def_id, result.info);
+                collect_type_attrs(db, scaffold, type_def_id, &mut type_attrs);
             }
             _ => {}
         }
     }
 
-    Some((env, type_index))
+    Some((env, type_index, type_attrs))
+}
+
+/// Extract `(type_name, attr_key) → string_value` entries from the
+/// scaffold's pre-computed `pending_type_metadata` and push them into
+/// `out`. Used by per-item RQ lowering to surface `#[rdf(base = "…")]`
+/// and similar type attributes that the body IR never sees directly.
+fn collect_type_attrs(
+    db: &dyn Db,
+    scaffold: &FileDefMapForBody,
+    type_def_id: DefId,
+    out: &mut HashMap<(String, String), String>,
+) {
+    let type_name = type_def_id.name(db);
+    let Some(metadata) = scaffold.pending_type_metadata.get(&type_name) else {
+        return;
+    };
+    let name_str = type_name.text(db).to_string();
+    for attr in &metadata.type_attributes {
+        for (key, value) in &attr.args {
+            if let crate::ast::Literal::String(s) = value {
+                out.insert(
+                    (name_str.clone(), key.text(db).to_string()),
+                    s.text(db).to_string(),
+                );
+            }
+        }
+    }
 }
 
 /// Salsa query: lower a single top-level `let` body to its RQ
@@ -696,7 +727,7 @@ pub fn let_rq_query<'db>(
     let scaffold = file_def_map_for_body(db, file);
     let this_let_def_id = scaffold.top_level_lets.get(this_idx).map(|(_, did)| *did);
 
-    let (env, type_index) =
+    let (env, type_index, type_attrs) =
         build_per_item_rq_ctx(db, body, scaffold, file, this_let_def_id)?;
 
     // Body IR needs `ir.root` populated with the single stmt so
@@ -711,8 +742,9 @@ pub fn let_rq_query<'db>(
 
     // RqLowering holds references with a 'a lifetime, so we feed it
     // locally-owned state that outlives the call.
-    let mut lowering =
-        RqLowering::new(db, &ir, &type_index, &resolutions).with_name_prefix(prefix);
+    let mut lowering = RqLowering::new(db, &ir, &type_index, &resolutions)
+        .with_name_prefix(prefix)
+        .with_type_attrs(type_attrs);
     lowering.env = env;
 
     let lowered = match lowering.lower() {
@@ -765,14 +797,16 @@ pub fn pipeline_rq_query<'db>(
     let body = pipeline_body_query(db, loc).as_ref()?;
     let scaffold = file_def_map_for_body(db, file);
 
-    let (env, type_index) = build_per_item_rq_ctx(db, body, scaffold, file, None)?;
+    let (env, type_index, type_attrs) =
+        build_per_item_rq_ctx(db, body, scaffold, file, None)?;
 
     let mut ir = body.ir.clone();
     ir.root = vec![body.root_stmt];
 
     let resolutions = body.resolutions.clone();
     let mut lowering = RqLowering::new(db, &ir, &type_index, &resolutions)
-        .with_name_prefix("pipeline".to_string());
+        .with_name_prefix("pipeline".to_string())
+        .with_type_attrs(type_attrs);
     lowering.env = env;
     let lowered = match lowering.lower() {
         Ok(rq) => rq,
