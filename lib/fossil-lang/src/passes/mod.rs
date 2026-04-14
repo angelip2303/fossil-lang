@@ -3,9 +3,6 @@ use crate::ir;
 use crate::ty::typecheck::{TypeIndex, TypeckResults};
 
 pub mod lower;
-// Back-compat alias: `passes::typecheck` → `ty::typecheck` after the migration
-// that moved the typecheck module into the `ty/` layer directory.
-pub use crate::ty::typecheck;
 
 /// Result of type-checking: only the new artifacts produced by the checker.
 /// `def_map`, `registered_types`, `type_metadata` are read from earlier queries.

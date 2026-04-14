@@ -9,10 +9,9 @@
 //!   lower → infer
 //!   infer → rq → plan
 //!
-//! The registry is now a field of `FossilDb` (no global state).
-//! Sinks are registered as DefMap entries during lower; sources are NOT in
-//! DefMap — they are resolved directly via `db.registry().sources` by the
-//! lowering and RQ phases.
+//! The registry is now a field of `FossilDb` (no global state). Both
+//! sources and sinks live in the DefMap under `Namespace::MetaNS`, so
+//! lookup is uniform with other name resolution paths.
 
 use crate::ast::Ast;
 use crate::common::PrimitiveType;
@@ -23,7 +22,7 @@ use crate::error::emit_error;
 use crate::def_map::{BuiltInFieldType, DefMap, Namespace, PerNS, RegisteredTypes};
 use crate::metadata::extract_type_metadata;
 use crate::syntax::parse::Parser;
-use crate::passes::typecheck::TypeChecker;
+use crate::ty::typecheck::TypeChecker;
 use crate::passes::{InferResult, LowerResult};
 use crate::rq::lower::RqLowering;
 use crate::rq::RelationalQuery;
