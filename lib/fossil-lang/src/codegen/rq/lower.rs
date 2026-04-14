@@ -551,20 +551,28 @@ impl<'a> RqLowering<'a> {
         &mut self,
         args: &[crate::ir::Argument],
     ) -> Result<RqValue, FossilError> {
-        // First arg: emission, second arg: path
-        let path = args
-            .get(1)
-            .or(args.first())
-            .and_then(|a| {
-                let val = self.lower_expr(a.value()).ok()?;
-                match val {
-                    RqValue::Expr(e) => build::expr_string_lit(&e).map(|s| s.to_string()),
-                    _ => None,
-                }
+        // Every arg must be lowered for its side effects — projections
+        // register emissions via `self.rq.emissions.push(...)` as they
+        // walk. The previous implementation only lowered one arg to
+        // extract the path string, so emission-producing args were
+        // silently dropped from the output. Walk all args, keep the
+        // lowered values, then scan them for the first string-literal
+        // path.
+        let mut lowered: Vec<RqValue> = Vec::with_capacity(args.len());
+        for arg in args {
+            lowered.push(self.lower_expr(arg.value())?);
+        }
+        let path = lowered
+            .iter()
+            .find_map(|v| match v {
+                RqValue::Expr(e) => build::expr_string_lit(e).map(|s| s.to_string()),
+                _ => None,
             })
             .unwrap_or_else(|| "output/".to_string());
 
-        // Register output pointing to existing emissions
+        // Register output pointing to every emission accumulated up
+        // to this point. The file-level fan-out in `queries::rq` may
+        // further rewrite this list when merging per-item contributions.
         let emission_indices: Vec<usize> = (0..self.rq.emissions.len()).collect();
         self.rq.outputs.push(OutputDecl {
             emissions: emission_indices,

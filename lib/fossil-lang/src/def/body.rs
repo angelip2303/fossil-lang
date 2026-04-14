@@ -1114,6 +1114,23 @@ users
         assert_eq!(rq.sources[0].format, "csv");
         assert_eq!(rq.sources[0].path, "users.csv");
 
+        // Projection emits a User entity — `lower_materialize` now
+        // walks every arg (not just a path candidate), so emissions
+        // registered by the projection arg reach the file-level RQ.
+        assert!(
+            !rq.emissions.is_empty(),
+            "projection must register an emission",
+        );
+        assert_eq!(rq.emissions[0].type_name, "User");
+
+        // `#[rdf(base = "https://kanzo.dev/")]` surfaces through the
+        // subject_template via `RqLowering::with_type_attrs`.
+        let subject_sql = rq.emissions[0].subject_template.to_string();
+        assert!(
+            subject_sql.contains("https://kanzo.dev/"),
+            "subject template must pick up the #[rdf(base)] attribute, got: {subject_sql}",
+        );
+
         // `Rdf.materialize(...)` resolved successfully — sink lookup
         // traversed `TypeNS[Rdf] → ValueNS[materialize]` thanks to the
         // qualified-path fallback. Previously this failed silently and
@@ -1124,6 +1141,15 @@ users
         );
         assert_eq!(rq.outputs[0].format, "graphar");
         assert_eq!(rq.outputs[0].path, "out/");
+
+        // The output's emissions list must be non-empty after the
+        // file-level fix-up (which rewrites empty lists to reference
+        // all file-level emissions for the "materialize everything
+        // collected so far" semantics).
+        assert!(
+            !rq.outputs[0].emissions.is_empty(),
+            "output emissions list must be non-empty after fix-up",
+        );
     }
 
     #[test]
