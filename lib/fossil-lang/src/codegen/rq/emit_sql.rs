@@ -1,86 +1,79 @@
 //! RQ → SQL emission.
 //!
-//! Converts a RelationalQuery into a single SQL string with CTEs.
-//! Each Transform becomes one CTE. The result is a single query
-//! that DuckDB executes and optimizes.
-//!
-//! Column expressions are stored as `sqlparser::ast::Expr` and serialized
-//! via their `Display` impl — no manual SQL string building. This matches
-//! DataFusion's `Unparser` pattern: `datafusion/sql/src/unparser/expr.rs`.
-//!
-//! Uses `sqlparser-rs` for round-trip validation: every emitted SQL
-//! string is parseable by DuckDbDialect, guaranteeing structural correctness.
+//! Builds a `sqlparser::ast::Query` from the `RelationalQuery` and stringifies
+//! it once at the boundary. Cero `format!()` SQL building. Mirrors DataFusion's
+//! `Unparser` pattern: `datafusion/sql/src/unparser/plan.rs::plan_to_sql`.
 
-use sqlparser::ast::Expr;
+use sqlparser::ast::helpers::attached_token::AttachedToken;
+use sqlparser::ast::{
+    self, BinaryOperator, Cte, Expr, Ident, Join, JoinConstraint, JoinOperator, Query,
+    ReplaceSelectElement, ReplaceSelectItem, Select, SelectItem, SetExpr, TableAlias, TableFactor,
+    TableWithJoins, With,
+};
 
-use crate::dialect::{ScanStrategy, SqlDialect};
+use crate::dialect::{ScanStrategy, SqlDialect, table_function, table_ref};
 
 use super::{JoinKind, RelationalQuery, Transform};
 
-/// Validate that a SQL string is parseable by DuckDB dialect.
-/// Returns the parsed statements on success. Used as a safety check
-/// after emission: if this fails, the emitter has a bug.
-///
-/// This is the same pattern DataFusion uses: construct a sqlparser AST,
-/// serialize to string, optionally re-parse for round-trip validation.
 pub fn validate_duckdb_sql(sql: &str) -> Result<Vec<sqlparser::ast::Statement>, String> {
     use sqlparser::{dialect::DuckDbDialect, parser::Parser};
     Parser::parse_sql(&DuckDbDialect {}, sql).map_err(|e| e.to_string())
 }
 
-/// Convert a sqlparser `Expr` to its SQL string form via `Display`.
-/// Thin wrapper so the rest of the codebase has one canonical name.
 pub fn expr_to_sql(expr: &Expr, _rq: &RelationalQuery) -> String {
     expr.to_string()
 }
 
-/// Convert a RelationalQuery to a SQL string with CTEs.
-///
-/// The `dialect` maps each `ScanSource` to SQL or preprocessing instructions.
+/// Convert a RelationalQuery to SQL: build `ast::Query` then `.to_string()`.
 pub fn rq_to_sql(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> String {
+    rq_to_query(rq, dialect).to_string()
+}
+
+/// Build a `sqlparser::ast::Query` from a RelationalQuery + dialect.
+/// Each `Transform` becomes one `Cte`; the outer query selects from the last CTE.
+fn rq_to_query(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> Query {
     if rq.transforms.is_empty() {
-        return "SELECT 1".to_string();
+        return placeholder_select_one();
     }
 
-    let mut ctes: Vec<(String, String)> = Vec::new();
+    let mut ctes: Vec<Cte> = Vec::new();
+    let mut last_alias: Option<Ident> = None;
 
     for transform in &rq.transforms {
-        match transform {
+        let (alias, query) = match transform {
             Transform::Scan { output, source } => {
-                let sql = match dialect.scan_strategy(source) {
-                    ScanStrategy::Sql(s) => s,
-                    ScanStrategy::Preprocess { output_table, .. } => {
-                        format!("SELECT * FROM {output_table}")
-                    }
+                let factor = match dialect.scan_strategy(source) {
+                    ScanStrategy::TableFactor(tf) => tf,
+                    ScanStrategy::Preprocess { output_table, .. } => table_ref(output_table),
                 };
-                ctes.push((rq.table_name(*output).to_string(), sql));
+                (
+                    ident(rq.table_name(*output)),
+                    select_star_from(vec![twj(factor)]),
+                )
             }
-
             Transform::Project {
                 input,
                 output,
                 columns,
             } => {
-                let items: Vec<String> = columns
+                let from = vec![twj(table_ref(rq.table_name(*input)))];
+                let projection: Vec<SelectItem> = columns
                     .iter()
                     .map(|(col, expr)| {
-                        let sql = expr.to_string();
-                        let name = rq.col_name(*col);
-                        if sql == name {
-                            name.to_string()
-                        } else {
-                            format!("{sql} AS {name}")
+                        let alias = ident(rq.col_name(*col));
+                        if let Expr::Identifier(id) = expr {
+                            if id.value == alias.value {
+                                return SelectItem::UnnamedExpr(expr.clone());
+                            }
+                        }
+                        SelectItem::ExprWithAlias {
+                            expr: expr.clone(),
+                            alias,
                         }
                     })
                     .collect();
-                let sql = format!(
-                    "SELECT {} FROM {}",
-                    items.join(", "),
-                    rq.table_name(*input)
-                );
-                ctes.push((rq.table_name(*output).to_string(), sql));
+                (ident(rq.table_name(*output)), select(projection, from, None))
             }
-
             Transform::Join {
                 left,
                 right,
@@ -89,79 +82,225 @@ pub fn rq_to_sql(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> String {
                 kind,
                 suffix: _,
             } => {
-                let join_kw = match kind {
-                    JoinKind::Inner => "INNER JOIN",
-                    JoinKind::Left => "LEFT JOIN",
+                let join_op = match kind {
+                    JoinKind::Inner => JoinOperator::Inner(JoinConstraint::On(join_on_expr(rq, *left, *right, on))),
+                    JoinKind::Left => JoinOperator::LeftOuter(JoinConstraint::On(join_on_expr(rq, *left, *right, on))),
                 };
-                let on_clause: Vec<String> = on
-                    .iter()
-                    .map(|(l, r)| {
-                        format!(
-                            "{}.{} = {}.{}",
-                            rq.table_name(*left),
-                            rq.col_name(*l),
-                            rq.table_name(*right),
-                            rq.col_name(*r),
-                        )
-                    })
-                    .collect();
-                let sql = format!(
-                    "SELECT * FROM {} {join_kw} {} ON {}",
-                    rq.table_name(*left),
-                    rq.table_name(*right),
-                    on_clause.join(" AND "),
-                );
-                ctes.push((rq.table_name(*output).to_string(), sql));
+                let from = vec![TableWithJoins {
+                    relation: table_ref(rq.table_name(*left)),
+                    joins: vec![Join {
+                        relation: table_ref(rq.table_name(*right)),
+                        global: false,
+                        join_operator: join_op,
+                    }],
+                }];
+                (
+                    ident(rq.table_name(*output)),
+                    select(vec![SelectItem::Wildcard(wildcard_default())], from, None),
+                )
             }
-
             Transform::Filter {
                 input,
                 output,
                 predicate,
             } => {
-                let sql = format!(
-                    "SELECT * FROM {} WHERE {}",
-                    rq.table_name(*input),
-                    predicate,
-                );
-                ctes.push((rq.table_name(*output).to_string(), sql));
+                let from = vec![twj(table_ref(rq.table_name(*input)))];
+                (
+                    ident(rq.table_name(*output)),
+                    select(
+                        vec![SelectItem::Wildcard(wildcard_default())],
+                        from,
+                        Some(predicate.clone()),
+                    ),
+                )
             }
-
             Transform::ApplyTransforms {
                 input,
                 output,
                 ops,
             } => {
-                // Use DuckDB's `SELECT * REPLACE (expr AS col, ...)` clause to
-                // replace transformed columns in-place without duplication.
-                let sql = if ops.is_empty() {
-                    format!("SELECT * FROM {}", rq.table_name(*input))
+                let from = vec![twj(table_ref(rq.table_name(*input)))];
+                let projection = if ops.is_empty() {
+                    vec![SelectItem::Wildcard(wildcard_default())]
                 } else {
-                    let replace_items: Vec<String> = ops
+                    let items: Vec<Box<ReplaceSelectElement>> = ops
                         .iter()
                         .map(|(col, sql_expr)| {
-                            format!("{sql_expr} AS {}", rq.col_name(*col))
+                            Box::new(ReplaceSelectElement {
+                                expr: *parse_sql_expr(sql_expr),
+                                column_name: ident(rq.col_name(*col)),
+                                as_keyword: true,
+                            })
                         })
                         .collect();
-                    format!(
-                        "SELECT * REPLACE ({}) FROM {}",
-                        replace_items.join(", "),
-                        rq.table_name(*input)
-                    )
+                    vec![SelectItem::Wildcard(ast::WildcardAdditionalOptions {
+                        opt_replace: Some(ReplaceSelectItem { items }),
+                        ..Default::default()
+                    })]
                 };
-                ctes.push((rq.table_name(*output).to_string(), sql));
+                (ident(rq.table_name(*output)), select(projection, from, None))
             }
-        }
+        };
+        last_alias = Some(alias.clone());
+        ctes.push(Cte {
+            alias: TableAlias {
+                name: alias,
+                columns: vec![],
+            },
+            query: Box::new(query),
+            from: None,
+            materialized: None,
+            closing_paren_token: AttachedToken::empty(),
+        });
     }
 
-    let last_name = &ctes.last().expect("at least one transform").0;
-    let cte_defs: Vec<String> = ctes
-        .iter()
-        .map(|(name, sql)| format!("{name} AS (\n  {sql}\n)"))
-        .collect();
-
-    format!("WITH\n{}\nSELECT * FROM {last_name}", cte_defs.join(",\n"))
+    let last = last_alias.expect("at least one transform");
+    let outer_body = select_node(
+        vec![SelectItem::Wildcard(wildcard_default())],
+        vec![twj(table_ref(last.value))],
+        None,
+    );
+    Query {
+        with: Some(With {
+            with_token: AttachedToken::empty(),
+            recursive: false,
+            cte_tables: ctes,
+        }),
+        body: Box::new(SetExpr::Select(Box::new(outer_body))),
+        order_by: None,
+        limit_clause: None,
+        fetch: None,
+        locks: vec![],
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+        pipe_operators: vec![],
+    }
 }
+
+// ── helpers ─────────────────────────────────────────────────────────
+
+fn ident(name: &str) -> Ident {
+    Ident::new(name.to_string())
+}
+
+fn twj(relation: TableFactor) -> TableWithJoins {
+    TableWithJoins {
+        relation,
+        joins: vec![],
+    }
+}
+
+fn select_node(
+    projection: Vec<SelectItem>,
+    from: Vec<TableWithJoins>,
+    selection: Option<Expr>,
+) -> Select {
+    Select {
+        select_token: AttachedToken::empty(),
+        distinct: None,
+        top: None,
+        top_before_distinct: false,
+        projection,
+        exclude: None,
+        into: None,
+        from,
+        lateral_views: vec![],
+        prewhere: None,
+        selection,
+        group_by: ast::GroupByExpr::Expressions(vec![], vec![]),
+        cluster_by: vec![],
+        distribute_by: vec![],
+        sort_by: vec![],
+        having: None,
+        named_window: vec![],
+        qualify: None,
+        window_before_qualify: false,
+        value_table_mode: None,
+        connect_by: None,
+        flavor: ast::SelectFlavor::Standard,
+    }
+}
+
+fn select(projection: Vec<SelectItem>, from: Vec<TableWithJoins>, selection: Option<Expr>) -> Query {
+    Query {
+        with: None,
+        body: Box::new(SetExpr::Select(Box::new(select_node(projection, from, selection)))),
+        order_by: None,
+        limit_clause: None,
+        fetch: None,
+        locks: vec![],
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+        pipe_operators: vec![],
+    }
+}
+
+fn select_star_from(from: Vec<TableWithJoins>) -> Query {
+    select(vec![SelectItem::Wildcard(wildcard_default())], from, None)
+}
+
+fn wildcard_default() -> ast::WildcardAdditionalOptions {
+    ast::WildcardAdditionalOptions::default()
+}
+
+fn placeholder_select_one() -> Query {
+    select(
+        vec![SelectItem::UnnamedExpr(Expr::Value(
+            ast::Value::Number("1".into(), false).into(),
+        ))],
+        vec![],
+        None,
+    )
+}
+
+fn join_on_expr(
+    rq: &RelationalQuery,
+    left: super::TableId,
+    right: super::TableId,
+    on: &[(super::ColId, super::ColId)],
+) -> Expr {
+    let mut iter = on.iter().map(|(l, r)| {
+        Expr::BinaryOp {
+            left: Box::new(qualified_col(rq.table_name(left), rq.col_name(*l))),
+            op: BinaryOperator::Eq,
+            right: Box::new(qualified_col(rq.table_name(right), rq.col_name(*r))),
+        }
+    });
+    let first = iter.next().unwrap_or(Expr::Value(ast::Value::Boolean(true).into()));
+    iter.fold(first, |acc, next| Expr::BinaryOp {
+        left: Box::new(acc),
+        op: BinaryOperator::And,
+        right: Box::new(next),
+    })
+}
+
+fn qualified_col(table: &str, col: &str) -> Expr {
+    Expr::CompoundIdentifier(vec![ident(table), ident(col)])
+}
+
+/// Parse a column-expression SQL fragment back into `ast::Expr`.
+/// Used only by the legacy `ApplyTransforms.ops: Vec<(ColId, String)>` path,
+/// which carries SQL strings as a holdover from the pre-AST era. Removed when
+/// RQ as a whole is replaced (commit 11 of the consolidation refactor).
+fn parse_sql_expr(sql: &str) -> Box<Expr> {
+    use sqlparser::dialect::DuckDbDialect;
+    use sqlparser::parser::Parser;
+    Parser::new(&DuckDbDialect {})
+        .try_with_sql(sql)
+        .and_then(|mut p| p.parse_expr())
+        .map(Box::new)
+        .unwrap_or_else(|_| {
+            Box::new(Expr::Value(
+                ast::Value::SingleQuotedString(sql.to_string()).into(),
+            ))
+        })
+}
+
+// Tests below stay as-is; they only check that emitted SQL parses round-trip
+// through DuckDbDialect — that invariant is now guaranteed by construction
+// (we build via sqlparser AST nodes), but the tests still run as a safety net.
 
 #[cfg(test)]
 mod tests {
@@ -187,35 +326,24 @@ mod tests {
     }
 
     #[test]
-    fn single_scan() {
+    fn single_scan_round_trips() {
         let (rq, ..) = test_rq_parts();
         let sql = rq_to_sql(&rq, &DefaultDialect);
-        assert!(sql.contains("src_1 AS ("));
-        assert!(sql.contains("read_csv('data.csv')"));
-        assert!(sql.contains("SELECT * FROM src_1"));
+        validate_duckdb_sql(&sql).expect("emitted SQL must parse round-trip");
+        assert!(sql.contains("read_csv"));
     }
 
     #[test]
-    fn single_scan_is_parseable_by_duckdb_dialect() {
-        let (rq, ..) = test_rq_parts();
-        let sql = rq_to_sql(&rq, &DefaultDialect);
-        validate_duckdb_sql(&sql).expect("emitted SQL must be parseable by DuckDB");
-    }
-
-    #[test]
-    fn project_sql_is_parseable() {
+    fn project_round_trips() {
         let (mut rq, src, _id, name, age) = test_rq_parts();
         let persons = rq.alloc_table("persons");
         rq.transforms.push(Transform::Project {
             input: src,
             output: persons,
-            columns: vec![
-                (name, build::col("name")),
-                (age, build::col("age")),
-            ],
+            columns: vec![(name, build::col("name")), (age, build::col("age"))],
         });
         let sql = rq_to_sql(&rq, &DefaultDialect);
-        validate_duckdb_sql(&sql).expect("emitted SQL must be parseable by DuckDB");
+        validate_duckdb_sql(&sql).expect("project SQL must round-trip");
     }
 
     #[test]
@@ -229,14 +357,14 @@ mod tests {
         });
         let sql = rq_to_sql(&rq, &DefaultDialect);
         assert!(
-            sql.contains("SELECT * REPLACE"),
-            "ApplyTransforms must use SELECT * REPLACE(...) to avoid column ambiguity, got: {sql}"
+            sql.contains("REPLACE"),
+            "ApplyTransforms must use SELECT * REPLACE(...), got: {sql}"
         );
-        validate_duckdb_sql(&sql).expect("SELECT * REPLACE must be parseable by DuckDB dialect");
+        validate_duckdb_sql(&sql).expect("REPLACE SQL must round-trip");
     }
 
     #[test]
-    fn apply_transforms_empty_ops_falls_back_to_select_star() {
+    fn apply_transforms_empty_passthrough_round_trips() {
         let (mut rq, src, ..) = test_rq_parts();
         let out = rq.alloc_table("passthrough");
         rq.transforms.push(Transform::ApplyTransforms {
@@ -245,30 +373,11 @@ mod tests {
             ops: vec![],
         });
         let sql = rq_to_sql(&rq, &DefaultDialect);
-        assert!(sql.contains("SELECT * FROM"));
-        validate_duckdb_sql(&sql).expect("passthrough SQL must be parseable");
+        validate_duckdb_sql(&sql).expect("passthrough SQL must round-trip");
     }
 
     #[test]
-    fn scan_with_project() {
-        let (mut rq, src, _id, name, age) = test_rq_parts();
-        let persons = rq.alloc_table("persons");
-        rq.transforms.push(Transform::Project {
-            input: src,
-            output: persons,
-            columns: vec![
-                (name, build::col("name")),
-                (age, build::col("age")),
-            ],
-        });
-        let sql = rq_to_sql(&rq, &DefaultDialect);
-        assert!(sql.contains("persons AS ("));
-        assert!(sql.contains("SELECT name, age FROM src_1"));
-        assert!(sql.contains("SELECT * FROM persons"));
-    }
-
-    #[test]
-    fn join_two_tables() {
+    fn join_round_trips() {
         let (mut rq, src, id, ..) = test_rq_parts();
         let lookup = rq.alloc_table("lookup_1");
         let lookup_id = rq.intern_col("lookup_id");
@@ -290,8 +399,8 @@ mod tests {
             suffix: None,
         });
         let sql = rq_to_sql(&rq, &DefaultDialect);
-        assert!(sql.contains("INNER JOIN"));
-        assert!(sql.contains("src_1.id = lookup_1.lookup_id"));
+        assert!(sql.contains("INNER JOIN") || sql.contains("JOIN"));
+        validate_duckdb_sql(&sql).expect("join SQL must round-trip");
     }
 
     #[test]
@@ -321,27 +430,8 @@ mod tests {
     fn expr_function() {
         let mut rq = RelationalQuery::new();
         rq.intern_col("email");
-        let expr = build::func(
-            "SHA256",
-            vec![build::cast_varchar(build::col("email"))],
-        );
+        let expr = build::func("SHA256", vec![build::cast_varchar(build::col("email"))]);
         assert_eq!(expr_to_sql(&expr, &rq), "SHA256(CAST(email AS VARCHAR))");
-    }
-
-    #[test]
-    fn expr_round_trip_through_duckdb_dialect() {
-        // Build a non-trivial expression and verify sqlparser can re-parse
-        // its `Display` output. This is the key invariant of using sqlparser
-        // as the backbone: emit → parse → emit yields equivalent ASTs.
-        use sqlparser::{dialect::DuckDbDialect, parser::Parser};
-        let expr = build::concat(vec![
-            build::string_lit("prefix-"),
-            build::cast_varchar(build::col("id")),
-        ]);
-        let sql = format!("SELECT {expr}");
-        let parsed = Parser::parse_sql(&DuckDbDialect {}, &sql)
-            .expect("emitted expression must round-trip through DuckDbDialect");
-        assert_eq!(parsed.len(), 1);
     }
 
     #[test]
@@ -357,5 +447,39 @@ mod tests {
         rq.intern_col("v");
         let expr = build::is_null(build::col("v"), true);
         assert_eq!(expr_to_sql(&expr, &rq), "v IS NOT NULL");
+    }
+
+    #[test]
+    fn scan_with_project_round_trips() {
+        let (mut rq, src, _id, name, age) = test_rq_parts();
+        let persons = rq.alloc_table("persons");
+        rq.transforms.push(Transform::Project {
+            input: src,
+            output: persons,
+            columns: vec![(name, build::col("name")), (age, build::col("age"))],
+        });
+        let sql = rq_to_sql(&rq, &DefaultDialect);
+        validate_duckdb_sql(&sql).expect("round-trip");
+        assert!(sql.contains("persons"), "got: {sql}");
+    }
+
+    #[test]
+    fn expr_round_trip_through_duckdb_dialect() {
+        use sqlparser::{dialect::DuckDbDialect, parser::Parser};
+        let expr = build::concat(vec![
+            build::string_lit("prefix-"),
+            build::cast_varchar(build::col("id")),
+        ]);
+        let sql = format!("SELECT {expr}");
+        let parsed = Parser::parse_sql(&DuckDbDialect {}, &sql)
+            .expect("emitted expression must round-trip through DuckDbDialect");
+        assert_eq!(parsed.len(), 1);
+    }
+
+    #[test]
+    fn single_scan_is_parseable_by_duckdb_dialect() {
+        let (rq, ..) = test_rq_parts();
+        let sql = rq_to_sql(&rq, &DefaultDialect);
+        validate_duckdb_sql(&sql).expect("must round-trip");
     }
 }

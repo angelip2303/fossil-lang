@@ -108,7 +108,7 @@ impl FossilPlan {
                             schema: vec![],
                             params: source.params.clone(),
                         }),
-                        ScanStrategy::Sql(_) => None,
+                        ScanStrategy::TableFactor(_) => None,
                     }
                 } else {
                     None
