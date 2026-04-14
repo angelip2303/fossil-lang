@@ -496,6 +496,35 @@ pub fn let_infer(db: &dyn Db, loc: LetLoc) -> Option<Ty> {
     let_infer_query(db, loc.to_interned(db))
 }
 
+/// File-level salsa query: every top-level let's inferred type, keyed by
+/// its `DefId`. Implemented as a fan-out over per-item `let_infer` — the
+/// only salsa dependency is `file_item_tree` plus one `let_infer` edge
+/// per let. Editing one let body only invalidates this aggregate when
+/// that let's own inferred type actually changes; siblings that didn't
+/// reference the edited body don't re-run at all.
+///
+/// Primary consumer: IDE hover / completion. Answers "what is the type
+/// of `foo`?" without ever touching the monolithic `infer(file)` pipeline.
+#[salsa::tracked(returns(ref))]
+pub fn file_binding_types(
+    db: &dyn Db,
+    file: SourceFile,
+) -> std::collections::HashMap<DefId, Ty> {
+    let tree = file_item_tree(db, file);
+    let scaffold = file_def_map_for_body(db, file);
+    let mut out = std::collections::HashMap::with_capacity(tree.lets.len());
+    for (idx, _) in tree.lets.iter().enumerate() {
+        let Some((_, def_id)) = scaffold.top_level_lets.get(idx) else {
+            continue;
+        };
+        let loc = LetLoc::new(db, file, idx);
+        if let Some(ty) = let_infer(db, loc) {
+            out.insert(*def_id, ty);
+        }
+    }
+    out
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -655,6 +684,43 @@ mod tests {
             is_named_point || is_two_field_record,
             "expected Named(Point) or Record {{x,y}}, got {kind:?}",
         );
+    }
+
+    #[test]
+    fn file_binding_types_aggregates_all_lets() {
+        use crate::ty::types::TyKind;
+        use crate::base::common::PrimitiveType;
+        let db = FossilDb::default();
+        let file = SourceFile::new(
+            &db,
+            "let a = 1\nlet b = a\nlet c = \"hello\"".into(),
+            "test".into(),
+        );
+        let binding_types = file_binding_types(&db, file);
+
+        // Look up each let's type via its DefId.
+        let a_sym = Symbol::new(&db, "a");
+        let b_sym = Symbol::new(&db, "b");
+        let c_sym = Symbol::new(&db, "c");
+        let scaffold = file_def_map_for_body(&db, file);
+        let find_def = |sym: Symbol| {
+            scaffold
+                .top_level_lets
+                .iter()
+                .find(|(s, _)| *s == sym)
+                .map(|(_, did)| *did)
+        };
+        let a_did = find_def(a_sym).expect("a def id");
+        let b_did = find_def(b_sym).expect("b def id");
+        let c_did = find_def(c_sym).expect("c def id");
+
+        let a_ty = binding_types.get(&a_did).expect("a type");
+        let b_ty = binding_types.get(&b_did).expect("b type");
+        let c_ty = binding_types.get(&c_did).expect("c type");
+
+        assert!(matches!(a_ty.kind(&db), TyKind::Primitive(PrimitiveType::Int)));
+        assert!(matches!(b_ty.kind(&db), TyKind::Primitive(PrimitiveType::Int)));
+        assert!(matches!(c_ty.kind(&db), TyKind::Primitive(PrimitiveType::String)));
     }
 
     #[test]
