@@ -68,12 +68,12 @@ pub struct EntityProjection {
     pub identity_columns: Vec<String>,
 }
 
-/// Maps an RDF field to a SQL expression.
+/// Maps an RDF field to a SQL expression. Types come from the DuckDB result
+/// set at runtime — fossil-lang does not duplicate them in the plan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldMapping {
     pub field_name: String,
     pub sql_expr: String,
-    pub data_type: String,
 }
 
 /// Result of executing an output step.
@@ -128,7 +128,6 @@ impl FossilPlan {
                             .map(|(name, col)| FieldMapping {
                                 field_name: name.clone(),
                                 sql_expr: rq.col_name(*col).to_string(),
-                                data_type: "unknown".into(), // type not yet propagated
                             })
                             .collect(),
                         identity_columns: e
