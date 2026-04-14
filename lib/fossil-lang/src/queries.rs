@@ -18,9 +18,9 @@ use crate::ast::Ast;
 use crate::common::PrimitiveType;
 #[allow(unused_imports)] // trait must be in scope for method resolution
 use crate::db::HasRegistry;
-use crate::db::{Db, DefKindTag, Diagnostic, Severity, SourceFile, Symbol};
+use crate::db::{CatalogOrigin, Db, DefId, DefKindTag, Diagnostic, Severity, SourceFile, Symbol};
 use crate::error::emit_error;
-use crate::def_map::{BuiltInFieldType, DefMap, RegisteredTypes};
+use crate::def_map::{BuiltInFieldType, DefMap, Namespace, PerNS, RegisteredTypes};
 use crate::metadata::extract_type_metadata;
 use crate::syntax::parse::Parser;
 use crate::passes::typecheck::TypeChecker;
@@ -42,6 +42,42 @@ pub struct SchemaRequest {
 pub fn schema_needs(db: &dyn Db, file: SourceFile) -> Vec<SchemaRequest> {
     let ast = parse(db, file);
     find_provider_calls_from_ast(db, &ast)
+}
+
+// ── catalog_def_ids ─────────────────────────────────────────────────
+
+/// Stable DefIds for every entry in the registry's source/sink catalog.
+/// Memoized by the registry contents — invalidated only when the host mutates
+/// the registry, not by user code edits.
+#[salsa::tracked]
+pub fn catalog_def_ids(db: &dyn Db) -> CatalogDefIds {
+    let mut per_ns: PerNS<std::collections::HashMap<Symbol, DefId>> = PerNS::default();
+    for source in db.registry().sources.iter() {
+        let name = Symbol::new(db, &source.name);
+        let def_id = DefId::new(
+            db,
+            None,
+            name,
+            DefKindTag::Catalog { origin: CatalogOrigin::Source },
+        );
+        per_ns.get_mut(Namespace::MetaNS).insert(name, def_id);
+    }
+    for sink in db.registry().sinks.iter() {
+        let name = Symbol::new(db, &sink.name);
+        let def_id = DefId::new(
+            db,
+            Some(Symbol::new(db, &sink.namespace)),
+            name,
+            DefKindTag::Catalog { origin: CatalogOrigin::Sink },
+        );
+        per_ns.get_mut(Namespace::MetaNS).insert(name, def_id);
+    }
+    CatalogDefIds { per_ns }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogDefIds {
+    pub per_ns: PerNS<std::collections::HashMap<Symbol, DefId>>,
 }
 
 // ── parse ───────────────────────────────────────────────────────────
@@ -362,6 +398,35 @@ mod tests {
     fn default_db_has_rdf_materialize_sink() {
         let db = FossilDb::default();
         assert!(db.registry().sinks.find("Rdf", "materialize").is_some());
+    }
+
+    #[test]
+    fn catalog_def_ids_includes_registered_sinks() {
+        let db = FossilDb::default();
+        let catalog = catalog_def_ids(&db);
+        let materialize = Symbol::new(&db, "materialize");
+        let entry = catalog
+            .per_ns
+            .get(Namespace::MetaNS)
+            .get(&materialize)
+            .copied();
+        let def_id = entry.expect("Rdf.materialize sink must be in catalog MetaNS");
+        assert!(matches!(
+            def_id.kind(&db),
+            DefKindTag::Catalog { origin: CatalogOrigin::Sink }
+        ));
+    }
+
+    #[test]
+    fn catalog_def_ids_meta_ns_does_not_collide_with_value_ns() {
+        let db = FossilDb::default();
+        let mut def_map = DefMap::default();
+        let csv_sym = Symbol::new(&db, "csv");
+        // user binding csv lives in ValueNS
+        def_map.insert(&db, None, csv_sym, DefKindTag::Let);
+        // catalog csv would live in MetaNS — they must not collide
+        assert!(def_map.get_in_ns(csv_sym, Namespace::ValueNS).is_some());
+        assert!(def_map.get_in_ns(csv_sym, Namespace::MetaNS).is_none());
     }
 
     #[test]

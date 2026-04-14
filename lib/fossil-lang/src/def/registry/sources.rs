@@ -44,25 +44,30 @@ pub struct SourceDef {
     pub params: Vec<ParamDef>,
     /// Static schema, or `None` if the host resolves it via `HasSchemaResolver`.
     pub schema: Option<Vec<(String, String)>>,
+    /// DuckDB table function name (e.g. "read_csv", "read_parquet").
+    /// When set, lowering emits `format_function(path, ...)` as `ast::TableFactor::TableFunction`.
+    pub duckdb_function: Option<String>,
+    /// Host-side preprocess handler name (e.g. "pdf_extract").
+    /// When set, lowering emits a reference to a temp table the host materializes.
+    pub preprocess_handler: Option<String>,
 }
 
 impl SourceDef {
-    /// Constructor that accepts string-like name (handles `.into()` internally).
     pub fn new(name: impl Into<String>, params: Vec<ParamDef>) -> Self {
         Self {
             name: name.into(),
             params,
             schema: None,
+            duckdb_function: None,
+            preprocess_handler: None,
         }
     }
 
-    /// Builder: attach a static schema (column name + sql type pairs).
     pub fn with_schema(mut self, schema: Vec<(String, String)>) -> Self {
         self.schema = Some(schema);
         self
     }
 
-    /// Convenience: build schema from `&[(&str, &str)]` slices, no manual `.into()`.
     pub fn with_schema_pairs(self, pairs: &[(&str, &str)]) -> Self {
         self.with_schema(
             pairs
@@ -70,6 +75,16 @@ impl SourceDef {
                 .map(|(n, t)| (n.to_string(), t.to_string()))
                 .collect(),
         )
+    }
+
+    pub fn with_duckdb_function(mut self, fn_name: impl Into<String>) -> Self {
+        self.duckdb_function = Some(fn_name.into());
+        self
+    }
+
+    pub fn with_preprocess_handler(mut self, handler: impl Into<String>) -> Self {
+        self.preprocess_handler = Some(handler.into());
+        self
     }
 }
 

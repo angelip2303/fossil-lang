@@ -26,7 +26,7 @@ pub enum Namespace {
 
 /// Per-namespace container, mirroring rustc's `PerNS<T>`
 /// (`compiler/rustc_resolve/src/lib.rs`).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PerNS<T> {
     pub type_ns: T,
     pub value_ns: T,
@@ -52,13 +52,12 @@ impl<T> PerNS<T> {
 }
 
 impl DefKindTag {
-    /// Natural namespace for this definition kind. Inserts use this so callers
-    /// don't have to thread the namespace through every `def_map.insert(...)`.
     pub fn namespace(self) -> Namespace {
         match self {
             DefKindTag::Type => Namespace::TypeNS,
             DefKindTag::Let | DefKindTag::RecordConstructor => Namespace::ValueNS,
             DefKindTag::Mod => Namespace::TypeNS,
+            DefKindTag::Catalog { .. } => Namespace::MetaNS,
         }
     }
 }

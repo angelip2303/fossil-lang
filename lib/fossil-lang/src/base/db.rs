@@ -190,6 +190,15 @@ pub enum DefKindTag {
     Let,
     Type,
     RecordConstructor,
+    /// Catalog entries (sources/sinks) registered by the host. Live in MetaNS,
+    /// resolved by `MetaCall` syntax (`csv!(...)`).
+    Catalog { origin: CatalogOrigin },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CatalogOrigin {
+    Source,
+    Sink,
 }
 
 #[salsa::interned]
