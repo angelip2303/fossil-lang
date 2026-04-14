@@ -258,6 +258,131 @@ fn lower_one(
     }
 }
 
+// ── Per-item inference ────────────────────────────────────────────────
+//
+// `let_infer_query` is the per-item counterpart to the monolithic
+// `queries::infer(file)`. It runs type inference over a single let body
+// and returns that let's binding type, reading cross-body references via
+// recursive salsa queries: each referenced top-level let triggers a
+// recursive `let_infer` call, which populates the checker's environment
+// before the body is walked.
+//
+// This gives real per-item caching: editing the body of `let a = ...`
+// only re-runs `let_infer(A)` and any transitively-dependent siblings,
+// not the whole file.
+//
+// **Scope of this first cut**: lets whose bodies only reference
+// primitives and other top-level lets. Bodies that construct
+// user-defined records (`User(id: "x")`) or call type constructors
+// still need type_decl pre-population, which is the next incremental
+// step. For those bodies, `let_infer` returns `None` and callers should
+// fall back to the file-level `infer(file)` query.
+
+use crate::ty::types::{Polytype, Ty};
+use crate::ty::typecheck::TypeChecker;
+
+/// Salsa query: infer the type of a single top-level `let` binding.
+/// Returns `None` for bodies that touch type declarations (records,
+/// constructors) that `let_infer` does not yet resolve on its own.
+#[salsa::tracked]
+pub fn let_infer_query<'db>(db: &'db dyn Db, loc: InternedLetLoc<'db>) -> Option<Ty> {
+    let file = loc.file(db);
+    let this_idx = loc.idx(db);
+    let body = let_body_query(db, loc);
+    let scaffold = file_def_map_for_body(db, file);
+
+    // Short-circuit: bodies that declare or reference user-defined types
+    // require a populated `type_index` in TypeChecker, which this query
+    // does not yet build. Detect that case up-front and bail so the caller
+    // can fall back to the monolithic file-level `infer`.
+    if body_touches_types(db, body) {
+        return None;
+    }
+
+    // Build a TypeChecker-ready IR: the body's arenas + a single-stmt root.
+    // `lower_item_body` does not push anything into `ir.root`; the root_stmt
+    // is returned separately. We populate root here so TypeChecker's
+    // `check_tolerant` walk sees exactly this body's stmt.
+    let mut ir = body.ir.clone();
+    ir.root = vec![body.root_stmt];
+
+    let mut checker = TypeChecker::new(
+        db,
+        ir,
+        scaffold.def_map.clone(),
+        scaffold.registered_types.clone(),
+        body.resolutions.clone(),
+    );
+
+    // Pre-populate env with sibling let types. Walk resolutions for
+    // referenced top-level let DefIds, find their LetLoc, and recursively
+    // call `let_infer`. Each recursive call establishes a salsa dependency,
+    // so editing sibling A's body invalidates `let_infer(B)` only when B
+    // actually referenced A.
+    let this_let_def_id = scaffold
+        .top_level_lets
+        .get(this_idx)
+        .map(|(_, did)| *did);
+    let referenced: std::collections::HashSet<DefId> =
+        body.resolutions.expr_defs.values().copied().collect();
+    for def_id in referenced {
+        if Some(def_id) == this_let_def_id {
+            continue;
+        }
+        if !matches!(def_id.kind(db), DefKindTag::Let) {
+            continue;
+        }
+        let Some(sibling_idx) = scaffold
+            .top_level_lets
+            .iter()
+            .position(|(_, did)| *did == def_id)
+        else {
+            continue;
+        };
+        let sibling_loc = LetLoc::new(db, file, sibling_idx);
+        if let Some(sibling_ty) = let_infer(db, sibling_loc) {
+            checker.env.insert(def_id, Polytype::mono(sibling_ty));
+        } else {
+            // Sibling itself bailed out — we can't type-check this body
+            // without its type. Bail and let the caller fall back.
+            return None;
+        }
+    }
+
+    let result = checker.check();
+    this_let_def_id
+        .and_then(|did| result.typeck_results.binding_types.get(&did).copied())
+}
+
+/// Convenience wrapper: accepts a lifetime-free [`LetLoc`] and forwards
+/// to the salsa-tracked `let_infer_query`.
+pub fn let_infer(db: &dyn Db, loc: LetLoc) -> Option<Ty> {
+    let_infer_query(db, loc.to_interned(db))
+}
+
+/// Conservative "does this body need a populated type_index?" check.
+/// Returns `true` if the body contains `RecordInstance`, `Projection`,
+/// `Join`, `Ref`, or resolves any identifier to a non-`Let` DefId.
+/// When this returns `true`, `let_infer` bails and the caller must
+/// fall back to the monolithic `infer(file)` query.
+fn body_touches_types(db: &dyn Db, body: &HirBody) -> bool {
+    for (_, expr) in body.ir.exprs.iter() {
+        match &expr.kind {
+            crate::ir::ExprKind::RecordInstance { .. }
+            | crate::ir::ExprKind::Projection { .. }
+            | crate::ir::ExprKind::Join { .. }
+            | crate::ir::ExprKind::Ref { .. } => return true,
+            _ => {}
+        }
+    }
+    for &def_id in body.resolutions.expr_defs.values() {
+        if !matches!(def_id.kind(db), DefKindTag::Let) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +472,60 @@ mod tests {
         let b2 = let_body(&db, loc);
         // Pointer equality via returns(ref): same cached HirBody.
         assert!(std::ptr::eq(b1, b2));
+    }
+
+    #[test]
+    fn let_infer_primitive_literal() {
+        let db = FossilDb::default();
+        let file = SourceFile::new(&db, "let x = 42".into(), "test".into());
+        let sym = Symbol::new(&db, "x");
+        let loc = find_let_by_name(&db, file, sym).expect("let exists");
+        let ty = let_infer(&db, loc).expect("primitive-typed let must infer");
+        let kind = ty.kind(&db);
+        use crate::ty::types::{TyKind};
+        use crate::base::common::PrimitiveType;
+        assert!(
+            matches!(kind, TyKind::Primitive(PrimitiveType::Int)),
+            "got: {kind:?}",
+        );
+    }
+
+    #[test]
+    fn let_infer_cross_body_reference() {
+        // `let b = a` must infer the same type as `a`, which means
+        // `let_infer(b)` had to reach the salsa-memoized `let_infer(a)`.
+        let db = FossilDb::default();
+        let file = SourceFile::new(&db, "let a = 1\nlet b = a".into(), "test".into());
+        let b_sym = Symbol::new(&db, "b");
+        let b_loc = find_let_by_name(&db, file, b_sym).expect("let b exists");
+        let ty_b = let_infer(&db, b_loc).expect("cross-body let must infer");
+        let kind = ty_b.kind(&db);
+        use crate::ty::types::{TyKind};
+        use crate::base::common::PrimitiveType;
+        assert!(
+            matches!(kind, TyKind::Primitive(PrimitiveType::Int)),
+            "got: {kind:?}",
+        );
+    }
+
+    #[test]
+    fn let_infer_bails_on_record_instance() {
+        // `let_infer` doesn't yet populate the type_index; any body that
+        // constructs a user-defined record must return None so callers
+        // fall back to the monolithic file-level infer.
+        let db = FossilDb::default();
+        let file = SourceFile::new(
+            &db,
+            "type Point(x: int, y: int) do x: int, y: int end\nlet p = Point(x: 1, y: 2)".into(),
+            "test".into(),
+        );
+        let p_sym = Symbol::new(&db, "p");
+        let p_loc = find_let_by_name(&db, file, p_sym).expect("let p exists");
+        let result = let_infer(&db, p_loc);
+        assert!(
+            result.is_none(),
+            "body constructing user type must bail (got: {result:?})",
+        );
     }
 
     #[test]
