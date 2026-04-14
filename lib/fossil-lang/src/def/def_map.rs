@@ -147,6 +147,12 @@ impl DefMap {
         self.by_symbol.get(ns).keys().copied()
     }
 
+    /// Mutable access to the MetaNS bucket — used by `register_catalog_in_def_map`
+    /// to merge catalog DefIds into a per-file DefMap.
+    pub fn meta_ns_mut(&mut self) -> &mut HashMap<Symbol, Vec<DefId>> {
+        self.by_symbol.get_mut(Namespace::MetaNS)
+    }
+
     pub fn register_record_type(
         &mut self,
         db: &dyn Db,

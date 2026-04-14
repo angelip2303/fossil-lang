@@ -530,13 +530,31 @@ impl<'a> Lowering<'a> {
             }
 
             ast::ExprKind::ProviderInvocation { provider, args } => {
-                // Lower provider invocation as Application(Identifier(provider), args).
+                // ProviderInvocation (`csv!(path="…")`) is metaprogramming syntax:
+                // resolve the provider in MetaNS (catalog), NOT ValueNS.
+                // This is the rustc MacCall pattern (rustc_ast::ExprKind::MacCall
+                // routes to MacroNS, never ValueNS).
                 let callee_id = self.ir.exprs.alloc(Expr {
                     loc,
                     kind: ExprKind::Identifier(provider.clone()),
                 });
-                if let Some(def_id) = self.resolve_value_path(&provider, loc, errors) {
+                if let Some(def_id) = self.def_map.resolve(
+                    self.db,
+                    &provider,
+                    crate::def_map::Namespace::MetaNS,
+                ) {
                     self.resolutions.expr_defs.insert(callee_id, def_id);
+                } else {
+                    let candidates: Vec<String> = self
+                        .def_map
+                        .all_symbols_in_ns(crate::def_map::Namespace::MetaNS)
+                        .map(|s| s.text(self.db).to_string())
+                        .collect();
+                    errors.push(FossilError::undefined_path_with_suggestions(
+                        provider.display(self.db),
+                        candidates,
+                        loc,
+                    ));
                 }
                 let ir_args: Vec<Argument> = args
                     .into_iter()

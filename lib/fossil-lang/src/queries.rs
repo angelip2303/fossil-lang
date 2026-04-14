@@ -106,6 +106,7 @@ pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
     let mut def_map = DefMap::default();
     let mut registered_types = RegisteredTypes::new();
 
+    register_catalog_in_def_map(db, &mut def_map);
     register_sinks_in_def_map(db, &mut def_map);
     register_provider_schemas_from_ast(db, &ast, &mut def_map, &mut registered_types);
 
@@ -176,6 +177,18 @@ pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
 /// (e.g. `Rdf.materialize`) succeeds.
 /// Sources are NOT registered here — they are resolved directly by lowering
 /// (`ProviderInvocation` → `SourceCall` IR node) without going through DefMap.
+/// Merges catalog DefIds (sources/sinks from the registry) into the per-file
+/// DefMap's MetaNS. After this, `csv` resolves via `def_map.resolve(path, MetaNS)`
+/// just like any other definition — there is no parallel registry lookup channel.
+pub(crate) fn register_catalog_in_def_map(db: &dyn Db, def_map: &mut DefMap) {
+    let catalog = catalog_def_ids(db);
+    let meta = catalog.per_ns.get(Namespace::MetaNS);
+    let target = def_map.meta_ns_mut();
+    for (sym, def_id) in meta {
+        target.entry(*sym).or_default().push(*def_id);
+    }
+}
+
 pub(crate) fn register_sinks_in_def_map(db: &dyn Db, def_map: &mut DefMap) {
     use crate::def_map::Namespace;
     for sink in db.registry().sinks.iter() {
@@ -398,6 +411,33 @@ mod tests {
     fn default_db_has_rdf_materialize_sink() {
         let db = FossilDb::default();
         assert!(db.registry().sinks.find("Rdf", "materialize").is_some());
+    }
+
+    #[test]
+    fn provider_invocation_resolves_via_meta_ns_no_undefined_variable() {
+        // Regression test for the "Undefined variable 'csv'" bug:
+        // a registered source must resolve via MetaNS during lowering,
+        // not fail with an undefined-variable error in ValueNS.
+        use crate::base::db::FossilDbBuilder;
+        use crate::def::registry::SourceDef;
+        use crate::registry::ParamDef;
+        let db = FossilDbBuilder::new()
+            .with_default_features()
+            .with_source(SourceDef::new("csv", vec![ParamDef::required("path")]))
+            .build();
+        let file = SourceFile::new(
+            &db,
+            "let users = csv!(\"users.csv\")".into(),
+            "test".into(),
+        );
+        let _ = lower(&db, file);
+        let diags = lower::accumulated::<Diagnostic>(&db, file);
+        assert!(
+            !diags.iter().any(|d| d.message.contains("undefined")
+                && d.message.contains("csv")),
+            "csv should resolve via MetaNS, but got: {:?}",
+            diags
+        );
     }
 
     #[test]
