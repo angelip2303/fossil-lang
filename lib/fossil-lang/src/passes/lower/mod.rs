@@ -12,16 +12,6 @@ use crate::ir::{
     Type, TypeId, TypeKind,
 };
 
-pub fn lower_with_metadata(
-    db: &dyn Db,
-    ast: ast::Ast,
-    def_map: DefMap,
-    registered_types: RegisteredTypes,
-    metadata: HashMap<Symbol, TypeMetadata>,
-) -> Result<(Ir, DefMap, TypeMetadataMap, RegisteredTypes, Resolutions), Vec<FossilError>> {
-    Lowering::new(db, ast, def_map, registered_types, metadata).run()
-}
-
 /// Per-item body lowering entry point.
 ///
 /// Lowers a SINGLE top-level statement (identified by its index in `ast.root`)

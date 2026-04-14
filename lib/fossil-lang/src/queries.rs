@@ -20,10 +20,7 @@ use crate::db::HasRegistry;
 use crate::db::{CatalogOrigin, Db, DefId, DefKindTag, Diagnostic, Severity, SourceFile, Symbol};
 use crate::error::emit_error;
 use crate::def_map::{BuiltInFieldType, DefMap, Namespace, PerNS, RegisteredTypes};
-use crate::metadata::extract_type_metadata;
 use crate::syntax::parse::Parser;
-use crate::ty::typecheck::TypeChecker;
-use crate::passes::{InferResult, LowerResult};
 use crate::rq::RelationalQuery;
 
 // ── schema_needs (pre-compilation, cloud batch) ─────────────────────
@@ -87,63 +84,6 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> Ast {
         let _ = emit_error(db, e);
     }
     output.ast
-}
-
-// ── lower ───────────────────────────────────────────────────────────
-
-/// Lower AST to IR. Registers sinks into DefMap and resolves provider schemas.
-#[salsa::tracked]
-pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
-    let ast = parse(db, file);
-
-    let mut def_map = DefMap::default();
-    let mut registered_types = RegisteredTypes::new();
-
-    register_catalog_in_def_map(db, &mut def_map);
-    register_sinks_in_def_map(db, &mut def_map);
-    register_meta_call_schemas(db, &ast, &mut def_map, &mut registered_types);
-
-    let metadata = extract_type_metadata(&ast);
-    match crate::passes::lower::lower_with_metadata(db, ast, def_map, registered_types, metadata) {
-        Ok((ir, def_map, type_metadata, registered_types, resolutions)) => LowerResult {
-            ir,
-            def_map,
-            type_metadata,
-            registered_types,
-            resolutions,
-        },
-        Err(errors) => {
-            for e in errors {
-                let _ = emit_error(db, e);
-            }
-            LowerResult {
-                ir: Default::default(),
-                def_map: Default::default(),
-                type_metadata: Default::default(),
-                registered_types: Default::default(),
-                resolutions: Default::default(),
-            }
-        }
-    }
-}
-
-// ── infer ───────────────────────────────────────────────────────────
-
-/// Type-check the IR. Returns only the new artifacts from type-checking.
-#[salsa::tracked]
-pub fn infer(db: &dyn Db, file: SourceFile) -> InferResult {
-    let lowered = lower(db, file);
-    // The type checker emits its own diagnostics into the accumulator and
-    // taints failed bindings with `Ty::Error`, so we always get a populated
-    // (best-effort) `InferResult` back.
-    TypeChecker::new(
-        db,
-        lowered.ir,
-        lowered.def_map,
-        lowered.registered_types,
-        lowered.resolutions,
-    )
-    .check()
 }
 
 // ── rq ──────────────────────────────────────────────────────────────
@@ -363,19 +303,26 @@ mod tests {
     }
 
     #[test]
-    fn lower_literal() {
+    fn let_body_lowers_literal() {
+        use crate::def::body::let_body;
+        use crate::def::item_tree::find_let_by_name;
         let db = FossilDb::default();
         let file = SourceFile::new(&db, "let x = 42".into(), "test".into());
-        let result = lower(&db, file);
-        assert!(!result.ir.root.is_empty());
+        let sym = Symbol::new(&db, "x");
+        let loc = find_let_by_name(&db, file, sym).expect("let exists");
+        let body = let_body(&db, loc);
+        assert!(!body.ir.stmts.is_empty());
     }
 
     #[test]
-    fn infer_literal() {
+    fn let_infer_literal() {
+        use crate::def::body::let_infer;
+        use crate::def::item_tree::find_let_by_name;
         let db = FossilDb::default();
         let file = SourceFile::new(&db, "let x = 42".into(), "test".into());
-        let program = infer(&db, file);
-        assert!(!program.ir.root.is_empty());
+        let sym = Symbol::new(&db, "x");
+        let loc = find_let_by_name(&db, file, sym).expect("let exists");
+        assert!(let_infer(&db, loc).is_some());
     }
 
     #[test]
@@ -419,8 +366,8 @@ mod tests {
             "let x = does_not_exist\nlet y = x".into(),
             "test".into(),
         );
-        let _ = infer(&db, file);
-        let diags = infer::accumulated::<Diagnostic>(&db, file);
+        let _ = rq(&db, file);
+        let diags = rq::accumulated::<Diagnostic>(&db, file);
         assert!(
             !diags.is_empty(),
             "expected at least one diagnostic for the bad first let"
@@ -445,8 +392,8 @@ mod tests {
             "let a = nope_a\nlet b = nope_b\nlet c = a\nlet d = b".into(),
             "test".into(),
         );
-        let _ = infer(&db, file);
-        let diags = infer::accumulated::<Diagnostic>(&db, file);
+        let _ = rq(&db, file);
+        let diags = rq::accumulated::<Diagnostic>(&db, file);
         assert_eq!(
             diags.len(),
             2,
@@ -498,8 +445,8 @@ mod tests {
             "let mappys = 1\nlet x = mappies".into(),
             "test".into(),
         );
-        let _ = lower(&db, file);
-        let diags = lower::accumulated::<Diagnostic>(&db, file);
+        let _ = rq(&db, file);
+        let diags = rq::accumulated::<Diagnostic>(&db, file);
         let undef = diags
             .iter()
             .find(|d| d.message.contains("mappies"))
@@ -528,8 +475,8 @@ mod tests {
             "let users = csv!(\"users.csv\")".into(),
             "test".into(),
         );
-        let _ = lower(&db, file);
-        let diags = lower::accumulated::<Diagnostic>(&db, file);
+        let _ = rq(&db, file);
+        let diags = rq::accumulated::<Diagnostic>(&db, file);
         assert!(
             !diags.iter().any(|d| d.message.contains("undefined")
                 && d.message.contains("csv")),
