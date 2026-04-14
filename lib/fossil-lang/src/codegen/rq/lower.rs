@@ -275,9 +275,9 @@ impl<'a> RqLowering<'a> {
                     .collect();
 
                 let subject_template = if let Some((_, key_expr)) = spec.identity_exprs.first() {
-                    // Build subject IRI: CONCAT(base, CAST(key AS VARCHAR))
+                    let iri_base = &self.db.registry().iri_base;
                     build::concat(vec![
-                        build::string_lit(format!("http://example.org/{}/", spec.type_name)),
+                        build::string_lit(format!("{}{}/", iri_base, spec.type_name)),
                         build::cast_varchar(key_expr.clone()),
                     ])
                 } else {

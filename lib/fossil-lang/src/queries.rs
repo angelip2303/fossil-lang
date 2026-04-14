@@ -408,6 +408,16 @@ mod tests {
     }
 
     #[test]
+    fn iri_base_is_configurable_via_builder() {
+        use crate::base::db::FossilDbBuilder;
+        let db = FossilDbBuilder::new()
+            .with_default_features()
+            .with_iri_base("https://kanzo.dev/")
+            .build();
+        assert_eq!(db.registry().iri_base, "https://kanzo.dev/");
+    }
+
+    #[test]
     fn undefined_variable_emits_did_you_mean_suggestion() {
         // `mappies` is a typo of `mappys`; the resolver should suggest the
         // closest in-scope name via Levenshtein.

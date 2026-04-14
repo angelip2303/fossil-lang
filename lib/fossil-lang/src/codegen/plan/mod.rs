@@ -50,13 +50,8 @@ pub struct SourceDef {
 /// Output to materialize after the main SQL query.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputDef {
-    /// Output format handler (e.g. "graphar", "turtle").
     pub format: String,
-    /// Output path.
     pub path: String,
-    /// Tables to read from DuckDB.
-    pub input_tables: Vec<String>,
-    /// Entity projections with field mappings.
     pub projections: Vec<EntityProjection>,
 }
 
@@ -147,7 +142,6 @@ impl FossilPlan {
                 OutputDef {
                     format: o.format.clone(),
                     path: o.path.clone(),
-                    input_tables: Vec::new(), // filled by SQL CTE names
                     projections,
                 }
             })

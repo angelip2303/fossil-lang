@@ -17,11 +17,26 @@ pub use sources::{ParamDef, SourceDef, SourceRegistry};
 
 /// Compiler registry — sources, sinks, attribute operations.
 /// Stored as a field of `FossilDb`. Immutable post-build.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct FossilRegistry {
     pub sources: SourceRegistry,
     pub sinks: SinkRegistry,
     pub attributes: AttributeRegistry,
+    /// Base IRI for RDF subject template generation. Defaults to a placeholder
+    /// when the host doesn't provide one. Used by RQ lowering when constructing
+    /// `CONCAT(base, type, "/", id)` subject expressions.
+    pub iri_base: String,
+}
+
+impl Default for FossilRegistry {
+    fn default() -> Self {
+        Self {
+            sources: SourceRegistry::default(),
+            sinks: SinkRegistry::default(),
+            attributes: AttributeRegistry::default(),
+            iri_base: "http://example.org/".to_string(),
+        }
+    }
 }
 
 impl FossilRegistry {
