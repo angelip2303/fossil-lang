@@ -70,18 +70,20 @@ pub enum PrimitiveType {
     Bool,
 }
 
-/// A provider argument (literal-based or positional)
+/// Argument to a metaprogramming call (`csv!(path="…")`). Restricted to
+/// literals because expansion happens at compile time and needs constant
+/// values. Mirrors rustc's `MacCall` — args are tokens, not arbitrary exprs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ProviderArgument {
+pub enum MetaArg {
     Positional(Literal),
     Named { name: Symbol, value: Literal },
 }
 
-impl ProviderArgument {
+impl MetaArg {
     pub fn value(&self) -> &Literal {
         match self {
-            ProviderArgument::Positional(lit) => lit,
-            ProviderArgument::Named { value, .. } => value,
+            MetaArg::Positional(lit) => lit,
+            MetaArg::Named { value, .. } => value,
         }
     }
 }

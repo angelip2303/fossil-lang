@@ -6,7 +6,7 @@ use chumsky::prelude::*;
 
 use crate::ast::{
     Argument, Ast, Attribute, AttributeArg, ConstructorParam, Expr, ExprId, ExprKind, Literal,
-    Path, PrimitiveType, ProviderArgument, RecordField, Stmt, StmtId, StmtKind,
+    Path, PrimitiveType, MetaArg, RecordField, Stmt, StmtId, StmtKind,
     Type, TypeId, TypeKind,
 };
 use crate::ast::Loc;
@@ -194,7 +194,7 @@ enum PipeRhs {
 
 /// Suffix after a parsed Path, used for longest-match atom parsing.
 enum PathSuffix {
-    Provider(Vec<ProviderArgument>),
+    Provider(Vec<MetaArg>),
     CtorRecord(Vec<Argument>, Option<ExprId>, Vec<(Symbol, ExprId)>),
     Application(Vec<Argument>, Vec<TypeId>),
     Record(Option<ExprId>, Vec<(Symbol, ExprId)>),
@@ -338,7 +338,7 @@ where
                 let full_loc = ctx.to_loc(e.span());
                 match suffix {
                     Some(PathSuffix::Provider(args)) => {
-                        ctx.alloc_expr(ExprKind::ProviderInvocation { provider: path, args }, full_loc)
+                        ctx.alloc_expr(ExprKind::MetaCall { provider: path, args }, full_loc)
                     }
                     Some(PathSuffix::CtorRecord(ctor_args, spread, fields)) => {
                         ctx.alloc_expr(
@@ -727,16 +727,16 @@ where
 
 fn parse_provider_argument<'a, I>(
     ctx: &'a AstCtx,
-) -> impl Parser<'a, I, ProviderArgument, ParserError<'a>> + Clone
+) -> impl Parser<'a, I, MetaArg, ParserError<'a>> + Clone
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
     let named = parse_symbol(ctx)
         .then_ignore(just(Token::Colon))
         .then(parse_literal(ctx))
-        .map(|(name, value)| ProviderArgument::Named { name, value });
+        .map(|(name, value)| MetaArg::Named { name, value });
 
-    let positional = parse_literal(ctx).map(ProviderArgument::Positional);
+    let positional = parse_literal(ctx).map(MetaArg::Positional);
 
     named.or(positional)
 }

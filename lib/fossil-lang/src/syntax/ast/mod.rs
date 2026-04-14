@@ -2,7 +2,7 @@ pub mod ast;
 
 pub use self::ast::{
     Argument, Ast, Attribute, AttributeArg, ConstructorParam, Expr, ExprId, ExprKind, Literal,
-    Path, PrimitiveType, ProviderArgument, RecordField, Stmt, StmtId, StmtKind, Type, TypeId,
+    Path, PrimitiveType, MetaArg, RecordField, Stmt, StmtId, StmtKind, Type, TypeId,
     TypeKind,
 };
 

@@ -1,5 +1,5 @@
 use crate::ast::Loc;
-pub use crate::common::{Literal, Path, PrimitiveType, ProviderArgument};
+pub use crate::common::{Literal, Path, PrimitiveType, MetaArg};
 use crate::db::Symbol;
 use la_arena::{Arena, Idx as NodeId};
 
@@ -85,9 +85,9 @@ pub enum ExprKind {
         parts: Vec<Symbol>,
         exprs: Vec<ExprId>,
     },
-    ProviderInvocation {
+    MetaCall {
         provider: Path,
-        args: Vec<ProviderArgument>,
+        args: Vec<MetaArg>,
     },
     /// `expr ?? default` — null coalescing operator.
     Coalesce {

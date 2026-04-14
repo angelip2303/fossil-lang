@@ -14,7 +14,7 @@ pub mod parser;
 pub use parse::Parser;
 pub use ast::{
     Argument, Ast, Attribute, AttributeArg, ConstructorParam, Expr, ExprId, ExprKind, Literal,
-    Loc, Path, PrimitiveType, ProviderArgument, RecordField, Span, Stmt, StmtId, StmtKind, Type,
+    Loc, Path, PrimitiveType, MetaArg, RecordField, Span, Stmt, StmtId, StmtKind, Type,
     TypeId, TypeKind,
 };
 pub use parser::lexer::Token;

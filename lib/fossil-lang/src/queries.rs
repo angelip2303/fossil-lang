@@ -173,13 +173,9 @@ pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-/// Register sinks into the DefMap so qualified path resolution
-/// (e.g. `Rdf.materialize`) succeeds.
-/// Sources are NOT registered here — they are resolved directly by lowering
-/// (`ProviderInvocation` → `SourceCall` IR node) without going through DefMap.
 /// Merges catalog DefIds (sources/sinks from the registry) into the per-file
 /// DefMap's MetaNS. After this, `csv` resolves via `def_map.resolve(path, MetaNS)`
-/// just like any other definition — there is no parallel registry lookup channel.
+/// just like any other definition — no parallel registry lookup channel.
 pub(crate) fn register_catalog_in_def_map(db: &dyn Db, def_map: &mut DefMap) {
     let catalog = catalog_def_ids(db);
     let meta = catalog.per_ns.get(Namespace::MetaNS);
@@ -233,17 +229,17 @@ pub(crate) fn register_provider_schemas_from_ast(
 
 fn find_provider_calls_from_ast(db: &dyn Db, ast: &crate::ast::Ast) -> Vec<SchemaRequest> {
     use crate::ast::{ExprKind, StmtKind};
-    use crate::common::{Literal, ProviderArgument};
+    use crate::common::{Literal, MetaArg};
     let mut calls = Vec::new();
 
     for &stmt_id in &ast.root {
         let stmt = &ast.stmts[stmt_id];
         if let StmtKind::Let { value, .. } = &stmt.kind {
             let expr = &ast.exprs[*value];
-            if let ExprKind::ProviderInvocation { provider, args } = &expr.kind {
+            if let ExprKind::MetaCall { provider, args } = &expr.kind {
                 let provider_name = provider.display(db);
                 let path = args.iter().find_map(|arg| match arg {
-                    ProviderArgument::Positional(Literal::String(s)) => {
+                    MetaArg::Positional(Literal::String(s)) => {
                         Some(s.text(db).to_string())
                     }
                     _ => None,

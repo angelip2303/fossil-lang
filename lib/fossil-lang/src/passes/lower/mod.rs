@@ -529,8 +529,8 @@ impl<'a> Lowering<'a> {
                 ir_expr_id
             }
 
-            ast::ExprKind::ProviderInvocation { provider, args } => {
-                // ProviderInvocation (`csv!(path="…")`) is metaprogramming syntax:
+            ast::ExprKind::MetaCall { provider, args } => {
+                // MetaCall (`csv!(path="…")`) is metaprogramming syntax:
                 // resolve the provider in MetaNS (catalog), NOT ValueNS.
                 // This is the rustc MacCall pattern (rustc_ast::ExprKind::MacCall
                 // routes to MacroNS, never ValueNS).
@@ -559,13 +559,13 @@ impl<'a> Lowering<'a> {
                 let ir_args: Vec<Argument> = args
                     .into_iter()
                     .map(|arg| match arg {
-                        crate::common::ProviderArgument::Positional(lit) => {
+                        crate::common::MetaArg::Positional(lit) => {
                             Argument::Positional(self.ir.exprs.alloc(Expr {
                                 loc,
                                 kind: ExprKind::Literal(lit),
                             }))
                         }
-                        crate::common::ProviderArgument::Named { name, value } => {
+                        crate::common::MetaArg::Named { name, value } => {
                             Argument::Named {
                                 name,
                                 value: self.ir.exprs.alloc(Expr {
