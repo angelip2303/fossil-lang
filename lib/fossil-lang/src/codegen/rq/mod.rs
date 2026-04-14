@@ -20,33 +20,23 @@ pub mod lower;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::Expr;
-
-/// Unique table identifier within a RelationalQuery.
-#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TableId(pub usize);
-
-/// Unique column identifier within a RelationalQuery.
-#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ColId(pub usize);
+use sqlparser::ast::{Expr, Ident};
 
 /// A complete relational query produced by lowering the Fossil IR.
 ///
 /// The pipeline is linear: transforms execute in order, each consuming
-/// input table(s) and producing an output table.
+/// input table(s) and producing an output table. Tables and columns are
+/// referenced by `sqlparser::ast::Ident` directly — the same type sqlparser
+/// uses to emit SQL — so there is no parallel name registry to maintain.
 ///
 /// **Not serializable.** Holds `sqlparser::ast::Expr` which (without enabling
 /// sqlparser's `serde` feature) does not implement `Serialize` / `Deserialize`.
 /// Hosts that need to serialize compiled output should use `FossilPlan`,
 /// which is serializable and embeds only the emitted SQL string.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RelationalQuery {
     /// Ordered pipeline of transforms.
     pub transforms: Vec<Transform>,
-    /// Column name registry (ColId → name).
-    pub columns: Vec<String>,
-    /// Table name registry (TableId → name).
-    pub tables: Vec<String>,
     /// Which tables map to RDF entity types.
     pub emissions: Vec<EmissionDecl>,
     /// Output materialization instructions.
@@ -58,28 +48,28 @@ pub struct RelationalQuery {
 pub enum Transform {
     /// Load data from source.
     Scan {
-        output: TableId,
+        output: Ident,
         source: ScanSource,
     },
     /// SELECT columns FROM input.
     Project {
-        input: TableId,
-        output: TableId,
-        columns: Vec<(ColId, Expr)>,
+        input: Ident,
+        output: Ident,
+        columns: Vec<(Ident, Expr)>,
     },
     /// JOIN two tables.
     Join {
-        left: TableId,
-        right: TableId,
-        output: TableId,
-        on: Vec<(ColId, ColId)>,
+        left: Ident,
+        right: Ident,
+        output: Ident,
+        on: Vec<(Ident, Ident)>,
         kind: JoinKind,
         suffix: Option<String>,
     },
     /// WHERE predicate.
     Filter {
-        input: TableId,
-        output: TableId,
+        input: Ident,
+        output: Ident,
         predicate: Expr,
     },
 }
@@ -102,11 +92,11 @@ pub enum JoinKind {
 /// Maps a table to an RDF entity type.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmissionDecl {
-    pub table: TableId,
+    pub table: Ident,
     pub type_name: String,
     pub subject_template: Expr,
-    pub fields: Vec<(String, ColId)>,
-    pub identity_columns: Vec<ColId>,
+    pub fields: Vec<(String, Ident)>,
+    pub identity_columns: Vec<Ident>,
 }
 
 /// Output materialization instruction.
@@ -118,48 +108,8 @@ pub struct OutputDecl {
     pub params: HashMap<String, String>,
 }
 
-// ── Builder helpers ──────────────────────────────────────────────────
-
 impl RelationalQuery {
     pub fn new() -> Self {
-        Self {
-            transforms: Vec::new(),
-            columns: Vec::new(),
-            tables: Vec::new(),
-            emissions: Vec::new(),
-            outputs: Vec::new(),
-        }
-    }
-
-    /// Intern a column name, returning its ColId.
-    pub fn intern_col(&mut self, name: &str) -> ColId {
-        if let Some(idx) = self.columns.iter().position(|c| c == name) {
-            ColId(idx)
-        } else {
-            let id = ColId(self.columns.len());
-            self.columns.push(name.to_string());
-            id
-        }
-    }
-
-    /// Allocate a new table name, returning its TableId.
-    pub fn alloc_table(&mut self, name: &str) -> TableId {
-        let id = TableId(self.tables.len());
-        self.tables.push(name.to_string());
-        id
-    }
-
-    pub fn col_name(&self, id: ColId) -> &str {
-        &self.columns[id.0]
-    }
-
-    pub fn table_name(&self, id: TableId) -> &str {
-        &self.tables[id.0]
-    }
-}
-
-impl Default for RelationalQuery {
-    fn default() -> Self {
-        Self::new()
+        Self::default()
     }
 }

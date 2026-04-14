@@ -19,7 +19,7 @@ pub fn validate_duckdb_sql(sql: &str) -> Result<Vec<sqlparser::ast::Statement>, 
     Parser::parse_sql(&DuckDbDialect {}, sql).map_err(|e| e.to_string())
 }
 
-pub fn expr_to_sql(expr: &Expr, _rq: &RelationalQuery) -> String {
+pub fn expr_to_sql(expr: &Expr) -> String {
     expr.to_string()
 }
 
@@ -42,21 +42,18 @@ pub fn rq_to_query(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> Query {
                     ScanStrategy::TableFactor(tf) => tf,
                     ScanStrategy::Preprocess { output_table, .. } => table_ref(output_table),
                 };
-                (
-                    ident(rq.table_name(*output)),
-                    select_star_from(vec![twj(factor)]),
-                )
+                (output.clone(), select_star_from(vec![twj(factor)]))
             }
             Transform::Project {
                 input,
                 output,
                 columns,
             } => {
-                let from = vec![twj(table_ref(rq.table_name(*input)))];
+                let from = vec![twj(table_ref(&input.value))];
                 let projection: Vec<SelectItem> = columns
                     .iter()
                     .map(|(col, expr)| {
-                        let alias = ident(rq.col_name(*col));
+                        let alias = col.clone();
                         if let Expr::Identifier(id) = expr {
                             if id.value == alias.value {
                                 return SelectItem::UnnamedExpr(expr.clone());
@@ -68,7 +65,7 @@ pub fn rq_to_query(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> Query {
                         }
                     })
                     .collect();
-                (ident(rq.table_name(*output)), select(projection, from, None))
+                (output.clone(), select(projection, from, None))
             }
             Transform::Join {
                 left,
@@ -79,19 +76,19 @@ pub fn rq_to_query(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> Query {
                 suffix: _,
             } => {
                 let join_op = match kind {
-                    JoinKind::Inner => JoinOperator::Inner(JoinConstraint::On(join_on_expr(rq, *left, *right, on))),
-                    JoinKind::Left => JoinOperator::LeftOuter(JoinConstraint::On(join_on_expr(rq, *left, *right, on))),
+                    JoinKind::Inner => JoinOperator::Inner(JoinConstraint::On(join_on_expr(left, right, on))),
+                    JoinKind::Left => JoinOperator::LeftOuter(JoinConstraint::On(join_on_expr(left, right, on))),
                 };
                 let from = vec![TableWithJoins {
-                    relation: table_ref(rq.table_name(*left)),
+                    relation: table_ref(&left.value),
                     joins: vec![Join {
-                        relation: table_ref(rq.table_name(*right)),
+                        relation: table_ref(&right.value),
                         global: false,
                         join_operator: join_op,
                     }],
                 }];
                 (
-                    ident(rq.table_name(*output)),
+                    output.clone(),
                     select(vec![SelectItem::Wildcard(wildcard_default())], from, None),
                 )
             }
@@ -100,9 +97,9 @@ pub fn rq_to_query(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> Query {
                 output,
                 predicate,
             } => {
-                let from = vec![twj(table_ref(rq.table_name(*input)))];
+                let from = vec![twj(table_ref(&input.value))];
                 (
-                    ident(rq.table_name(*output)),
+                    output.clone(),
                     select(
                         vec![SelectItem::Wildcard(wildcard_default())],
                         from,
@@ -149,10 +146,6 @@ pub fn rq_to_query(rq: &RelationalQuery, dialect: &dyn SqlDialect) -> Query {
 }
 
 // ── helpers ─────────────────────────────────────────────────────────
-
-fn ident(name: &str) -> Ident {
-    Ident::new(name.to_string())
-}
 
 fn twj(relation: TableFactor) -> TableWithJoins {
     TableWithJoins {
@@ -225,18 +218,11 @@ fn placeholder_select_one() -> Query {
     )
 }
 
-fn join_on_expr(
-    rq: &RelationalQuery,
-    left: super::TableId,
-    right: super::TableId,
-    on: &[(super::ColId, super::ColId)],
-) -> Expr {
-    let mut iter = on.iter().map(|(l, r)| {
-        Expr::BinaryOp {
-            left: Box::new(qualified_col(rq.table_name(left), rq.col_name(*l))),
-            op: BinaryOperator::Eq,
-            right: Box::new(qualified_col(rq.table_name(right), rq.col_name(*r))),
-        }
+fn join_on_expr(left: &Ident, right: &Ident, on: &[(Ident, Ident)]) -> Expr {
+    let mut iter = on.iter().map(|(l, r)| Expr::BinaryOp {
+        left: Box::new(Expr::CompoundIdentifier(vec![left.clone(), l.clone()])),
+        op: BinaryOperator::Eq,
+        right: Box::new(Expr::CompoundIdentifier(vec![right.clone(), r.clone()])),
     });
     let first = iter.next().unwrap_or(Expr::Value(ast::Value::Boolean(true).into()));
     iter.fold(first, |acc, next| Expr::BinaryOp {
@@ -244,10 +230,6 @@ fn join_on_expr(
         op: BinaryOperator::And,
         right: Box::new(next),
     })
-}
-
-fn qualified_col(table: &str, col: &str) -> Expr {
-    Expr::CompoundIdentifier(vec![ident(table), ident(col)])
 }
 
 // Tests below only check that emitted SQL parses round-trip through
@@ -258,16 +240,16 @@ fn qualified_col(table: &str, col: &str) -> Expr {
 mod tests {
     use super::*;
     use crate::dialect::DefaultDialect;
-    use crate::rq::{build, ColId, ScanSource, TableId};
+    use crate::rq::{build, ScanSource};
 
-    fn test_rq_parts() -> (RelationalQuery, TableId, ColId, ColId, ColId) {
+    fn test_rq_parts() -> (RelationalQuery, Ident, Ident, Ident, Ident) {
         let mut rq = RelationalQuery::new();
-        let id_col = rq.intern_col("id");
-        let name_col = rq.intern_col("name");
-        let age_col = rq.intern_col("age");
-        let src = rq.alloc_table("src_1");
+        let id_col = Ident::new("id");
+        let name_col = Ident::new("name");
+        let age_col = Ident::new("age");
+        let src = Ident::new("src_1");
         rq.transforms.push(Transform::Scan {
-            output: src,
+            output: src.clone(),
             source: ScanSource {
                 format: "csv".into(),
                 path: "data.csv".into(),
@@ -288,7 +270,7 @@ mod tests {
     #[test]
     fn project_round_trips() {
         let (mut rq, src, _id, name, age) = test_rq_parts();
-        let persons = rq.alloc_table("persons");
+        let persons = Ident::new("persons");
         rq.transforms.push(Transform::Project {
             input: src,
             output: persons,
@@ -301,17 +283,17 @@ mod tests {
     #[test]
     fn join_round_trips() {
         let (mut rq, src, id, ..) = test_rq_parts();
-        let lookup = rq.alloc_table("lookup_1");
-        let lookup_id = rq.intern_col("lookup_id");
+        let lookup = Ident::new("lookup_1");
+        let lookup_id = Ident::new("lookup_id");
         rq.transforms.push(Transform::Scan {
-            output: lookup,
+            output: lookup.clone(),
             source: ScanSource {
                 format: "csv".into(),
                 path: "lookup.csv".into(),
                 params: Default::default(),
             },
         });
-        let joined = rq.alloc_table("joined_1");
+        let joined = Ident::new("joined_1");
         rq.transforms.push(Transform::Join {
             left: src,
             right: lookup,
@@ -327,54 +309,44 @@ mod tests {
 
     #[test]
     fn expr_coalesce() {
-        let mut rq = RelationalQuery::new();
-        rq.intern_col("x");
         let expr = build::coalesce(build::col("x"), build::string_lit("default"));
-        assert_eq!(expr_to_sql(&expr, &rq), "COALESCE(x, 'default')");
+        assert_eq!(expr_to_sql(&expr), "COALESCE(x, 'default')");
     }
 
     #[test]
     fn expr_concat() {
-        let mut rq = RelationalQuery::new();
-        rq.intern_col("base");
-        rq.intern_col("id");
         let expr = build::concat(vec![
             build::string_lit("http://example.org/"),
             build::cast_varchar(build::col("id")),
         ]);
         assert_eq!(
-            expr_to_sql(&expr, &rq),
+            expr_to_sql(&expr),
             "CONCAT('http://example.org/', CAST(id AS VARCHAR))"
         );
     }
 
     #[test]
     fn expr_function() {
-        let mut rq = RelationalQuery::new();
-        rq.intern_col("email");
         let expr = build::func("SHA256", vec![build::cast_varchar(build::col("email"))]);
-        assert_eq!(expr_to_sql(&expr, &rq), "SHA256(CAST(email AS VARCHAR))");
+        assert_eq!(expr_to_sql(&expr), "SHA256(CAST(email AS VARCHAR))");
     }
 
     #[test]
     fn null_literal() {
-        let rq = RelationalQuery::new();
         let expr = build::null_lit();
-        assert_eq!(expr_to_sql(&expr, &rq), "NULL");
+        assert_eq!(expr_to_sql(&expr), "NULL");
     }
 
     #[test]
     fn is_null_negated() {
-        let mut rq = RelationalQuery::new();
-        rq.intern_col("v");
         let expr = build::is_null(build::col("v"), true);
-        assert_eq!(expr_to_sql(&expr, &rq), "v IS NOT NULL");
+        assert_eq!(expr_to_sql(&expr), "v IS NOT NULL");
     }
 
     #[test]
     fn scan_with_project_round_trips() {
         let (mut rq, src, _id, name, age) = test_rq_parts();
-        let persons = rq.alloc_table("persons");
+        let persons = Ident::new("persons");
         rq.transforms.push(Transform::Project {
             input: src,
             output: persons,

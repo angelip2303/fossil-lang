@@ -16,6 +16,5 @@ pub use dialect::{DefaultDialect, ScanStrategy, SqlDialect};
 pub use plan::{EntityProjection, FieldMapping, FossilPlan, OutputDef, OutputResult, SourceDef};
 pub use rq::to_ast::{expr_to_sql, rq_to_query, validate_duckdb_sql};
 pub use rq::{
-    build, ColId, EmissionDecl, JoinKind, OutputDecl, RelationalQuery, ScanSource, TableId,
-    Transform,
+    build, EmissionDecl, JoinKind, OutputDecl, RelationalQuery, ScanSource, Transform,
 };

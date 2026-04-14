@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use sqlparser::ast::Expr;
+use sqlparser::ast::{Expr, Ident};
 
 use crate::db::Db;
 #[allow(unused_imports)] // trait must be in scope for method resolution
@@ -19,8 +19,7 @@ use crate::ir::{ExprId, ExprKind, Ir, Resolutions};
 use crate::ty::typecheck::TypeIndex;
 use crate::registry::SourceDef;
 use crate::rq::{
-    build, ColId, EmissionDecl, JoinKind, OutputDecl, RelationalQuery, ScanSource, TableId,
-    Transform,
+    build, EmissionDecl, JoinKind, OutputDecl, RelationalQuery, ScanSource, Transform,
 };
 
 /// Internal value during lowering — NOT part of the final RQ.
@@ -28,9 +27,9 @@ use crate::rq::{
 enum RqValue {
     Unit,
     Expr(Expr),
-    Table(TableId),
+    Table(Ident),
     Emission {
-        table: TableId,
+        table: Ident,
         specs: Vec<EmissionSpec>,
     },
     Reference {
@@ -56,7 +55,7 @@ impl RqValue {
         }
     }
 
-    fn into_table(self) -> Result<TableId, FossilError> {
+    fn into_table(self) -> Result<Ident, FossilError> {
         match self {
             RqValue::Table(t) => Ok(t),
             RqValue::Emission { table, .. } => Ok(table),
@@ -200,7 +199,6 @@ impl<'a> RqLowering<'a> {
 
             ExprKind::FieldAccess { field, .. } => {
                 let field_name = field.text(self.db).to_string();
-                self.rq.intern_col(&field_name);
                 Ok(RqValue::Expr(build::col(field_name)))
             }
 
@@ -235,13 +233,14 @@ impl<'a> RqLowering<'a> {
                 let left_table = self.lower_expr(*left)?.into_table()?;
                 let right_table = self.lower_expr(*right)?.into_table()?;
 
-                let on: Vec<(ColId, ColId)> = left_on
+                let on: Vec<(Ident, Ident)> = left_on
                     .iter()
                     .zip(right_on.iter())
                     .map(|(l, r)| {
-                        let lname = l.text(self.db).to_string();
-                        let rname = r.text(self.db).to_string();
-                        (self.rq.intern_col(&lname), self.rq.intern_col(&rname))
+                        (
+                            Ident::new(l.text(self.db).to_string()),
+                            Ident::new(r.text(self.db).to_string()),
+                        )
                     })
                     .collect();
 
@@ -250,7 +249,7 @@ impl<'a> RqLowering<'a> {
                 self.rq.transforms.push(Transform::Join {
                     left: left_table,
                     right: right_table,
-                    output,
+                    output: output.clone(),
                     on,
                     kind: JoinKind::Inner,
                     suffix: suffix_str,
@@ -265,7 +264,7 @@ impl<'a> RqLowering<'a> {
             } => {
                 let source_table = self.lower_expr(*source)?.into_table()?;
                 self.env
-                    .insert(*binding, RqValue::Table(source_table));
+                    .insert(*binding, RqValue::Table(source_table.clone()));
 
                 let mut all_specs = Vec::new();
                 for &out_expr in outputs {
@@ -283,23 +282,23 @@ impl<'a> RqLowering<'a> {
                 let spec = &all_specs[0]; // primary entity
                 let output = self.next_table(&spec.type_name.to_lowercase());
 
-                let columns: Vec<(ColId, Expr)> = spec
+                let columns: Vec<(Ident, Expr)> = spec
                     .select_items
                     .iter()
-                    .map(|(name, expr)| (self.rq.intern_col(name), expr.clone()))
+                    .map(|(name, expr)| (Ident::new(name.clone()), expr.clone()))
                     .collect();
 
                 self.rq.transforms.push(Transform::Project {
                     input: source_table,
-                    output,
+                    output: output.clone(),
                     columns,
                 });
 
                 // Register emission
-                let identity_columns: Vec<ColId> = spec
+                let identity_columns: Vec<Ident> = spec
                     .identity_exprs
                     .iter()
-                    .map(|(name, _)| self.rq.intern_col(name))
+                    .map(|(name, _)| Ident::new(name.clone()))
                     .collect();
 
                 let subject_template = if let Some((_, key_expr)) = spec.identity_exprs.first() {
@@ -320,14 +319,14 @@ impl<'a> RqLowering<'a> {
                     build::null_lit()
                 };
 
-                let fields: Vec<(String, ColId)> = spec
+                let fields: Vec<(String, Ident)> = spec
                     .select_items
                     .iter()
-                    .map(|(name, _)| (name.clone(), self.rq.intern_col(name)))
+                    .map(|(name, _)| (name.clone(), Ident::new(name.clone())))
                     .collect();
 
                 self.rq.emissions.push(EmissionDecl {
-                    table: output,
+                    table: output.clone(),
                     type_name: spec.type_name.clone(),
                     subject_template,
                     fields,
@@ -385,7 +384,7 @@ impl<'a> RqLowering<'a> {
                 }
 
                 Ok(RqValue::Emission {
-                    table: TableId(0), // placeholder, projection sets real table
+                    table: Ident::new(""), // placeholder, projection sets real table
                     specs: vec![EmissionSpec {
                         type_name,
                         select_items,
@@ -457,7 +456,7 @@ impl<'a> RqLowering<'a> {
         let params = self.extract_params(args, src);
         let table = self.next_table(&format!("src_{}", src.name));
         self.rq.transforms.push(Transform::Scan {
-            output: table,
+            output: table.clone(),
             source: ScanSource {
                 format: src.name.clone(),
                 path,
@@ -533,9 +532,8 @@ impl<'a> RqLowering<'a> {
         Ok(RqValue::Unit)
     }
 
-    fn next_table(&mut self, prefix: &str) -> TableId {
+    fn next_table(&mut self, prefix: &str) -> Ident {
         self.table_counter += 1;
-        self.rq
-            .alloc_table(&format!("{}_{}", prefix, self.table_counter))
+        Ident::new(format!("{}_{}", prefix, self.table_counter))
     }
 }

@@ -127,13 +127,13 @@ impl FossilPlan {
                             .iter()
                             .map(|(name, col)| FieldMapping {
                                 field_name: name.clone(),
-                                sql_expr: rq.col_name(*col).to_string(),
+                                sql_expr: col.value.clone(),
                             })
                             .collect(),
                         identity_columns: e
                             .identity_columns
                             .iter()
-                            .map(|c| rq.col_name(*c).to_string())
+                            .map(|c| c.value.clone())
                             .collect(),
                     })
                     .collect();
