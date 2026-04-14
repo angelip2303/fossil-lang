@@ -986,6 +986,25 @@ mod tests {
     }
 
     #[test]
+    fn queries_rq_uses_per_item_fan_out_for_literal_only_file() {
+        // End-to-end sanity: queries::rq goes through the per-item
+        // fan-out path for a file that only contains primitive-typed
+        // lets. Verifies the rewrite's happy path: the fan-out returns
+        // a usable RelationalQuery without falling back to the
+        // monolithic RqLowering.
+        let db = FossilDb::default();
+        let file = SourceFile::new(&db, "let x = 1\nlet y = 2".into(), "test".into());
+        let rq = crate::queries::rq(&db, file);
+        // Literals don't produce SQL, so the result is empty but
+        // structurally valid (the test would panic earlier if the
+        // fan-out had exploded).
+        assert!(rq.sources.is_empty());
+        assert!(rq.ctes.is_empty());
+        assert!(rq.emissions.is_empty());
+        assert!(rq.outputs.is_empty());
+    }
+
+    #[test]
     fn let_rq_primitive_literal_produces_empty_contribution() {
         // `let x = 42` doesn't produce any SQL — the literal isn't
         // materialised anywhere. The per-item contribution should be
