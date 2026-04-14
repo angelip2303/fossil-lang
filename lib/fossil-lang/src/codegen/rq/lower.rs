@@ -29,9 +29,11 @@ use crate::rq::{
     EmissionDecl, OutputDecl, RelationalQuery, SourceRef,
 };
 
-/// Internal value during lowering — NOT part of the final RQ.
-#[derive(Clone, Debug)]
-enum RqValue {
+/// The semantic value a let binding produces during RQ lowering. Flows
+/// through the environment of subsequent bodies; public so per-item
+/// `let_rq` contributions can carry it across salsa query boundaries.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RqValue {
     Unit,
     Expr(Expr),
     Table(Ident),
@@ -44,11 +46,14 @@ enum RqValue {
     },
 }
 
-#[derive(Clone, Debug)]
-struct EmissionSpec {
-    type_name: String,
-    select_items: Vec<(String, Expr)>,
-    identity_exprs: Vec<(String, Expr)>,
+/// One emission (record instance → named entity) extracted from a body.
+/// Consumed downstream when the body is projected into a materialised
+/// entity. Public to carry through `let_rq` contributions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmissionSpec {
+    pub type_name: String,
+    pub select_items: Vec<(String, Expr)>,
+    pub identity_exprs: Vec<(String, Expr)>,
 }
 
 impl RqValue {
@@ -80,9 +85,12 @@ pub struct RqLowering<'a> {
     ir: &'a Ir,
     type_index: &'a TypeIndex,
     resolutions: &'a Resolutions,
-    env: HashMap<Symbol, RqValue>,
+    pub env: HashMap<Symbol, RqValue>,
     rq: RelationalQuery,
     table_counter: usize,
+    /// Optional unique prefix added to generated aliases. Per-item
+    /// lowering sets this to make names globally unique across siblings.
+    name_prefix: String,
 }
 
 impl<'a> RqLowering<'a> {
@@ -100,7 +108,23 @@ impl<'a> RqLowering<'a> {
             env: HashMap::new(),
             rq: RelationalQuery::new(),
             table_counter: 0,
+            name_prefix: String::new(),
         }
+    }
+
+    /// Set a prefix prepended to every generated alias. Used by per-item
+    /// `let_rq_query` to make names globally unique across concurrently
+    /// lowered sibling bodies.
+    pub fn with_name_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.name_prefix = prefix.into();
+        self
+    }
+
+    /// Drain the mutable lowering state into an owned snapshot. After
+    /// calling `lower()`, per-item consumers use this to extract the
+    /// accumulated contribution + the env values each let produced.
+    pub fn into_parts(self) -> (RelationalQuery, HashMap<Symbol, RqValue>) {
+        (self.rq, self.env)
     }
 
     /// Find the named String value of an attribute argument on the type whose
@@ -550,7 +574,14 @@ impl<'a> RqLowering<'a> {
 
     fn next_table(&mut self, prefix: &str) -> Ident {
         self.table_counter += 1;
-        Ident::new(format!("{}_{}", prefix, self.table_counter))
+        if self.name_prefix.is_empty() {
+            Ident::new(format!("{}_{}", prefix, self.table_counter))
+        } else {
+            Ident::new(format!(
+                "{}__{}_{}",
+                self.name_prefix, prefix, self.table_counter
+            ))
+        }
     }
 }
 

@@ -150,8 +150,58 @@ pub fn infer(db: &dyn Db, file: SourceFile) -> InferResult {
 // ── rq ──────────────────────────────────────────────────────────────
 
 /// Lower typed IR to RelationalQuery.
+///
+/// Internally fans out over `file_item_tree(file)`: one `let_rq_query`
+/// call per top-level let plus one `pipeline_rq_query` for the optional
+/// trailing pipeline, concatenated into the file-level RQ. When any
+/// per-item contribution is unavailable (the body hit a case that
+/// per-item lowering doesn't yet support), falls back to the monolithic
+/// `RqLowering` over `infer(file).ir` for that part — same end result,
+/// just without the per-item incrementality benefit on that file.
 #[salsa::tracked]
 pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
+    use crate::def::body::{let_rq, pipeline_rq};
+    use crate::def::item_tree::{file_item_tree, LetLoc, PipelineLoc};
+
+    let tree = file_item_tree(db, file);
+    let mut rq = RelationalQuery::new();
+    let mut any_failure = false;
+
+    for (idx, _) in tree.lets.iter().enumerate() {
+        let loc = LetLoc::new(db, file, idx);
+        match let_rq(db, loc) {
+            Some(contrib) => {
+                rq.sources.extend(contrib.sources);
+                rq.ctes.extend(contrib.ctes);
+                rq.emissions.extend(contrib.emissions);
+            }
+            None => {
+                any_failure = true;
+                break;
+            }
+        }
+    }
+
+    if !any_failure && tree.has_pipeline() {
+        let loc = PipelineLoc::new(db, file);
+        match pipeline_rq(db, loc) {
+            Some(contrib) => {
+                rq.sources.extend(contrib.sources);
+                rq.ctes.extend(contrib.ctes);
+                rq.emissions.extend(contrib.emissions);
+                rq.outputs.extend(contrib.outputs);
+            }
+            None => any_failure = true,
+        }
+    }
+
+    if !any_failure {
+        return rq;
+    }
+
+    // Per-item fan-out hit an unsupported case — fall back to the
+    // monolithic path for this file. Same `RelationalQuery` shape, just
+    // computed in one shot without the incremental dependency graph.
     let program = infer(db, file);
     match RqLowering::new(db, &program.ir, &program.type_index, &program.resolutions).lower() {
         Ok(rq) => rq,

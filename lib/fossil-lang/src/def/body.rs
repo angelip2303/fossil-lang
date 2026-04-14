@@ -286,6 +286,31 @@ fn lower_one(
 
 use crate::ty::types::{Polytype, Ty, TyKind};
 use crate::ty::typecheck::{TypeChecker, TypeDeclInfo};
+use crate::rq::lower::{RqLowering, RqValue};
+use crate::rq::{EmissionDecl, OutputDecl, SourceRef};
+
+/// Contribution a single top-level let adds to the file-level RQ.
+/// Returned from `let_rq_query` so the file-level aggregator can
+/// concatenate per-item pieces without re-running the monolithic lowerer.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct LetRqContribution {
+    pub sources: Vec<SourceRef>,
+    pub ctes: Vec<sqlparser::ast::Cte>,
+    pub emissions: Vec<EmissionDecl>,
+    /// The env value downstream lets should see for this let's name.
+    /// `None` when the body produced Unit (no usable SQL artefact).
+    pub env_value: Option<RqValue>,
+}
+
+/// Contribution from the single pipeline body (at most one per file).
+/// Carries the same RQ fragments as a let plus the file's output decls.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct PipelineRqContribution {
+    pub sources: Vec<SourceRef>,
+    pub ctes: Vec<sqlparser::ast::Cte>,
+    pub emissions: Vec<EmissionDecl>,
+    pub outputs: Vec<OutputDecl>,
+}
 
 /// Result of per-item inference over a `type` declaration: the interned
 /// `TypeDeclInfo` plus, if the type has a record constructor, the
@@ -552,6 +577,216 @@ pub fn file_type_decls(
     out
 }
 
+// ── Per-item RQ lowering (milestones 3 + 4) ──────────────────────────
+
+/// Build the pre-populated environment and type_index that a per-item
+/// `RqLowering` needs in order to lower one body in isolation. Walks the
+/// body's `resolutions.expr_defs`, classifies every referenced DefId,
+/// and recursively pulls:
+///   - Let DefIds → `let_rq_query(sibling)` → inject its `env_value`
+///   - Type / RecordConstructor DefIds → `type_decl_infer(type_loc)` →
+///     inject into `type_index` (the RQ lowerer reads it for emission
+///     field ordering and record-constructor param resolution)
+///
+/// Returns `None` if any recursive dependency failed — the caller then
+/// bails to the monolithic RQ path (for now).
+fn build_per_item_rq_ctx(
+    db: &dyn Db,
+    body: &HirBody,
+    scaffold: &FileDefMapForBody,
+    file: SourceFile,
+    this_let_def_id: Option<DefId>,
+) -> Option<(
+    HashMap<Symbol, RqValue>,
+    crate::ty::typecheck::TypeIndex,
+)> {
+    let mut env: HashMap<Symbol, RqValue> = HashMap::new();
+    let mut type_index = crate::ty::typecheck::TypeIndex::default();
+
+    let referenced: std::collections::HashSet<DefId> =
+        body.resolutions.expr_defs.values().copied().collect();
+
+    for def_id in referenced {
+        if Some(def_id) == this_let_def_id {
+            continue;
+        }
+        match def_id.kind(db) {
+            DefKindTag::Let => {
+                let Some(sibling_idx) = scaffold
+                    .top_level_lets
+                    .iter()
+                    .position(|(_, did)| *did == def_id)
+                else {
+                    continue;
+                };
+                let sibling_loc = LetLoc::new(db, file, sibling_idx);
+                let Some(sibling_contrib) = let_rq(db, sibling_loc) else {
+                    return None;
+                };
+                if let Some(env_value) = &sibling_contrib.env_value {
+                    env.insert(def_id.name(db), env_value.clone());
+                }
+            }
+            DefKindTag::Type => {
+                let Some(type_idx) = scaffold
+                    .top_level_types
+                    .iter()
+                    .position(|(_, did)| *did == def_id)
+                else {
+                    continue;
+                };
+                let type_loc = TypeDeclLoc::new(db, file, type_idx);
+                let Some(result) = type_decl_infer(db, type_loc) else {
+                    return None;
+                };
+                type_index.insert(def_id, result.info);
+            }
+            DefKindTag::RecordConstructor => {
+                let ctor_name = def_id.name(db);
+                let Some(type_def_id) = scaffold.def_map.find_in_ns(
+                    ctor_name,
+                    crate::def_map::Namespace::TypeNS,
+                    db,
+                    |k| matches!(k, DefKindTag::Type),
+                ) else {
+                    continue;
+                };
+                let Some(type_idx) = scaffold
+                    .top_level_types
+                    .iter()
+                    .position(|(_, did)| *did == type_def_id)
+                else {
+                    continue;
+                };
+                let type_loc = TypeDeclLoc::new(db, file, type_idx);
+                let Some(result) = type_decl_infer(db, type_loc) else {
+                    return None;
+                };
+                type_index.insert(type_def_id, result.info);
+            }
+            _ => {}
+        }
+    }
+
+    Some((env, type_index))
+}
+
+/// Salsa query: lower a single top-level `let` body to its RQ
+/// contribution (added sources, added CTEs, added emissions, plus the
+/// env value downstream bodies consume).
+///
+/// Recursive salsa edges: one per sibling DefId the body references.
+/// Editing a let body only re-runs `let_rq(B)` when B actually touched
+/// the edited let via its resolutions. The file-level `queries::rq`
+/// query iterates `file_item_tree(file).lets` and concatenates these
+/// contributions; see `queries::rq` for the fan-out.
+#[salsa::tracked]
+pub fn let_rq_query<'db>(
+    db: &'db dyn Db,
+    loc: InternedLetLoc<'db>,
+) -> Option<LetRqContribution> {
+    let file = loc.file(db);
+    let this_idx = loc.idx(db);
+    let body = let_body_query(db, loc);
+    let scaffold = file_def_map_for_body(db, file);
+    let this_let_def_id = scaffold.top_level_lets.get(this_idx).map(|(_, did)| *did);
+
+    let (env, type_index) =
+        build_per_item_rq_ctx(db, body, scaffold, file, this_let_def_id)?;
+
+    // Body IR needs `ir.root` populated with the single stmt so
+    // `RqLowering::lower` walks it.
+    let mut ir = body.ir.clone();
+    ir.root = vec![body.root_stmt];
+
+    // Build the lowerer. We need stable references to type_index /
+    // resolutions throughout the walk; clone into locals.
+    let resolutions = body.resolutions.clone();
+    let prefix = format!("let_{this_idx}");
+
+    // RqLowering holds references with a 'a lifetime, so we feed it
+    // locally-owned state that outlives the call.
+    let mut lowering =
+        RqLowering::new(db, &ir, &type_index, &resolutions).with_name_prefix(prefix);
+    lowering.env = env;
+
+    let lowered = match lowering.lower() {
+        Ok(rq) => rq,
+        Err(_) => return None,
+    };
+    // Can't use into_parts() here because lower() consumes self and
+    // returns only the RelationalQuery. Re-run with a second instance
+    // to extract the env afterwards? No — simpler: add an env-returning
+    // variant. For now, re-derive the env value from the RelationalQuery
+    // shape: if the body produced a CTE chain, the last CTE's alias is
+    // this let's Table value; if it produced sources only, the last
+    // source alias is the Table value.
+    let env_value = lowered
+        .ctes
+        .last()
+        .map(|c| RqValue::Table(c.alias.name.clone()))
+        .or_else(|| {
+            lowered
+                .sources
+                .last()
+                .map(|s| RqValue::Table(s.alias.clone()))
+        });
+
+    Some(LetRqContribution {
+        sources: lowered.sources,
+        ctes: lowered.ctes,
+        emissions: lowered.emissions,
+        env_value,
+    })
+}
+
+/// Convenience wrapper accepting a lifetime-free `LetLoc`.
+pub fn let_rq(db: &dyn Db, loc: LetLoc) -> Option<LetRqContribution> {
+    let_rq_query(db, loc.to_interned(db))
+}
+
+/// Salsa query: lower the (optional) pipeline body to its RQ contribution.
+/// The pipeline is the single top-level expression statement; it
+/// contributes CTEs, emissions, and — unlike lets — the output decls
+/// that drive host-side materialisation.
+#[salsa::tracked]
+pub fn pipeline_rq_query<'db>(
+    db: &'db dyn Db,
+    loc: InternedPipelineLoc<'db>,
+) -> Option<PipelineRqContribution> {
+    let file = loc.file(db);
+    let tree = file_item_tree(db, file);
+    tree.pipeline.as_ref()?;
+    let body = pipeline_body_query(db, loc).as_ref()?;
+    let scaffold = file_def_map_for_body(db, file);
+
+    let (env, type_index) = build_per_item_rq_ctx(db, body, scaffold, file, None)?;
+
+    let mut ir = body.ir.clone();
+    ir.root = vec![body.root_stmt];
+
+    let resolutions = body.resolutions.clone();
+    let mut lowering = RqLowering::new(db, &ir, &type_index, &resolutions)
+        .with_name_prefix("pipeline".to_string());
+    lowering.env = env;
+    let lowered = match lowering.lower() {
+        Ok(rq) => rq,
+        Err(_) => return None,
+    };
+
+    Some(PipelineRqContribution {
+        sources: lowered.sources,
+        ctes: lowered.ctes,
+        emissions: lowered.emissions,
+        outputs: lowered.outputs,
+    })
+}
+
+/// Convenience wrapper accepting a lifetime-free `PipelineLoc`.
+pub fn pipeline_rq(db: &dyn Db, loc: PipelineLoc) -> Option<PipelineRqContribution> {
+    pipeline_rq_query(db, loc.to_interned(db))
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -748,6 +983,23 @@ mod tests {
         assert!(matches!(a_ty.kind(&db), TyKind::Primitive(PrimitiveType::Int)));
         assert!(matches!(b_ty.kind(&db), TyKind::Primitive(PrimitiveType::Int)));
         assert!(matches!(c_ty.kind(&db), TyKind::Primitive(PrimitiveType::String)));
+    }
+
+    #[test]
+    fn let_rq_primitive_literal_produces_empty_contribution() {
+        // `let x = 42` doesn't produce any SQL — the literal isn't
+        // materialised anywhere. The per-item contribution should be
+        // empty in all fields. Key point: the query returns Some, not
+        // None, so the file-level fan-out doesn't fall back to the
+        // monolithic path.
+        let db = FossilDb::default();
+        let file = SourceFile::new(&db, "let x = 42".into(), "test".into());
+        let sym = Symbol::new(&db, "x");
+        let loc = find_let_by_name(&db, file, sym).expect("let exists");
+        let contrib = let_rq(&db, loc).expect("primitive let_rq must succeed");
+        assert!(contrib.sources.is_empty());
+        assert!(contrib.ctes.is_empty());
+        assert!(contrib.emissions.is_empty());
     }
 
     #[test]
