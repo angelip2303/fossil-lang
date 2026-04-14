@@ -86,7 +86,7 @@ pub struct FileDefMapForBody {
 ///
 /// This walks the ItemTree (NOT the parse output directly) and pre-registers:
 /// 1. All sink namespaces from the registry (e.g. `Rdf.materialize`)
-/// 2. All provider-resolved record types (from `find_provider_calls_from_ast`)
+/// 2. All meta-call resolved record types (from `register_meta_call_schemas`)
 /// 3. All top-level type declarations
 /// 4. All top-level let bindings
 ///
@@ -102,10 +102,8 @@ pub fn file_def_map_for_body(db: &dyn Db, file: SourceFile) -> FileDefMapForBody
     let mut def_map = DefMap::default();
     let mut registered_types = RegisteredTypes::new();
 
-    // Sinks — exact mirror of queries::register_sinks_in_def_map.
     crate::queries::register_sinks_in_def_map(db, &mut def_map);
-    // Provider schemas — exact mirror of queries::register_provider_schemas_from_ast.
-    crate::queries::register_provider_schemas_from_ast(
+    crate::queries::register_meta_call_schemas(
         db,
         &ast,
         &mut def_map,

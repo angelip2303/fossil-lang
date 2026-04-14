@@ -51,7 +51,9 @@ pub fn parse_stmt<'a, I>(ctx: &'a AstCtx<'_>) -> impl Parser<'a, I, StmtId, Pars
 where
     I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
-    // For top-level statements, use parse_expr(ctx)
+    // TODO: error recovery via chumsky 0.11 recover_with — parser-level
+    // recovery needs careful integration with the outer .repeated() collector
+    // to avoid zero-progress panics; tracked as a follow-up commit.
     parse_stmt_impl(ctx, parse_expr(ctx))
 }
 

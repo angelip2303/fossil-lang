@@ -41,7 +41,7 @@ pub struct SchemaRequest {
 #[salsa::tracked]
 pub fn schema_needs(db: &dyn Db, file: SourceFile) -> Vec<SchemaRequest> {
     let ast = parse(db, file);
-    find_provider_calls_from_ast(db, &ast)
+    find_meta_calls_from_ast(db, &ast)
 }
 
 // ── catalog_def_ids ─────────────────────────────────────────────────
@@ -82,7 +82,6 @@ pub struct CatalogDefIds {
 
 // ── parse ───────────────────────────────────────────────────────────
 
-/// Parse source text into AST.
 #[salsa::tracked]
 pub fn parse(db: &dyn Db, file: SourceFile) -> Ast {
     match Parser::parse(db, file.text(db), 0) {
@@ -108,7 +107,7 @@ pub fn lower(db: &dyn Db, file: SourceFile) -> LowerResult {
 
     register_catalog_in_def_map(db, &mut def_map);
     register_sinks_in_def_map(db, &mut def_map);
-    register_provider_schemas_from_ast(db, &ast, &mut def_map, &mut registered_types);
+    register_meta_call_schemas(db, &ast, &mut def_map, &mut registered_types);
 
     let metadata = extract_type_metadata(&ast);
     match crate::passes::lower::lower_with_metadata(db, ast, def_map, registered_types, metadata) {
@@ -197,18 +196,23 @@ pub(crate) fn register_sinks_in_def_map(db: &dyn Db, def_map: &mut DefMap) {
     }
 }
 
-pub(crate) fn register_provider_schemas_from_ast(
+/// For every `MetaCall` in the AST, look up the source in the catalog and
+/// register its record type in the per-file DefMap. Schemas come from either
+/// `SourceDef.schema` (static) or `db.source_schema(...)` (dynamic, host hook).
+///
+/// This is the precursor to a future `expand_meta_calls` pass that would also
+/// rewrite the AST node into a typed Application.
+pub(crate) fn register_meta_call_schemas(
     db: &dyn Db,
     ast: &crate::ast::Ast,
     def_map: &mut DefMap,
     registered_types: &mut RegisteredTypes,
 ) {
-    for call in find_provider_calls_from_ast(db, ast) {
+    for call in find_meta_calls_from_ast(db, ast) {
         let src = match db.registry().sources.find(&call.provider) {
             Some(s) => s,
             None => continue,
         };
-        // Static schema → use directly. Dynamic schema → ask host.
         let columns: Vec<(String, String)> = match &src.schema {
             Some(schema) => schema.clone(),
             None => match db.source_schema(&call.provider, &call.path) {
@@ -227,11 +231,10 @@ pub(crate) fn register_provider_schemas_from_ast(
     }
 }
 
-fn find_provider_calls_from_ast(db: &dyn Db, ast: &crate::ast::Ast) -> Vec<SchemaRequest> {
+fn find_meta_calls_from_ast(db: &dyn Db, ast: &crate::ast::Ast) -> Vec<SchemaRequest> {
     use crate::ast::{ExprKind, StmtKind};
     use crate::common::{Literal, MetaArg};
     let mut calls = Vec::new();
-
     for &stmt_id in &ast.root {
         let stmt = &ast.stmts[stmt_id];
         if let StmtKind::Let { value, .. } = &stmt.kind {
@@ -239,16 +242,11 @@ fn find_provider_calls_from_ast(db: &dyn Db, ast: &crate::ast::Ast) -> Vec<Schem
             if let ExprKind::MetaCall { provider, args } = &expr.kind {
                 let provider_name = provider.display(db);
                 let path = args.iter().find_map(|arg| match arg {
-                    MetaArg::Positional(Literal::String(s)) => {
-                        Some(s.text(db).to_string())
-                    }
+                    MetaArg::Positional(Literal::String(s)) => Some(s.text(db).to_string()),
                     _ => None,
                 });
                 if let Some(path) = path {
-                    calls.push(SchemaRequest {
-                        provider: provider_name,
-                        path,
-                    });
+                    calls.push(SchemaRequest { provider: provider_name, path });
                 }
             }
         }

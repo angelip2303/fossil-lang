@@ -39,7 +39,6 @@ impl Parser {
             })
             .collect();
 
-        // Report lexer errors before parsing
         if !lexer_errors.is_empty() {
             let mut compile_errors = Vec::new();
             for span in lexer_errors {
@@ -70,32 +69,22 @@ impl Parser {
 
         match parser.parse(input).into_result() {
             Ok(root_stmts) => {
-                // Extract AST from Rc<RefCell<>>
                 let mut final_ast = ast.borrow_mut();
-
-                // Store root statements
                 final_ast.root = root_stmts;
-
                 let final_ast = std::mem::take(&mut *final_ast);
-
                 Ok(final_ast)
             }
             Err(chumsky_errors) => {
-                // Collect all parse errors
                 let mut compile_errors = Vec::new();
-
                 for err in chumsky_errors {
-                    // Extract custom messages cleanly, fall back to debug format for others
                     let error_message = match err.reason() {
                         RichReason::Custom(msg) => msg.to_string(),
                         reason => format!("Parse error: {:?}", reason),
                     };
-                    // Convert SimpleSpan to Loc
                     let simple_span = err.span();
                     let loc = Loc::new(source_id, simple_span.into_range());
                     compile_errors.push(FossilError::syntax(error_message, loc));
                 }
-
                 Err(compile_errors)
             }
         }
