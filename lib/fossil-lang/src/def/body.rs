@@ -115,10 +115,16 @@ pub fn file_def_map_for_body(db: &dyn Db, file: SourceFile) -> FileDefMapForBody
     );
 
     // Pre-register top-level type declarations (names visible to all bodies).
+    // For each Type we also register its record constructor under the same
+    // name in ValueNS, so body lowerers can resolve `Foo(...)` call syntax to
+    // a `RecordConstructor` DefId without having to lower the Type stmt first.
+    // The ctor's parameter/return types are materialised later by the
+    // per-item `type_decl_infer` query.
     let mut top_level_types = Vec::with_capacity(tree.types.len());
     for ty_item in &tree.types {
         let def_id = def_map.insert(db, None, ty_item.name, DefKindTag::Type);
         top_level_types.push((ty_item.name, def_id));
+        def_map.insert(db, None, ty_item.name, DefKindTag::RecordConstructor);
     }
 
     // Pre-register top-level lets (names visible to all bodies). Note: legacy
@@ -278,26 +284,93 @@ fn lower_one(
 // step. For those bodies, `let_infer` returns `None` and callers should
 // fall back to the file-level `infer(file)` query.
 
-use crate::ty::types::{Polytype, Ty};
-use crate::ty::typecheck::TypeChecker;
+use crate::ty::types::{Polytype, Ty, TyKind};
+use crate::ty::typecheck::{TypeChecker, TypeDeclInfo};
+
+/// Result of per-item inference over a `type` declaration: the interned
+/// `TypeDeclInfo` plus, if the type has a record constructor, the
+/// constructor's function type (`(fields…) -> Named(self)`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypeDeclInferResult {
+    pub info: TypeDeclInfo,
+    pub ctor_fn_ty: Option<Ty>,
+}
+
+/// Salsa query: extract the `TypeDeclInfo` + record-constructor function
+/// type for a single top-level `type` declaration. The returned info is
+/// consumed by `let_infer` to pre-populate TypeChecker's `type_index`
+/// when an inferred body references a user-defined record.
+#[salsa::tracked]
+pub fn type_decl_infer_query<'db>(
+    db: &'db dyn Db,
+    loc: InternedTypeDeclLoc<'db>,
+) -> Option<TypeDeclInferResult> {
+    let file = loc.file(db);
+    let body = type_decl_body_query(db, loc);
+    let scaffold = file_def_map_for_body(db, file);
+    let this_idx = loc.idx(db);
+    let this_def_id = scaffold.top_level_types.get(this_idx).map(|(_, did)| *did)?;
+
+    // Body IR contains exactly one Type stmt (lowered via lower_item_body).
+    let stmt = body.ir.stmts.iter().next()?;
+    let (ty_id, ctor_params, field_names) = match &stmt.1.kind {
+        crate::ir::StmtKind::Type { ty, ctor_params, .. } => {
+            let field_names = match &body.ir.types[*ty].kind {
+                crate::ir::TypeKind::Record(fields) => fields.field_names(),
+                _ => vec![],
+            };
+            (*ty, ctor_params.clone(), field_names)
+        }
+        _ => return None,
+    };
+
+    let interned_ty = crate::ty::typecheck::intern_ir_type(db, &body.ir, ty_id);
+    let info = TypeDeclInfo {
+        ty: interned_ty,
+        ctor_param_count: ctor_params.len(),
+        ctor_param_names: ctor_params.iter().map(|p| p.name).collect(),
+        field_names,
+    };
+
+    // Derive the record-constructor function type. When `ctor_params` are
+    // declared they define the public call interface; otherwise the ctor
+    // takes one argument per record field, in declaration order.
+    let ctor_fn_ty = match interned_ty.kind(db) {
+        TyKind::Record(fields) => {
+            let return_ty = Ty::mk_named(db, this_def_id);
+            let param_types: Vec<Ty> = if ctor_params.is_empty() {
+                fields.fields.iter().map(|(_, t)| *t).collect()
+            } else {
+                ctor_params
+                    .iter()
+                    .map(|p| crate::ty::typecheck::intern_ir_type(db, &body.ir, p.ty))
+                    .collect()
+            };
+            Some(Ty::mk_function(db, param_types, return_ty))
+        }
+        _ => None,
+    };
+
+    Some(TypeDeclInferResult { info, ctor_fn_ty })
+}
+
+/// Convenience wrapper: accepts a lifetime-free [`TypeDeclLoc`].
+pub fn type_decl_infer(db: &dyn Db, loc: TypeDeclLoc) -> Option<TypeDeclInferResult> {
+    type_decl_infer_query(db, loc.to_interned(db))
+}
 
 /// Salsa query: infer the type of a single top-level `let` binding.
-/// Returns `None` for bodies that touch type declarations (records,
-/// constructors) that `let_infer` does not yet resolve on its own.
+///
+/// Returns `None` only when inference genuinely fails (unresolved sibling,
+/// type error). Bodies that reference user-defined types now pre-populate
+/// the checker's `type_index` via recursive `type_decl_infer` calls, so
+/// record-constructing bodies are supported.
 #[salsa::tracked]
 pub fn let_infer_query<'db>(db: &'db dyn Db, loc: InternedLetLoc<'db>) -> Option<Ty> {
     let file = loc.file(db);
     let this_idx = loc.idx(db);
     let body = let_body_query(db, loc);
     let scaffold = file_def_map_for_body(db, file);
-
-    // Short-circuit: bodies that declare or reference user-defined types
-    // require a populated `type_index` in TypeChecker, which this query
-    // does not yet build. Detect that case up-front and bail so the caller
-    // can fall back to the monolithic file-level `infer`.
-    if body_touches_types(db, body) {
-        return None;
-    }
 
     // Build a TypeChecker-ready IR: the body's arenas + a single-stmt root.
     // `lower_item_body` does not push anything into `ir.root`; the root_stmt
@@ -314,38 +387,101 @@ pub fn let_infer_query<'db>(db: &'db dyn Db, loc: InternedLetLoc<'db>) -> Option
         body.resolutions.clone(),
     );
 
-    // Pre-populate env with sibling let types. Walk resolutions for
-    // referenced top-level let DefIds, find their LetLoc, and recursively
-    // call `let_infer`. Each recursive call establishes a salsa dependency,
-    // so editing sibling A's body invalidates `let_infer(B)` only when B
-    // actually referenced A.
-    let this_let_def_id = scaffold
-        .top_level_lets
-        .get(this_idx)
-        .map(|(_, did)| *did);
+    // Classify every DefId this body references and resolve it per-item:
+    //   - Let DefId  → recursive `let_infer` → inject sibling type into env
+    //   - Type DefId → recursive `type_decl_infer` → inject into type_index
+    //                  and, for record types, register the ctor fn in env
+    //   - RecordConstructor DefId → look up its parent type via DefMap and
+    //                  inject the ctor fn in env (the parent type's infer
+    //                  call already populates type_index for the named type)
+    //
+    // Each recursive call establishes a salsa dependency, so editing a
+    // sibling body invalidates this query only if the referenced type or
+    // binding actually changed.
+    let this_let_def_id = scaffold.top_level_lets.get(this_idx).map(|(_, did)| *did);
     let referenced: std::collections::HashSet<DefId> =
         body.resolutions.expr_defs.values().copied().collect();
+
     for def_id in referenced {
         if Some(def_id) == this_let_def_id {
             continue;
         }
-        if !matches!(def_id.kind(db), DefKindTag::Let) {
-            continue;
-        }
-        let Some(sibling_idx) = scaffold
-            .top_level_lets
-            .iter()
-            .position(|(_, did)| *did == def_id)
-        else {
-            continue;
-        };
-        let sibling_loc = LetLoc::new(db, file, sibling_idx);
-        if let Some(sibling_ty) = let_infer(db, sibling_loc) {
-            checker.env.insert(def_id, Polytype::mono(sibling_ty));
-        } else {
-            // Sibling itself bailed out — we can't type-check this body
-            // without its type. Bail and let the caller fall back.
-            return None;
+        match def_id.kind(db) {
+            DefKindTag::Let => {
+                let Some(sibling_idx) = scaffold
+                    .top_level_lets
+                    .iter()
+                    .position(|(_, did)| *did == def_id)
+                else {
+                    continue;
+                };
+                let sibling_loc = LetLoc::new(db, file, sibling_idx);
+                if let Some(sibling_ty) = let_infer(db, sibling_loc) {
+                    checker.env.insert(def_id, Polytype::mono(sibling_ty));
+                } else {
+                    return None;
+                }
+            }
+            DefKindTag::Type => {
+                let Some(type_idx) = scaffold
+                    .top_level_types
+                    .iter()
+                    .position(|(_, did)| *did == def_id)
+                else {
+                    continue;
+                };
+                let type_loc = TypeDeclLoc::new(db, file, type_idx);
+                let Some(result) = type_decl_infer(db, type_loc) else {
+                    return None;
+                };
+                checker.type_index.insert(def_id, result.info.clone());
+                // Also register the ctor fn in env for call-through, mirror
+                // of TypeChecker::init_record_constructors.
+                if let Some(ctor_fn_ty) = result.ctor_fn_ty {
+                    let type_name = def_id.name(db);
+                    if let Some(ctor_def_id) = scaffold.def_map.find_in_ns(
+                        type_name,
+                        crate::def_map::Namespace::ValueNS,
+                        db,
+                        |k| matches!(k, DefKindTag::RecordConstructor),
+                    ) {
+                        checker
+                            .env
+                            .insert(ctor_def_id, Polytype::mono(ctor_fn_ty));
+                    }
+                }
+            }
+            DefKindTag::RecordConstructor => {
+                // Find the parent type by name and pull its info through the
+                // type_decl_infer query.
+                let ctor_name = def_id.name(db);
+                let Some(type_def_id) = scaffold.def_map.find_in_ns(
+                    ctor_name,
+                    crate::def_map::Namespace::TypeNS,
+                    db,
+                    |k| matches!(k, DefKindTag::Type),
+                ) else {
+                    continue;
+                };
+                let Some(type_idx) = scaffold
+                    .top_level_types
+                    .iter()
+                    .position(|(_, did)| *did == type_def_id)
+                else {
+                    continue;
+                };
+                let type_loc = TypeDeclLoc::new(db, file, type_idx);
+                let Some(result) = type_decl_infer(db, type_loc) else {
+                    return None;
+                };
+                checker.type_index.insert(type_def_id, result.info.clone());
+                if let Some(ctor_fn_ty) = result.ctor_fn_ty {
+                    checker
+                        .env
+                        .insert(def_id, Polytype::mono(ctor_fn_ty));
+                }
+            }
+            _ => {}
         }
     }
 
@@ -360,28 +496,6 @@ pub fn let_infer(db: &dyn Db, loc: LetLoc) -> Option<Ty> {
     let_infer_query(db, loc.to_interned(db))
 }
 
-/// Conservative "does this body need a populated type_index?" check.
-/// Returns `true` if the body contains `RecordInstance`, `Projection`,
-/// `Join`, `Ref`, or resolves any identifier to a non-`Let` DefId.
-/// When this returns `true`, `let_infer` bails and the caller must
-/// fall back to the monolithic `infer(file)` query.
-fn body_touches_types(db: &dyn Db, body: &HirBody) -> bool {
-    for (_, expr) in body.ir.exprs.iter() {
-        match &expr.kind {
-            crate::ir::ExprKind::RecordInstance { .. }
-            | crate::ir::ExprKind::Projection { .. }
-            | crate::ir::ExprKind::Join { .. }
-            | crate::ir::ExprKind::Ref { .. } => return true,
-            _ => {}
-        }
-    }
-    for &def_id in body.resolutions.expr_defs.values() {
-        if !matches!(def_id.kind(db), DefKindTag::Let) {
-            return true;
-        }
-    }
-    false
-}
 
 #[cfg(test)]
 mod tests {
@@ -509,10 +623,19 @@ mod tests {
     }
 
     #[test]
-    fn let_infer_bails_on_record_instance() {
-        // `let_infer` doesn't yet populate the type_index; any body that
-        // constructs a user-defined record must return None so callers
-        // fall back to the monolithic file-level infer.
+    fn let_infer_record_instance_uses_type_decl_infer() {
+        // Body constructs a user-defined record via Application-style
+        // constructor call. Milestone 2 pre-populates checker.type_index
+        // AND env (ctor fn type) via recursive `type_decl_infer`, so this
+        // body must infer successfully instead of bailing.
+        //
+        // Note: the monolithic TypeChecker's `unify` unwraps `Named(T)` to
+        // its underlying `Record` before binding inference variables — so
+        // an Application-style constructor call like `Point(x: 1, y: 2)`
+        // yields a `Record` type, not `Named(Point)`. Same behavior as the
+        // file-level `infer(file)` query; what we're testing here is that
+        // `let_infer` reaches parity with it, not that it "promotes" to
+        // Named.
         let db = FossilDb::default();
         let file = SourceFile::new(
             &db,
@@ -521,10 +644,16 @@ mod tests {
         );
         let p_sym = Symbol::new(&db, "p");
         let p_loc = find_let_by_name(&db, file, p_sym).expect("let p exists");
-        let result = let_infer(&db, p_loc);
+        let ty = let_infer(&db, p_loc).expect("record-typed let must infer");
+        let kind = ty.kind(&db);
+        let is_named_point = matches!(kind, TyKind::Named(_));
+        let is_two_field_record = matches!(
+            &kind,
+            TyKind::Record(fields) if fields.fields.len() == 2,
+        );
         assert!(
-            result.is_none(),
-            "body constructing user type must bail (got: {result:?})",
+            is_named_point || is_two_field_record,
+            "expected Named(Point) or Record {{x,y}}, got {kind:?}",
         );
     }
 
