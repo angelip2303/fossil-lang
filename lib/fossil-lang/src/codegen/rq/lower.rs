@@ -147,40 +147,16 @@ impl<'a> RqLowering<'a> {
         (self.rq, self.env)
     }
 
-    /// Find the named String value of an attribute argument on the type whose
-    /// name matches `type_name`. Checks the pre-computed `type_attrs` map
-    /// first (populated by per-item lowering via `with_type_attrs`), then
-    /// falls back to walking `self.ir.stmts` — the only place file-level
-    /// lowering sees Type stmts. The compiler doesn't care which attribute
+    /// Find the named String value of an attribute argument on the type
+    /// whose name matches `type_name`. Reads from the pre-computed
+    /// `type_attrs` map populated by `build_per_item_rq_ctx` via
+    /// `with_type_attrs`. The compiler doesn't care which attribute
     /// supplied the value (e.g. `#[rdf]`, `#[graph]`, …); only the key
     /// lookup matters.
     fn lookup_type_attr_string(&self, type_name: &str, key: &str) -> Option<String> {
-        if let Some(value) = self
-            .type_attrs
+        self.type_attrs
             .get(&(type_name.to_string(), key.to_string()))
-        {
-            return Some(value.clone());
-        }
-        let key_sym = Symbol::new(self.db, key);
-        for stmt in self.ir.stmts.iter() {
-            if let crate::ir::StmtKind::Type { name, attrs, .. } = &stmt.1.kind {
-                if name.text(self.db) != type_name {
-                    continue;
-                }
-                for attr in attrs {
-                    for arg in &attr.args {
-                        if let crate::ast::AttributeArg::Named { key, value } = arg {
-                            if *key == key_sym {
-                                if let crate::ast::Literal::String(s) = value {
-                                    return Some(s.text(self.db).to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        None
+            .cloned()
     }
 
     /// Lower the entire program to a RelationalQuery.

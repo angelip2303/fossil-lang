@@ -749,7 +749,10 @@ pub fn let_rq_query<'db>(
 
     let lowered = match lowering.lower() {
         Ok(rq) => rq,
-        Err(_) => return None,
+        Err(e) => {
+            let _ = crate::error::emit_error(db, e);
+            return None;
+        }
     };
     // Can't use into_parts() here because lower() consumes self and
     // returns only the RelationalQuery. Re-run with a second instance
@@ -810,7 +813,10 @@ pub fn pipeline_rq_query<'db>(
     lowering.env = env;
     let lowered = match lowering.lower() {
         Ok(rq) => rq,
-        Err(_) => return None,
+        Err(e) => {
+            let _ = crate::error::emit_error(db, e);
+            return None;
+        }
     };
 
     Some(PipelineRqContribution {
