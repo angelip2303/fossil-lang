@@ -201,6 +201,14 @@ pub enum FossilError {
         span: SourceSpan,
     },
 
+    #[error("cyclic definition: {chain}")]
+    #[diagnostic(code(fossil::resolve::cycle))]
+    Cycle {
+        chain: String,
+        #[label("cycle starts here")]
+        span: SourceSpan,
+    },
+
     #[error("IO error: {0}")]
     #[diagnostic(code(fossil::io))]
     Io(#[from] std::io::Error),
@@ -227,8 +235,44 @@ impl FossilError {
         Self::undefined("variable", name, loc)
     }
 
+    pub fn undefined_variable_with_suggestions(
+        name: impl Into<String>,
+        in_scope: impl IntoIterator<Item = String>,
+        loc: Loc,
+    ) -> Self {
+        Self::undefined_with_suggestions("variable", name, in_scope, loc)
+    }
+
     pub fn undefined_path(path: impl Into<String>, loc: Loc) -> Self {
         Self::undefined("path", path, loc)
+    }
+
+    pub fn undefined_path_with_suggestions(
+        path: impl Into<String>,
+        in_scope: impl IntoIterator<Item = String>,
+        loc: Loc,
+    ) -> Self {
+        Self::undefined_with_suggestions("path", path, in_scope, loc)
+    }
+
+    fn undefined_with_suggestions(
+        kind: &'static str,
+        name: impl Into<String>,
+        in_scope: impl IntoIterator<Item = String>,
+        loc: Loc,
+    ) -> Self {
+        let name_str = name.into();
+        let suggestions = closest_matches(&name_str, in_scope, 3);
+        let display = if suggestions.is_empty() {
+            name_str
+        } else {
+            format!("{} (did you mean: {}?)", name_str, suggestions.join(", "))
+        };
+        Self::Undefined { kind, name: display, span: loc.into() }
+    }
+
+    pub fn cycle(chain: impl Into<String>, loc: Loc) -> Self {
+        Self::Cycle { chain: chain.into(), span: loc.into() }
     }
 
     pub fn already_defined(name: impl Into<String>, first: Loc, second: Loc) -> Self {
@@ -241,6 +285,14 @@ impl FossilError {
 
     pub fn undefined_type(path: impl Into<String>, loc: Loc) -> Self {
         Self::undefined("type", path, loc)
+    }
+
+    pub fn undefined_type_with_suggestions(
+        path: impl Into<String>,
+        in_scope: impl IntoIterator<Item = String>,
+        loc: Loc,
+    ) -> Self {
+        Self::undefined_with_suggestions("type", path, in_scope, loc)
     }
 
     pub fn type_mismatch(message: impl Into<String>, loc: Loc) -> Self {
@@ -436,6 +488,7 @@ impl FossilError {
             | Self::ParseError { span, .. }
             | Self::DataError { span, .. }
             | Self::ProviderKindMismatch { span, .. }
+            | Self::Cycle { span, .. }
             | Self::Internal { span, .. } => Some(span),
             Self::Io(_) => None,
         }?;
@@ -502,6 +555,41 @@ mod tests {
         errors.push(FossilError::syntax("bad token", dummy_loc()));
         errors.push(FossilError::syntax("another error", dummy_loc()));
         assert_eq!(errors.len(), 2);
+    }
+
+    #[test]
+    fn cycle_constructor() {
+        let err = FossilError::cycle("A → B → A", dummy_loc());
+        assert!(matches!(err, FossilError::Cycle { ref chain, .. } if chain == "A → B → A"));
+    }
+
+    #[test]
+    fn undefined_variable_with_suggestions_picks_close_match() {
+        let err = FossilError::undefined_variable_with_suggestions(
+            "fooo",
+            ["foo".to_string(), "bar".to_string(), "qux".to_string()],
+            dummy_loc(),
+        );
+        if let FossilError::Undefined { name, .. } = err {
+            assert!(name.contains("did you mean"));
+            assert!(name.contains("foo"));
+        } else {
+            panic!("expected Undefined variant");
+        }
+    }
+
+    #[test]
+    fn undefined_variable_with_no_close_match_omits_suggestion() {
+        let err = FossilError::undefined_variable_with_suggestions(
+            "totally_unrelated",
+            ["x".to_string(), "y".to_string()],
+            dummy_loc(),
+        );
+        if let FossilError::Undefined { name, .. } = err {
+            assert!(!name.contains("did you mean"));
+        } else {
+            panic!("expected Undefined variant");
+        }
     }
 
     #[test]
