@@ -83,15 +83,11 @@ pub struct CatalogDefIds {
 
 #[salsa::tracked]
 pub fn parse(db: &dyn Db, file: SourceFile) -> Ast {
-    match Parser::parse(db, file.text(db), 0) {
-        Ok(ast) => ast,
-        Err(errors) => {
-            for e in errors {
-                let _ = emit_error(db, e);
-            }
-            Ast::default()
-        }
+    let output = Parser::parse(db, file.text(db), 0);
+    for e in output.errors {
+        let _ = emit_error(db, e);
     }
+    output.ast
 }
 
 // ── lower ───────────────────────────────────────────────────────────
@@ -297,6 +293,31 @@ mod tests {
         let file = SourceFile::new(&db, "let x = 42".into(), "test".into());
         let ast = parse(&db, file);
         assert!(!ast.root.is_empty());
+    }
+
+    #[test]
+    fn parse_recovers_after_malformed_stmt() {
+        // `let = bad` is garbage (missing name), but the file also contains a
+        // valid `let y = 99` after it. With stmt-level recovery, the parser
+        // must emit a diagnostic for the bad stmt AND still produce the good
+        // one in the returned AST.
+        let db = FossilDb::default();
+        let file = SourceFile::new(
+            &db,
+            "let = bad\nlet y = 99".into(),
+            "test".into(),
+        );
+        let ast = parse(&db, file);
+        let diags = parse::accumulated::<Diagnostic>(&db, file);
+
+        assert!(
+            !diags.is_empty(),
+            "expected at least one diagnostic for the malformed stmt",
+        );
+        assert!(
+            !ast.root.is_empty(),
+            "partial AST must still contain the recovered `let y = 99`",
+        );
     }
 
     #[test]

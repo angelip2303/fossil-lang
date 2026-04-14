@@ -49,12 +49,19 @@ impl AstCtx<'_> {
 
 pub fn parse_stmt<'a, I>(ctx: &'a AstCtx<'_>) -> impl Parser<'a, I, StmtId, ParserError<'a>> + Clone
 where
-    I: Input<'a, Token = Token<'a>, Span = SimpleSpan>,
+    I: chumsky::input::ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>,
 {
-    // TODO: error recovery via chumsky 0.11 recover_with — parser-level
-    // recovery needs careful integration with the outer .repeated() collector
-    // to avoid zero-progress panics; tracked as a follow-up commit.
+    // Stmt-level error recovery: when the main parse_stmt combinator fails,
+    // `skip_then_retry_until` advances the input one token at a time and
+    // retries parse_stmt at each new position until a retry succeeds OR
+    // end-of-input is hit. The retry-succeeds branch makes the outer
+    // `.repeated()` see progress, so there's no zero-progress panic.
+    //
+    // Each attempt's failure emits its own `Rich` error into the parser
+    // error channel; `Parser::parse_with_state` then returns the partial
+    // AST via `into_output_errors()` in the Parser boundary (parse.rs).
     parse_stmt_impl(ctx, parse_expr(ctx))
+        .recover_with(skip_then_retry_until(any().ignored(), end()))
 }
 
 /// Internal implementation of statement parsing
