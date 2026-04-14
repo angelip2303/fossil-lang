@@ -11,7 +11,7 @@ use sqlparser::ast::{
     TableWithJoins, With,
 };
 
-use crate::dialect::{ScanStrategy, SqlDialect, table_function, table_ref};
+use crate::dialect::{ScanStrategy, SqlDialect, table_ref};
 
 use super::{JoinKind, RelationalQuery, Transform};
 
