@@ -1,17 +1,31 @@
-//! Relational Query (RQ) — dialect-independent relational algebra.
+//! Relational Query (RQ) — the compiled-SQL output of fossil-lang.
 //!
-//! The RQ sits between the Fossil IR (semantic: records, types, refs)
-//! and SQL (concrete, DuckDB-specific). It represents data operations
-//! as a pipeline of transforms over named tables and columns.
+//! ## Design: catalog-based source resolution
 //!
-//! Column expressions are stored as `sqlparser::ast::Expr` directly. This
-//! matches DataFusion's `Unparser` pattern (DataFusion also builds sqlparser
-//! AST nodes internally and uses their `Display` impl for emission). Building
-//! a custom expression IR on top of sqlparser would duplicate the work
-//! sqlparser already does — pretty printing, dialect awareness, AST visitors.
+//! The compiled SQL references tables **by name only**. It never inlines
+//! format-specific reads like `read_csv('path', delim=',')`. Every source
+//! used by the query is recorded in `sources` as a [`SourceRef`] — the
+//! source manifest. The host is responsible for resolving each manifest
+//! entry against its catalog (DuckDB views, preprocessed temp tables,
+//! etc.) before executing the emitted SQL.
 //!
-//! Reference: PRQL's RQ, Ontop's IQ tree, Ibis's ops.Node DAG, DataFusion
-//! `datafusion/sql/src/unparser/expr.rs`.
+//! This mirrors the reference designs:
+//! - **DataFusion**: `LogicalPlan::TableScan` resolves against a
+//!   `SchemaProvider`; the unparser emits `FROM table_name` only.
+//! - **PRQL**: `TableRef` → compiled SQL uses the alias; the context
+//!   resolves it at bind time.
+//! - **Ibis**: `ops.UnboundTable` → backend resolves at execution.
+//!
+//! As a consequence, fossil-lang has **no dialect abstraction at all**.
+//! It doesn't know whether the host is DuckDB, Postgres, or Polars. It
+//! doesn't know which formats need preprocessing. Those decisions live
+//! entirely in the host's catalog-resolution step, where they belong.
+//!
+//! ## Side-tables
+//!
+//! `emissions` and `outputs` describe how lowered CTEs feed the
+//! host-side materialization plan (which CTE produces which RDF entity,
+//! where to write the graph). These have no sqlparser equivalent.
 
 pub mod build;
 pub mod to_ast;
@@ -19,77 +33,42 @@ pub mod lower;
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
-use sqlparser::ast::{Expr, Ident};
+use sqlparser::ast::{Cte, Expr, Ident};
 
 /// A complete relational query produced by lowering the Fossil IR.
 ///
-/// The pipeline is linear: transforms execute in order, each consuming
-/// input table(s) and producing an output table. Tables and columns are
-/// referenced by `sqlparser::ast::Ident` directly — the same type sqlparser
-/// uses to emit SQL — so there is no parallel name registry to maintain.
-///
-/// **Not serializable.** Holds `sqlparser::ast::Expr` which (without enabling
-/// sqlparser's `serde` feature) does not implement `Serialize` / `Deserialize`.
-/// Hosts that need to serialize compiled output should use `FossilPlan`,
-/// which is serializable and embeds only the emitted SQL string.
+/// **Not serializable.** Holds `sqlparser::ast::Cte` which embeds `Expr`
+/// etc. — sqlparser does not enable `serde` by default. Hosts that need
+/// to serialize compiled output should use `FossilPlan`, which embeds
+/// only the emitted SQL string.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RelationalQuery {
-    /// Ordered pipeline of transforms.
-    pub transforms: Vec<Transform>,
-    /// Which tables map to RDF entity types.
+    /// Source manifest: every named source this query reads from. Host
+    /// resolves each entry against its catalog before executing the SQL.
+    pub sources: Vec<SourceRef>,
+    /// Ordered pipeline of CTEs. Later CTEs can reference earlier ones
+    /// (and source aliases) by name.
+    pub ctes: Vec<Cte>,
+    /// Which CTE outputs map to RDF entity types.
     pub emissions: Vec<EmissionDecl>,
     /// Output materialization instructions.
     pub outputs: Vec<OutputDecl>,
 }
 
-/// A single relational operation.
+/// A single named source referenced by the compiled SQL.
+///
+/// The compiled SQL contains `FROM <alias>` references; the host must
+/// register each alias in its catalog (e.g. `CREATE OR REPLACE VIEW
+/// <alias> AS SELECT * FROM read_csv(...)`) before executing the query.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Transform {
-    /// Load data from source.
-    Scan {
-        output: Ident,
-        source: ScanSource,
-    },
-    /// SELECT columns FROM input.
-    Project {
-        input: Ident,
-        output: Ident,
-        columns: Vec<(Ident, Expr)>,
-    },
-    /// JOIN two tables.
-    Join {
-        left: Ident,
-        right: Ident,
-        output: Ident,
-        on: Vec<(Ident, Ident)>,
-        kind: JoinKind,
-        suffix: Option<String>,
-    },
-    /// WHERE predicate.
-    Filter {
-        input: Ident,
-        output: Ident,
-        predicate: Expr,
-    },
-}
-
-/// External data source in the RQ. Backend-agnostic.
-/// The `SqlDialect` decides how to execute it (direct SQL, preprocessing, etc.).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ScanSource {
+pub struct SourceRef {
+    pub alias: Ident,
     pub format: String,
     pub path: String,
     pub params: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub enum JoinKind {
-    Inner,
-    Left,
-}
-
-/// Maps a table to an RDF entity type.
+/// Maps a CTE output to an RDF entity type.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmissionDecl {
     pub table: Ident,

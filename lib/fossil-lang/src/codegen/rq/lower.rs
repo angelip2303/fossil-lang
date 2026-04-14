@@ -1,14 +1,21 @@
 //! IR → RQ lowering.
 //!
-//! Walks the Fossil IR (same structure as IrEvaluator) but produces
-//! RQ transforms instead of executing with Polars.
+//! Walks the Fossil IR and produces `sqlparser::ast::Cte` nodes directly,
+//! alongside a source manifest (`SourceRef`) and the host-side materialization
+//! plan (`EmissionDecl`/`OutputDecl`). There is no intermediate custom AST.
 //!
-//! Each ExprKind maps to an RqValue (column expression, table reference,
-//! or entity emission).
+//! Source scans register into `rq.sources` and flow downstream as plain
+//! table-name references; the compiled SQL never inlines format-specific
+//! reads like `read_csv(...)`. The host resolves each `SourceRef` against
+//! its catalog before executing the query.
 
 use std::collections::HashMap;
 
-use sqlparser::ast::{Expr, Ident};
+use sqlparser::ast::helpers::attached_token::AttachedToken;
+use sqlparser::ast::{
+    self, BinaryOperator, Cte, Expr, Ident, Join, JoinConstraint, JoinOperator, Query, Select,
+    SelectItem, SetExpr, TableAlias, TableFactor, TableWithJoins,
+};
 
 use crate::db::Db;
 #[allow(unused_imports)] // trait must be in scope for method resolution
@@ -18,9 +25,7 @@ use crate::error::FossilError;
 use crate::ir::{ExprId, ExprKind, Ir, Resolutions};
 use crate::ty::typecheck::TypeIndex;
 use crate::registry::SourceDef;
-use crate::rq::{
-    build, EmissionDecl, JoinKind, OutputDecl, RelationalQuery, ScanSource, Transform,
-};
+use crate::rq::{build, EmissionDecl, OutputDecl, RelationalQuery, SourceRef};
 
 /// Internal value during lowering — NOT part of the final RQ.
 #[derive(Clone, Debug)]
@@ -228,12 +233,12 @@ impl<'a> RqLowering<'a> {
                 right,
                 left_on,
                 right_on,
-                suffix,
+                suffix: _,
             } => {
                 let left_table = self.lower_expr(*left)?.into_table()?;
                 let right_table = self.lower_expr(*right)?.into_table()?;
 
-                let on: Vec<(Ident, Ident)> = left_on
+                let on_pairs: Vec<(Ident, Ident)> = left_on
                     .iter()
                     .zip(right_on.iter())
                     .map(|(l, r)| {
@@ -244,16 +249,22 @@ impl<'a> RqLowering<'a> {
                     })
                     .collect();
 
-                let suffix_str = suffix.map(|s| s.text(self.db).to_string());
                 let output = self.next_table("joined");
-                self.rq.transforms.push(Transform::Join {
-                    left: left_table,
-                    right: right_table,
-                    output: output.clone(),
-                    on,
-                    kind: JoinKind::Inner,
-                    suffix: suffix_str,
-                });
+                let on_expr = join_on_expr(&left_table, &right_table, &on_pairs);
+                let from = vec![TableWithJoins {
+                    relation: table_ref(&left_table),
+                    joins: vec![Join {
+                        relation: table_ref(&right_table),
+                        global: false,
+                        join_operator: JoinOperator::Inner(JoinConstraint::On(on_expr)),
+                    }],
+                }];
+                let query = select_query(
+                    vec![SelectItem::Wildcard(wildcard_default())],
+                    from,
+                    None,
+                );
+                self.rq.ctes.push(cte(output.clone(), query));
                 Ok(RqValue::Table(output))
             }
 
@@ -282,17 +293,26 @@ impl<'a> RqLowering<'a> {
                 let spec = &all_specs[0]; // primary entity
                 let output = self.next_table(&spec.type_name.to_lowercase());
 
-                let columns: Vec<(Ident, Expr)> = spec
+                let projection: Vec<SelectItem> = spec
                     .select_items
                     .iter()
-                    .map(|(name, expr)| (Ident::new(name.clone()), expr.clone()))
+                    .map(|(name, expr)| {
+                        let alias = Ident::new(name.clone());
+                        if let Expr::Identifier(id) = expr {
+                            if id.value == alias.value {
+                                return SelectItem::UnnamedExpr(expr.clone());
+                            }
+                        }
+                        SelectItem::ExprWithAlias {
+                            expr: expr.clone(),
+                            alias,
+                        }
+                    })
                     .collect();
 
-                self.rq.transforms.push(Transform::Project {
-                    input: source_table,
-                    output: output.clone(),
-                    columns,
-                });
+                let from = vec![twj(table_ref(&source_table))];
+                let query = select_query(projection, from, None);
+                self.rq.ctes.push(cte(output.clone(), query));
 
                 // Register emission
                 let identity_columns: Vec<Ident> = spec
@@ -454,16 +474,14 @@ impl<'a> RqLowering<'a> {
     ) -> Result<RqValue, FossilError> {
         let path = self.extract_path(args);
         let params = self.extract_params(args, src);
-        let table = self.next_table(&format!("src_{}", src.name));
-        self.rq.transforms.push(Transform::Scan {
-            output: table.clone(),
-            source: ScanSource {
-                format: src.name.clone(),
-                path,
-                params,
-            },
+        let alias = self.next_table(&format!("src_{}", src.name));
+        self.rq.sources.push(SourceRef {
+            alias: alias.clone(),
+            format: src.name.clone(),
+            path,
+            params,
         });
-        Ok(RqValue::Table(table))
+        Ok(RqValue::Table(alias))
     }
 
     fn extract_path(&mut self, args: &[crate::ir::Argument]) -> String {
@@ -536,4 +554,121 @@ impl<'a> RqLowering<'a> {
         self.table_counter += 1;
         Ident::new(format!("{}_{}", prefix, self.table_counter))
     }
+}
+
+// ── sqlparser AST builders ─────────────────────────────────────────────
+//
+// Small constructors that assemble the sqlparser node trees. Every field
+// required by sqlparser 0.58 has to be populated explicitly — these
+// helpers centralise the boilerplate so the lowering above reads like
+// relational algebra rather than struct literals.
+
+fn cte(alias: Ident, query: Query) -> Cte {
+    Cte {
+        alias: TableAlias {
+            name: alias,
+            columns: vec![],
+        },
+        query: Box::new(query),
+        from: None,
+        materialized: None,
+        closing_paren_token: AttachedToken::empty(),
+    }
+}
+
+fn select_query(
+    projection: Vec<SelectItem>,
+    from: Vec<TableWithJoins>,
+    selection: Option<Expr>,
+) -> Query {
+    Query {
+        with: None,
+        body: Box::new(SetExpr::Select(Box::new(select_node(
+            projection, from, selection,
+        )))),
+        order_by: None,
+        limit_clause: None,
+        fetch: None,
+        locks: vec![],
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+        pipe_operators: vec![],
+    }
+}
+
+fn select_node(
+    projection: Vec<SelectItem>,
+    from: Vec<TableWithJoins>,
+    selection: Option<Expr>,
+) -> Select {
+    Select {
+        select_token: AttachedToken::empty(),
+        distinct: None,
+        top: None,
+        top_before_distinct: false,
+        projection,
+        exclude: None,
+        into: None,
+        from,
+        lateral_views: vec![],
+        prewhere: None,
+        selection,
+        group_by: ast::GroupByExpr::Expressions(vec![], vec![]),
+        cluster_by: vec![],
+        distribute_by: vec![],
+        sort_by: vec![],
+        having: None,
+        named_window: vec![],
+        qualify: None,
+        window_before_qualify: false,
+        value_table_mode: None,
+        connect_by: None,
+        flavor: ast::SelectFlavor::Standard,
+    }
+}
+
+fn twj(relation: TableFactor) -> TableWithJoins {
+    TableWithJoins {
+        relation,
+        joins: vec![],
+    }
+}
+
+fn wildcard_default() -> ast::WildcardAdditionalOptions {
+    ast::WildcardAdditionalOptions::default()
+}
+
+/// Build a `FROM <name>` table reference (a plain catalog-resolved name,
+/// whether it points at a host-registered view, a preprocessed temp table,
+/// or an upstream CTE is none of fossil-lang's concern).
+fn table_ref(name: &Ident) -> TableFactor {
+    TableFactor::Table {
+        name: ast::ObjectName(vec![ast::ObjectNamePart::Identifier(name.clone())]),
+        alias: None,
+        args: None,
+        with_hints: vec![],
+        version: None,
+        with_ordinality: false,
+        partitions: vec![],
+        json_path: None,
+        sample: None,
+        index_hints: vec![],
+    }
+}
+
+fn join_on_expr(left: &Ident, right: &Ident, on: &[(Ident, Ident)]) -> Expr {
+    let mut iter = on.iter().map(|(l, r)| Expr::BinaryOp {
+        left: Box::new(Expr::CompoundIdentifier(vec![left.clone(), l.clone()])),
+        op: BinaryOperator::Eq,
+        right: Box::new(Expr::CompoundIdentifier(vec![right.clone(), r.clone()])),
+    });
+    let first = iter
+        .next()
+        .unwrap_or(Expr::Value(ast::Value::Boolean(true).into()));
+    iter.fold(first, |acc, next| Expr::BinaryOp {
+        left: Box::new(acc),
+        op: BinaryOperator::And,
+        right: Box::new(next),
+    })
 }

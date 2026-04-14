@@ -1,30 +1,43 @@
 //! FossilPlan — the serializable output of the Fossil compiler.
 //!
 //! The plan is the boundary between compiler (pure) and host (executes).
-//! It contains 3 phases: sources → SQL → outputs.
+//! It contains three phases:
 //!
-//! Reference: dbt compiled models, DataFusion LogicalPlan.
+//! 1. **`sources`** — name-based source manifest. The host must register
+//!    each source alias in its catalog (DuckDB view, preprocessed temp
+//!    table, registered DataFrame, …) before running the SQL. fossil-lang
+//!    has no opinion on how: the decision lives entirely with the host,
+//!    which knows its execution environment.
+//! 2. **`sql`** — a single SQL query with CTEs that references sources
+//!    purely by alias. Never contains format-specific reads like
+//!    `read_csv(...)`.
+//! 3. **`outputs`** — RDF/GraphAr materialization instructions, applied
+//!    to the SQL result by the host after execution.
+//!
+//! Reference: dbt compiled models; DataFusion `LogicalPlan`; PRQL compiled
+//! output. They all separate "what to read" (catalog/manifest) from "what
+//! to compute" (SQL) from "how to write" (outputs).
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::dialect::{ScanStrategy, SqlDialect};
 use crate::rq::RelationalQuery;
 
 /// The complete execution plan produced by the compiler.
 ///
-/// Serializable as JSON (the `rq` field is skipped because
-/// `sqlparser::ast::Expr` is not `Serialize`). Hosts that need the raw
-/// relational query for introspection should hold the `RelationalQuery`
-/// alongside the plan rather than inside it.
+/// Serializable as JSON (the `rq` field is skipped because sqlparser AST
+/// nodes are not `Serialize`). Hosts that need the raw relational query
+/// for introspection should hold the `RelationalQuery` alongside the
+/// plan rather than inside it.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct FossilPlan {
-    /// Phase 1: load external data into DuckDB (before SQL).
+    /// Phase 1: named source manifest. Host registers each alias in its
+    /// catalog before executing `sql`.
     pub sources: Vec<SourceDef>,
     /// Phase 2: single SQL query with CTEs.
     pub sql: String,
-    /// Phase 3: write results to external formats (after SQL).
+    /// Phase 3: write results to external formats after SQL execution.
     pub outputs: Vec<OutputDef>,
     /// The relational query for introspection (DCAT, debugging).
     /// Skipped during (de)serialization — see struct doc.
@@ -32,18 +45,20 @@ pub struct FossilPlan {
     pub rq: RelationalQuery,
 }
 
-/// Source data to load before the main SQL query.
+/// One entry in the source manifest.
+///
+/// Tells the host: "before running `sql`, make sure a table named `alias`
+/// exists in the catalog, populated from the source described by `format`
+/// and `path` (plus `params`)." How is entirely the host's call.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceDef {
-    /// Handler name (e.g. "pdf_extract", "docx_extract").
-    pub handler: String,
-    /// Path to the source file.
+    /// Alias used by the SQL query (e.g. `src_csv_1`).
+    pub alias: String,
+    /// Source format as declared in fossil (e.g. `csv`, `parquet`, `pdf`).
+    pub format: String,
+    /// Source path or URI.
     pub path: String,
-    /// Temp table name in DuckDB.
-    pub output_table: String,
-    /// Expected schema: (column_name, type_name).
-    pub schema: Vec<(String, String)>,
-    /// Additional parameters.
+    /// Parameters as passed in the fossil source call (e.g. `delim=","`).
     pub params: HashMap<String, String>,
 }
 
@@ -84,30 +99,22 @@ pub struct OutputResult {
 }
 
 impl FossilPlan {
-    /// Create a plan from a RelationalQuery and a SqlDialect.
-    /// The dialect decides which sources need preprocessing.
-    pub fn from_rq(rq: RelationalQuery, dialect: &dyn SqlDialect) -> Self {
+    /// Create a plan from a [`RelationalQuery`]. Pure projection — no host
+    /// knowledge, no dialect. The source manifest and outputs flow straight
+    /// from the lowered RQ; the SQL is emitted by stringifying the
+    /// sqlparser AST.
+    pub fn from_rq(rq: RelationalQuery) -> Self {
         use crate::rq::to_ast::rq_to_query;
-        let sql = rq_to_query(&rq, dialect).to_string();
+        let sql = rq_to_query(&rq).to_string();
 
         let sources = rq
-            .transforms
+            .sources
             .iter()
-            .filter_map(|t| {
-                if let crate::rq::Transform::Scan { source, .. } = t {
-                    match dialect.scan_strategy(source) {
-                        ScanStrategy::Preprocess { handler, output_table } => Some(SourceDef {
-                            handler,
-                            path: source.path.clone(),
-                            output_table,
-                            schema: vec![],
-                            params: source.params.clone(),
-                        }),
-                        ScanStrategy::TableFactor(_) => None,
-                    }
-                } else {
-                    None
-                }
+            .map(|s| SourceDef {
+                alias: s.alias.value.clone(),
+                format: s.format.clone(),
+                path: s.path.clone(),
+                params: s.params.clone(),
             })
             .collect();
 

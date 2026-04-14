@@ -166,8 +166,9 @@ pub fn rq(db: &dyn Db, file: SourceFile) -> RelationalQuery {
     }
 }
 
-// plan() removed — host generates plan from rq() using its SqlDialect.
-// See FossilPlan::from_rq(rq, dialect).
+// plan() is not a salsa query: FossilPlan is a pure projection of the
+// RelationalQuery, so the host calls `FossilPlan::from_rq(rq)` directly
+// after reading the tracked `rq` query.
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -319,17 +320,17 @@ mod tests {
         let db = FossilDb::default();
         let file = SourceFile::new(&db, "let x = 42".into(), "test".into());
         let r = rq(&db, file);
-        assert!(r.transforms.is_empty());
+        assert!(r.ctes.is_empty());
+        assert!(r.sources.is_empty());
     }
 
     #[test]
     fn plan_literal() {
-        use crate::dialect::DefaultDialect;
         use crate::plan::FossilPlan;
         let db = FossilDb::default();
         let file = SourceFile::new(&db, "let x = 42".into(), "test".into());
         let r = rq(&db, file);
-        let p = FossilPlan::from_rq(r, &DefaultDialect);
+        let p = FossilPlan::from_rq(r);
         assert!(p.sources.is_empty());
     }
 

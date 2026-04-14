@@ -87,7 +87,7 @@ pub fn is_null(expr: Expr, negated: bool) -> Expr {
 }
 
 /// Extract a single-quoted string literal value from an `Expr`, if present.
-/// Used when lowering needs to thread a literal back into `ScanSource.params`.
+/// Used when lowering needs to thread a literal back into `SourceRef.path`.
 pub fn expr_string_lit(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Value(vws) => match &vws.value {
@@ -98,7 +98,7 @@ pub fn expr_string_lit(expr: &Expr) -> Option<&str> {
     }
 }
 
-/// Stringify an `Expr` literal value for use as a `ScanSource` parameter.
+/// Stringify an `Expr` literal value for use as a `SourceRef` parameter.
 /// Returns `None` for non-literal expressions.
 pub fn expr_to_param_string(expr: &Expr) -> Option<String> {
     match expr {
