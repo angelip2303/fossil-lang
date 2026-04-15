@@ -2,6 +2,32 @@ use miette::{Diagnostic, SourceSpan};
 use thiserror::Error;
 
 use crate::ast::Loc;
+use crate::db::Db;
+
+/// Proof that a compilation error has been emitted to the diagnostic
+/// accumulator. Zero-sized; deliberately impossible to construct without
+/// going through [`emit_error`]. Modeled on rustc's `ErrorGuaranteed`
+/// (see `compiler/rustc_errors/src/diagnostic.rs`).
+///
+/// Holding an `ErrorGuaranteed` is a static guarantee that the user will
+/// see at least one diagnostic, which lets downstream code propagate
+/// "tainted" results (e.g. `TyKind::Error(ErrorGuaranteed)`) without having
+/// to re-yell the same problem at every layer.
+///
+/// The inner `()` field is private to this module — outside `error.rs` the
+/// only way to obtain a value is to call [`emit_error`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ErrorGuaranteed(());
+
+/// Emit a `FossilError` into the Salsa diagnostic accumulator and return
+/// proof that it was reported. This is the single public constructor for
+/// [`ErrorGuaranteed`]; every site that wants to taint a downstream value
+/// (for example, build a `Ty::mk_error`) must go through here.
+pub fn emit_error(db: &dyn Db, err: FossilError) -> ErrorGuaranteed {
+    use salsa::Accumulator;
+    crate::db::Diagnostic::from_error(&err).accumulate(db);
+    ErrorGuaranteed(())
+}
 
 impl From<Loc> for SourceSpan {
     fn from(loc: Loc) -> Self {
@@ -45,15 +71,6 @@ pub enum FossilError {
         span: SourceSpan,
         #[label("first defined here")]
         first_def: SourceSpan,
-    },
-
-    #[error("'{name}' is not a {kind}")]
-    #[diagnostic(code(fossil::resolve::not_a))]
-    NotA {
-        kind: &'static str,
-        name: String,
-        #[label("expected a {kind}")]
-        span: SourceSpan,
     },
 
     #[error("type mismatch: {message}")]
@@ -103,15 +120,6 @@ pub enum FossilError {
     Evaluation {
         message: String,
         #[label("error occurred here")]
-        span: SourceSpan,
-    },
-
-    #[error("{provider} provider requires '{name}' argument")]
-    #[diagnostic(code(fossil::provider::missing_arg))]
-    MissingArgument {
-        name: &'static str,
-        provider: &'static str,
-        #[label("missing argument")]
         span: SourceSpan,
     },
 
@@ -193,13 +201,18 @@ pub enum FossilError {
         span: SourceSpan,
     },
 
+    #[error("cyclic definition: {chain}")]
+    #[diagnostic(code(fossil::resolve::cycle))]
+    Cycle {
+        chain: String,
+        #[label("cycle starts here")]
+        span: SourceSpan,
+    },
+
     #[error("IO error: {0}")]
     #[diagnostic(code(fossil::io))]
     Io(#[from] std::io::Error),
 
-    #[error("polars error: {0}")]
-    #[diagnostic(code(fossil::polars))]
-    Polars(#[from] polars::error::PolarsError),
 }
 
 impl FossilError {
@@ -222,8 +235,44 @@ impl FossilError {
         Self::undefined("variable", name, loc)
     }
 
+    pub fn undefined_variable_with_suggestions(
+        name: impl Into<String>,
+        in_scope: impl IntoIterator<Item = String>,
+        loc: Loc,
+    ) -> Self {
+        Self::undefined_with_suggestions("variable", name, in_scope, loc)
+    }
+
     pub fn undefined_path(path: impl Into<String>, loc: Loc) -> Self {
         Self::undefined("path", path, loc)
+    }
+
+    pub fn undefined_path_with_suggestions(
+        path: impl Into<String>,
+        in_scope: impl IntoIterator<Item = String>,
+        loc: Loc,
+    ) -> Self {
+        Self::undefined_with_suggestions("path", path, in_scope, loc)
+    }
+
+    fn undefined_with_suggestions(
+        kind: &'static str,
+        name: impl Into<String>,
+        in_scope: impl IntoIterator<Item = String>,
+        loc: Loc,
+    ) -> Self {
+        let name_str = name.into();
+        let suggestions = closest_matches(&name_str, in_scope, 3);
+        let display = if suggestions.is_empty() {
+            name_str
+        } else {
+            format!("{} (did you mean: {}?)", name_str, suggestions.join(", "))
+        };
+        Self::Undefined { kind, name: display, span: loc.into() }
+    }
+
+    pub fn cycle(chain: impl Into<String>, loc: Loc) -> Self {
+        Self::Cycle { chain: chain.into(), span: loc.into() }
     }
 
     pub fn already_defined(name: impl Into<String>, first: Loc, second: Loc) -> Self {
@@ -238,16 +287,12 @@ impl FossilError {
         Self::undefined("type", path, loc)
     }
 
-    pub fn not_a(kind: &'static str, name: impl Into<String>, loc: Loc) -> Self {
-        Self::NotA {
-            kind,
-            name: name.into(),
-            span: loc.into(),
-        }
-    }
-
-    pub fn not_a_provider(path: impl Into<String>, loc: Loc) -> Self {
-        Self::not_a("provider", path, loc)
+    pub fn undefined_type_with_suggestions(
+        path: impl Into<String>,
+        in_scope: impl IntoIterator<Item = String>,
+        loc: Loc,
+    ) -> Self {
+        Self::undefined_with_suggestions("type", path, in_scope, loc)
     }
 
     pub fn type_mismatch(message: impl Into<String>, loc: Loc) -> Self {
@@ -290,14 +335,6 @@ impl FossilError {
     pub fn evaluation(message: impl Into<String>, loc: Loc) -> Self {
         Self::Evaluation {
             message: message.into(),
-            span: loc.into(),
-        }
-    }
-
-    pub fn missing_argument(name: &'static str, provider: &'static str, loc: Loc) -> Self {
-        Self::MissingArgument {
-            name,
-            provider,
             span: loc.into(),
         }
     }
@@ -378,120 +415,130 @@ impl FossilError {
             span: loc.into(),
         }
     }
-}
 
-pub trait AtLoc {
-    fn at(self, loc: Loc) -> FossilError;
-}
-
-impl AtLoc for std::io::Error {
-    fn at(self, loc: Loc) -> FossilError {
-        FossilError::read_error("<unknown>", self.to_string(), loc)
-    }
-}
-
-impl AtLoc for polars::error::PolarsError {
-    fn at(self, loc: Loc) -> FossilError {
-        FossilError::data_error(self.to_string(), loc)
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct FossilErrors(pub Vec<FossilError>);
-
-impl FossilErrors {
-    pub fn new() -> Self {
-        Self(Vec::new())
-    }
-
-    pub fn push(&mut self, error: impl Into<FossilError>) {
-        self.0.push(error.into());
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn into_result<T>(self, ok: T) -> Result<T, Self> {
-        if self.is_empty() { Ok(ok) } else { Err(self) }
-    }
-}
-
-impl std::fmt::Display for FossilErrors {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} error(s)", self.0.len())
-    }
-}
-
-impl std::error::Error for FossilErrors {}
-
-impl<E: Into<FossilError>> From<E> for FossilErrors {
-    fn from(err: E) -> Self {
-        Self(vec![err.into()])
-    }
-}
-
-impl IntoIterator for FossilErrors {
-    type Item = FossilError;
-    type IntoIter = std::vec::IntoIter<FossilError>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct FossilWarning {
-    pub message: String,
-    pub span: SourceSpan,
-}
-
-impl FossilWarning {
-    pub fn generic(message: impl Into<String>, loc: Loc) -> Self {
-        Self {
-            message: message.into(),
+    /// "Did you mean" undefined source error with Levenshtein-based suggestions.
+    pub fn undefined_source(
+        name: impl Into<String>,
+        available: impl IntoIterator<Item = String>,
+        loc: Loc,
+    ) -> Self {
+        let name_str = name.into();
+        let suggestions = closest_matches(&name_str, available, 3);
+        let display = if suggestions.is_empty() {
+            name_str.clone()
+        } else {
+            format!("{} (did you mean: {}?)", name_str, suggestions.join(", "))
+        };
+        Self::Undefined {
+            kind: "source",
+            name: display,
             span: loc.into(),
         }
     }
+
+    /// "Did you mean" undefined sink error with Levenshtein-based suggestions.
+    pub fn undefined_sink(
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        available: impl IntoIterator<Item = (String, String)>,
+        loc: Loc,
+    ) -> Self {
+        let ns_str = namespace.into();
+        let name_str = name.into();
+        let qualified = format!("{}.{}", ns_str, name_str);
+        let suggestions = closest_matches(
+            &qualified,
+            available.into_iter().map(|(ns, n)| format!("{}.{}", ns, n)),
+            3,
+        );
+        let display = if suggestions.is_empty() {
+            qualified
+        } else {
+            format!(
+                "{}.{} (did you mean: {}?)",
+                ns_str,
+                name_str,
+                suggestions.join(", ")
+            )
+        };
+        Self::Undefined {
+            kind: "sink",
+            name: display,
+            span: loc.into(),
+        }
+    }
+
+    /// Extract (offset, len) from the variant's miette span for Diagnostic accumulator.
+    pub fn span_info(&self) -> Option<(usize, usize)> {
+        let span = match self {
+            Self::Syntax { span, .. }
+            | Self::Undefined { span, .. }
+            | Self::AlreadyDefined { span, .. }
+            | Self::TypeMismatch { span, .. }
+            | Self::ArityMismatch { span, .. }
+            | Self::InfiniteType { span, .. }
+            | Self::FieldNotFound { span, .. }
+            | Self::RecordSizeMismatch { span, .. }
+            | Self::Evaluation { span, .. }
+            | Self::InvalidArgumentType { span, .. }
+            | Self::FileNotFound { span, .. }
+            | Self::NotAFile { span, .. }
+            | Self::InvalidExtension { span, .. }
+            | Self::ReadError { span, .. }
+            | Self::ParseError { span, .. }
+            | Self::DataError { span, .. }
+            | Self::ProviderKindMismatch { span, .. }
+            | Self::Cycle { span, .. }
+            | Self::Internal { span, .. } => Some(span),
+            Self::Io(_) => None,
+        }?;
+        Some((span.offset(), span.len()))
+    }
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct FossilWarnings(pub Vec<FossilWarning>);
-
-impl FossilWarnings {
-    pub fn new() -> Self {
-        Self(Vec::new())
-    }
-
-    pub fn push(&mut self, warning: FossilWarning) {
-        self.0.push(warning);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn extend(&mut self, other: FossilWarnings) {
-        self.0.extend(other.0);
-    }
+/// Levenshtein-based "did you mean" suggestions.
+/// Returns top-N candidates within distance threshold.
+fn closest_matches(
+    input: &str,
+    candidates: impl IntoIterator<Item = String>,
+    max: usize,
+) -> Vec<String> {
+    let mut scored: Vec<(usize, String)> = candidates
+        .into_iter()
+        .map(|c| (levenshtein(input, &c), c))
+        .filter(|(d, _)| *d <= 3) // threshold
+        .collect();
+    scored.sort_by_key(|(d, _)| *d);
+    scored.into_iter().take(max).map(|(_, c)| c).collect()
 }
 
-impl IntoIterator for FossilWarnings {
-    type Item = FossilWarning;
-    type IntoIter = std::vec::IntoIter<FossilWarning>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+/// Simple Levenshtein distance — small fn, no extra dep needed.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let m = a.len();
+    let n = b.len();
+    if m == 0 {
+        return n;
     }
+    if n == 0 {
+        return m;
+    }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -503,35 +550,46 @@ mod tests {
     }
 
     #[test]
-    fn errors_push_and_len() {
-        let mut errors = FossilErrors::new();
+    fn errors_vec_push_and_len() {
+        let mut errors: Vec<FossilError> = Vec::new();
         errors.push(FossilError::syntax("bad token", dummy_loc()));
         errors.push(FossilError::syntax("another error", dummy_loc()));
         assert_eq!(errors.len(), 2);
     }
 
     #[test]
-    fn errors_is_empty() {
-        let mut errors = FossilErrors::new();
-        assert!(errors.is_empty());
-        errors.push(FossilError::syntax("oops", dummy_loc()));
-        assert!(!errors.is_empty());
+    fn cycle_constructor() {
+        let err = FossilError::cycle("A → B → A", dummy_loc());
+        assert!(matches!(err, FossilError::Cycle { ref chain, .. } if chain == "A → B → A"));
     }
 
     #[test]
-    fn errors_into_result_ok() {
-        let errors = FossilErrors::new();
-        let result = errors.into_result(42);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 42);
+    fn undefined_variable_with_suggestions_picks_close_match() {
+        let err = FossilError::undefined_variable_with_suggestions(
+            "fooo",
+            ["foo".to_string(), "bar".to_string(), "qux".to_string()],
+            dummy_loc(),
+        );
+        if let FossilError::Undefined { name, .. } = err {
+            assert!(name.contains("did you mean"));
+            assert!(name.contains("foo"));
+        } else {
+            panic!("expected Undefined variant");
+        }
     }
 
     #[test]
-    fn errors_into_result_err() {
-        let mut errors = FossilErrors::new();
-        errors.push(FossilError::syntax("fail", dummy_loc()));
-        let result = errors.into_result(42);
-        assert!(result.is_err());
+    fn undefined_variable_with_no_close_match_omits_suggestion() {
+        let err = FossilError::undefined_variable_with_suggestions(
+            "totally_unrelated",
+            ["x".to_string(), "y".to_string()],
+            dummy_loc(),
+        );
+        if let FossilError::Undefined { name, .. } = err {
+            assert!(!name.contains("did you mean"));
+        } else {
+            panic!("expected Undefined variant");
+        }
     }
 
     #[test]

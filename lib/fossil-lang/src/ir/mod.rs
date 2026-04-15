@@ -1,85 +1,33 @@
 use crate::ast::Loc;
 use crate::ast::Attribute;
-pub use crate::common::{Literal, Path, PrimitiveType};
-use crate::context::{Arena, DefId, NodeId, Symbol};
+pub use crate::base::common::{Literal, Path, PrimitiveType};
+use crate::db::{DefId, Symbol};
+use la_arena::{Arena, Idx as NodeId};
 
 pub mod resolutions;
-pub mod type_index;
-pub mod typeck_results;
 
 pub use resolutions::Resolutions;
-pub use type_index::{TypeDeclInfo, TypeIndex};
-pub use typeck_results::TypeckResults;
+
+// Type-checker outputs (`TypeIndex`, `TypeDeclInfo`, `TypeckResults`) live in
+// [`crate::ty::typecheck::results`] now — they speak in terms of interned
+// `Ty` instead of per-IR `TypeId` arena indices. Type-level concepts such as
+// `Polytype`, `TypeVar` and the unification-time `Function` / `Var`
+// variants likewise live in [`crate::ty::types`]; the IR keeps only the
+// concrete shapes the lowering pass can produce.
 
 pub type StmtId = NodeId<Stmt>;
 pub type ExprId = NodeId<Expr>;
 pub type TypeId = NodeId<Type>;
 
-#[derive(Debug)]
-pub struct CommonTypes {
-    pub int: TypeId,
-    pub float: TypeId,
-    pub string: TypeId,
-    pub bool: TypeId,
-    pub unit: TypeId,
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Ir {
     pub stmts: Arena<Stmt>,
     pub exprs: Arena<Expr>,
     pub types: Arena<Type>,
     pub root: Vec<StmtId>,
-    pub common: CommonTypes,
 }
 
-impl Default for Ir {
-    fn default() -> Self {
-        let mut types = Arena::default();
-        let int = types.alloc(Type { loc: Loc::generated(), kind: TypeKind::Primitive(PrimitiveType::Int) });
-        let float = types.alloc(Type { loc: Loc::generated(), kind: TypeKind::Primitive(PrimitiveType::Float) });
-        let string = types.alloc(Type { loc: Loc::generated(), kind: TypeKind::Primitive(PrimitiveType::String) });
-        let bool = types.alloc(Type { loc: Loc::generated(), kind: TypeKind::Primitive(PrimitiveType::Bool) });
-        let unit = types.alloc(Type { loc: Loc::generated(), kind: TypeKind::Unit });
-        Self {
-            stmts: Arena::default(),
-            exprs: Arena::default(),
-            types,
-            root: Vec::new(),
-            common: CommonTypes { int, float, string, bool, unit },
-        }
-    }
-}
-
-impl Ir {
-    pub fn int_type(&self) -> TypeId { self.common.int }
-    pub fn float_type(&self) -> TypeId { self.common.float }
-    pub fn string_type(&self) -> TypeId { self.common.string }
-    pub fn bool_type(&self) -> TypeId { self.common.bool }
-    pub fn unit_type(&self) -> TypeId { self.common.unit }
-
-    pub fn fn_type(&mut self, params: Vec<TypeId>, return_type: TypeId) -> TypeId {
-        self.alloc_type(TypeKind::Function(params, return_type))
-    }
-
-    pub fn var_type(&mut self, var: TypeVar) -> TypeId {
-        self.alloc_type(TypeKind::Var(var))
-    }
-
-    pub fn optional_type(&mut self, inner: TypeId) -> TypeId {
-        self.alloc_type(TypeKind::Optional(inner))
-    }
-
-    pub fn named_type(&mut self, def_id: DefId) -> TypeId {
-        self.alloc_type(TypeKind::Named(def_id))
-    }
-
-    pub(crate) fn alloc_type(&mut self, kind: TypeKind) -> TypeId {
-        self.types.alloc(Type { loc: Loc::generated(), kind })
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Stmt {
     pub loc: Loc,
     pub kind: StmtKind,
@@ -112,7 +60,7 @@ pub enum StmtKind {
     Expr(ExprId),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Expr {
     pub loc: Loc,
     pub kind: ExprKind,
@@ -132,8 +80,6 @@ pub enum ExprKind {
     Application {
         callee: ExprId,
         args: Vec<Argument>,
-        /// Resolved type arguments for generic calls: `f<Type1, Type2>(args)`
-        type_args: Vec<crate::context::DefId>,
     },
     Projection {
         source: ExprId,
@@ -182,21 +128,24 @@ impl Argument {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Type {
     pub loc: Loc,
     pub kind: TypeKind,
 }
 
+/// Surface-syntax type kinds. The lowering pass produces these from the AST;
+/// the type checker re-interns them into [`crate::ty::types::Ty`] before
+/// inference. There are deliberately no `Function` / `Var` variants here:
+/// function signatures are constructed directly by the type checker, and
+/// type variables are introduced only by inference.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeKind {
     Named(DefId),
     Unit,
     Primitive(PrimitiveType),
-    Function(Vec<TypeId>, TypeId),
     Optional(TypeId),
     Record(RecordFields),
-    Var(TypeVar),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -226,30 +175,5 @@ impl RecordFields {
 
     pub fn is_empty(&self) -> bool {
         self.fields.is_empty()
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TypeVar(pub usize);
-
-impl std::fmt::Display for TypeVar {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "'t{}", self.0)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Polytype {
-    pub forall: Vec<TypeVar>,
-    pub ty: TypeId,
-}
-
-impl Polytype {
-    pub fn mono(ty: TypeId) -> Self {
-        Polytype { forall: vec![], ty }
-    }
-
-    pub fn poly(forall: Vec<TypeVar>, ty: TypeId) -> Self {
-        Polytype { forall, ty }
     }
 }

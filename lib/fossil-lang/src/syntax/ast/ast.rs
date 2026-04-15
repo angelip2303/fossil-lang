@@ -1,0 +1,150 @@
+use crate::ast::Loc;
+pub use crate::base::common::{Literal, Path, PrimitiveType, MetaArg};
+use crate::db::Symbol;
+use la_arena::{Arena, Idx as NodeId};
+
+pub type StmtId = NodeId<Stmt>;
+pub type ExprId = NodeId<Expr>;
+pub type TypeId = NodeId<Type>;
+
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct Ast {
+    pub stmts: Arena<Stmt>,
+    pub exprs: Arena<Expr>,
+    pub types: Arena<Type>,
+    pub root: Vec<StmtId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Stmt {
+    pub loc: Loc,
+    pub kind: StmtKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConstructorParam {
+    pub name: Symbol,
+    pub ty: TypeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum StmtKind {
+    Let {
+        name: Symbol,
+        value: ExprId,
+    },
+    Type {
+        name: Symbol,
+        ty: TypeId,
+        attrs: Vec<Attribute>,
+        ctor_params: Vec<ConstructorParam>,
+    },
+    Expr(ExprId),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Expr {
+    pub loc: Loc,
+    pub kind: ExprKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ExprKind {
+    Identifier(Path),
+    Unit,
+    Literal(Literal),
+    RecordInstance {
+        type_path: Path,
+        ctor_args: Vec<Argument>,
+        spread: Option<ExprId>,
+        fields: Vec<(Symbol, ExprId)>,
+    },
+    Application {
+        callee: ExprId,
+        args: Vec<Argument>,
+    },
+    Projection {
+        source: ExprId,
+        param: Symbol,
+        outputs: Vec<ExprId>,
+    },
+    Join {
+        left: ExprId,
+        right: ExprId,
+        left_on: Vec<Symbol>,
+        right_on: Vec<Symbol>,
+        suffix: Option<Symbol>,
+    },
+    FieldAccess {
+        expr: ExprId,
+        field: Symbol,
+    },
+    StringInterpolation {
+        parts: Vec<Symbol>,
+        exprs: Vec<ExprId>,
+    },
+    MetaCall {
+        provider: Path,
+        args: Vec<MetaArg>,
+    },
+    /// `expr ?? default` — null coalescing operator.
+    Coalesce {
+        value: ExprId,
+        default: ExprId,
+    },
+    /// `ref Type(args)` — explicit reference to another record type.
+    Ref {
+        type_path: Path,
+        args: Vec<Argument>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Type {
+    pub loc: Loc,
+    pub kind: TypeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TypeKind {
+    Named(Path),
+    Unit,
+    Primitive(PrimitiveType),
+    Optional(TypeId),
+    Record(Vec<RecordField>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Argument {
+    Positional(ExprId),
+    Named { name: Symbol, value: ExprId },
+}
+
+impl Argument {
+    pub fn value(&self) -> ExprId {
+        match self {
+            Argument::Positional(expr) => *expr,
+            Argument::Named { value, .. } => *value,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Attribute {
+    pub name: Symbol,
+    pub args: Vec<AttributeArg>,
+    pub loc: Loc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AttributeArg {
+    Named { key: Symbol, value: Literal },
+    Positional(Literal),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordField {
+    pub name: Symbol,
+    pub ty: TypeId,
+    pub attrs: Vec<Attribute>,
+}
