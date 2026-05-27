@@ -1,8 +1,11 @@
+pub mod from_turtle;
 pub mod metadata;
 pub mod parquet_writer;
 
 // Re-export generic materializer types for external callers (e.g. keasy catalog).
 pub use parquet_writer::{EdgeSpec, VertexSpec, materialize_frames};
+
+pub use from_turtle::RdfFromTurtleFunction;
 
 use std::collections::HashMap;
 

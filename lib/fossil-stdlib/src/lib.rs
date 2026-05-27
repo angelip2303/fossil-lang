@@ -2,7 +2,7 @@ pub mod ops;
 pub mod rdf;
 pub mod string;
 
-pub use rdf::RdfMaterializeFunction;
+pub use rdf::{RdfFromTurtleFunction, RdfMaterializeFunction};
 
 use fossil_lang::passes::GlobalContext;
 use fossil_lang::traits::provider::{FunctionDef, ModuleSpec};
@@ -13,6 +13,7 @@ pub fn init(gcx: &mut GlobalContext) {
     gcx.register_module("Rdf", ModuleSpec {
         functions: vec![
             FunctionDef::new("materialize", RdfMaterializeFunction),
+            FunctionDef::new("from_turtle", RdfFromTurtleFunction),
         ],
     });
 
