@@ -1,6 +1,4 @@
-use std::fs::File;
-use std::io::BufReader;
-use std::path::{Path, PathBuf};
+use std::io::{BufReader, Read};
 
 use fossil_lang::ast::Loc;
 use fossil_lang::error::FossilError;
@@ -12,6 +10,7 @@ use fossil_lang::traits::provider::{
     FunctionDef, ModuleSpec, ProviderArgs, ProviderContext, ProviderInfo, ProviderKind,
     ProviderOutput, ProviderParamInfo, ProviderSchema, TypeProviderImpl,
 };
+use fossil_lang::traits::resolver::ResolvedPath;
 use fossil_lang::traits::source::Source;
 
 use oxttl::TurtleParser;
@@ -25,18 +24,20 @@ const TURTLE_EXTENSIONS: &[&str] = &["ttl"];
 
 #[derive(Debug, Clone)]
 pub struct TurtleSource {
-    pub path: PathBuf,
+    pub resolved: ResolvedPath,
 }
 
 impl TurtleSource {
-    pub fn new(path: PathBuf) -> Self {
-        Self { path }
+    pub fn new(resolved: ResolvedPath) -> Self {
+        Self { resolved }
     }
 }
 
 impl Source for TurtleSource {
     fn scan(&self) -> PolarsResult<LazyFrame> {
-        let df = parse_turtle_to_frame(&self.path)
+        let reader =
+            open_for_read(&self.resolved).map_err(|e| PolarsError::ComputeError(e.into()))?;
+        let df = parse_turtle_to_frame(reader)
             .map_err(|e| PolarsError::ComputeError(e.into()))?;
         Ok(df.lazy())
     }
@@ -52,9 +53,44 @@ impl Source for TurtleSource {
     }
 }
 
-fn parse_turtle_to_frame(path: &Path) -> Result<DataFrame, String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open Turtle file: {e}"))?;
-    let parser = TurtleParser::new().for_reader(BufReader::new(file));
+/// Open a resolved path for reading — local file via `File`, cloud object
+/// downloaded eagerly into memory via Polars' object_store wiring so the
+/// `CloudOptions` carrying host credentials (keasy cloud-accounts) apply.
+fn open_for_read(resolved: &ResolvedPath) -> Result<Box<dyn Read + Send>, String> {
+    match resolved.pl_path().as_ref() {
+        PlPathRef::Local(p) => {
+            let f = std::fs::File::open(p).map_err(|e| format!("open {}: {e}", p.display()))?;
+            Ok(Box::new(f))
+        }
+        _ => {
+            let bytes = download_cloud(resolved)?;
+            Ok(Box::new(std::io::Cursor::new(bytes)))
+        }
+    }
+}
+
+fn download_cloud(resolved: &ResolvedPath) -> Result<Vec<u8>, String> {
+    use polars::io::cloud::{build_object_store, object_path_from_str};
+    use polars::io::pl_async::get_runtime;
+
+    let plpath = resolved.pl_path().clone();
+    let options = resolved.cloud_options().cloned();
+
+    let runtime = get_runtime();
+    runtime
+        .block_on(async move {
+            let (loc, store) =
+                build_object_store(plpath.as_ref(), options.as_ref(), false).await?;
+            let path = object_path_from_str(&loc.prefix)?;
+            let meta = store.head(&path).await?;
+            let bytes = store.get_range(&path, 0..meta.size as usize).await?;
+            PolarsResult::Ok(bytes.to_vec())
+        })
+        .map_err(|e: PolarsError| format!("cloud download: {e}"))
+}
+
+fn parse_turtle_to_frame<R: Read>(reader: R) -> Result<DataFrame, String> {
+    let parser = TurtleParser::new().for_reader(BufReader::new(reader));
 
     let mut subjects: Vec<String> = Vec::new();
     let mut predicates: Vec<String> = Vec::new();
@@ -106,17 +142,9 @@ impl TypeProviderImpl for TurtleProvider {
         validate_extension(path.as_ref(), TURTLE_EXTENSIONS, loc)?;
         validate_path(path.as_ref(), loc)?;
 
-        let local_path = match path.as_ref() {
-            PlPathRef::Local(p) => p.to_path_buf(),
-            _ => {
-                return Err(FossilError::data_error(
-                    "Turtle provider only supports local files".to_string(),
-                    loc,
-                ))
-            }
-        };
-
-        let source = TurtleSource::new(local_path);
+        // Schema is static (subject, predicate, object) so we don't need to
+        // touch the file at compile time, even for cloud paths.
+        let source = TurtleSource::new(resolved.clone());
         let schema = source
             .infer_schema()
             .map_err(|e| FossilError::data_error(e.to_string(), loc))?;
@@ -165,20 +193,11 @@ impl FunctionImpl for TurtleLoadFunction {
             .resolve(&self.raw_path)
             .map_err(|e| FossilError::data_error(e, self.loc))?;
 
-        let local_path = match resolved.pl_path().as_ref() {
-            PlPathRef::Local(p) => p.to_path_buf(),
-            _ => {
-                return Err(FossilError::data_error(
-                    "Turtle provider only supports local files".to_string(),
-                    self.loc,
-                ))
-            }
-        };
-
-        let source = TurtleSource::new(local_path);
+        let source = TurtleSource::new(resolved);
         let frame = source
             .scan()
             .map_err(|e| FossilError::data_error(e.to_string(), self.loc))?;
         Ok(Value::Frame(frame))
     }
 }
+

@@ -12,9 +12,7 @@
 //! has no `rdf:type` declaration (subject is untyped).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs::File;
-use std::io::BufReader;
-use std::path::Path;
+use std::io::{BufReader, Read};
 
 use fossil_lang::error::FossilError;
 use fossil_lang::ir::{Ir, Polytype, TypeVar};
@@ -22,6 +20,7 @@ use fossil_lang::passes::GlobalContext;
 use fossil_lang::runtime::executor::OutputKind;
 use fossil_lang::runtime::value::Value;
 use fossil_lang::traits::function::{FunctionEffect, FunctionImpl, RuntimeContext};
+use fossil_lang::traits::resolver::ResolvedPath;
 
 use oxrdf::{NamedOrBlankNode, Term};
 use oxttl::TurtleParser;
@@ -84,17 +83,8 @@ impl FunctionImpl for RdfFromTurtleFunction {
             .resolve(&output_path)
             .map_err(|e| FossilError::evaluation(e, fossil_lang::ast::Loc::generated()))?;
 
-        let local_in = match resolved_in.pl_path().as_ref() {
-            PlPathRef::Local(p) => p.to_path_buf(),
-            _ => {
-                return Err(FossilError::evaluation(
-                    "Rdf.from_turtle only supports local input files".to_string(),
-                    fossil_lang::ast::Loc::generated(),
-                ));
-            }
-        };
-
-        let (vertex_specs, edge_specs) = parse_and_pivot(&local_in)
+        let reader = open_for_read(&resolved_in)?;
+        let (vertex_specs, edge_specs) = parse_and_pivot(reader)
             .map_err(|e| RdfError::Write(format!("turtle pivot: {e}")))?;
 
         let manifest =
@@ -109,11 +99,62 @@ impl FunctionImpl for RdfFromTurtleFunction {
     }
 }
 
-/// Parse a turtle file and produce VertexSpec/EdgeSpec frames partitioned by
-/// each subject's `rdf:type`.
-fn parse_and_pivot(path: &Path) -> Result<(Vec<VertexSpec>, Vec<EdgeSpec>), String> {
-    let file = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    let parser = TurtleParser::new().for_reader(BufReader::new(file));
+/// Open a resolved path for streaming reads — local files via `File`,
+/// cloud objects downloaded eagerly into memory via Polars' object_store
+/// adapter so credentials/auth in `CloudOptions` apply.
+fn open_for_read(resolved: &ResolvedPath) -> Result<Box<dyn Read + Send>, FossilError> {
+    match resolved.pl_path().as_ref() {
+        PlPathRef::Local(p) => {
+            let f = std::fs::File::open(p).map_err(|e| {
+                FossilError::evaluation(
+                    format!("open {}: {e}", p.display()),
+                    fossil_lang::ast::Loc::generated(),
+                )
+            })?;
+            Ok(Box::new(f))
+        }
+        _ => {
+            let bytes = download_cloud(resolved)?;
+            Ok(Box::new(std::io::Cursor::new(bytes)))
+        }
+    }
+}
+
+/// Pull a cloud object's bytes via Polars' built-in object_store wiring.
+/// Reuses the same `CloudOptions` that travel with `ResolvedPath`, so AWS /
+/// Azure / GCS credentials configured by the host (keasy cloud-accounts)
+/// apply transparently.
+fn download_cloud(resolved: &ResolvedPath) -> Result<Vec<u8>, FossilError> {
+    use polars::io::cloud::{build_object_store, object_path_from_str};
+    use polars::io::pl_async::get_runtime;
+
+    let plpath = resolved.pl_path().clone();
+    let options = resolved.cloud_options().cloned();
+
+    let runtime = get_runtime();
+    runtime
+        .block_on(async move {
+            let (loc, store) =
+                build_object_store(plpath.as_ref(), options.as_ref(), false).await?;
+            let path = object_path_from_str(&loc.prefix)?;
+            let meta = store.head(&path).await?;
+            let bytes = store
+                .get_range(&path, 0..meta.size as usize)
+                .await?;
+            PolarsResult::Ok(bytes.to_vec())
+        })
+        .map_err(|e: PolarsError| {
+            FossilError::evaluation(
+                format!("cloud download: {e}"),
+                fossil_lang::ast::Loc::generated(),
+            )
+        })
+}
+
+/// Parse a turtle stream and produce VertexSpec/EdgeSpec frames partitioned
+/// by each subject's `rdf:type`.
+fn parse_and_pivot<R: Read>(reader: R) -> Result<(Vec<VertexSpec>, Vec<EdgeSpec>), String> {
+    let parser = TurtleParser::new().for_reader(BufReader::new(reader));
 
     // Pass 1: collect everything in memory, separate type declarations.
     let mut subject_type: HashMap<String, String> = HashMap::new();
